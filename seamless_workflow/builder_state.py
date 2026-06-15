@@ -131,7 +131,11 @@ class WorkflowTransformerPins:
         self.__setitem__(name, value)
 
     def __setitem__(self, key: str, value: Any) -> None:
-        self._context._set_transformer_pin(self._node_path, (str(key),), value)
+        path = (str(key),)
+        if self._context._is_bound_source(value):
+            self._context._add_edge(self._context._source_path(value), self._node_path + path)
+        else:
+            self._context._set_transformer_pin(self._node_path, path, value)
 
     def __delattr__(self, name: str) -> None:
         if name.startswith("_"):

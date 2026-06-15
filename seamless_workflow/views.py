@@ -139,6 +139,8 @@ class CellPinsView:
         path = (str(key),)
         if value is None:
             self._context._delete_cell_path(self._node_path, path)
+        elif self._context._is_bound_source(value):
+            self._context._add_edge(self._context._source_path(value), self._node_path + path)
         else:
             self._context._set_cell_value(self._node_path, path, value)
 
@@ -146,7 +148,15 @@ class CellPinsView:
         self._context._delete_cell_path(self._node_path, (str(key),))
 
     def update(self, mapping) -> None:
-        self._context._set_cell_values(self._node_path, {(str(k),): v for k, v in mapping.items()})
+        constants = {}
+        for key, value in mapping.items():
+            path = (str(key),)
+            if self._context._is_bound_source(value):
+                self._context._add_edge(self._context._source_path(value), self._node_path + path)
+            else:
+                constants[path] = value
+        if constants:
+            self._context._set_cell_values(self._node_path, constants)
 
 
 class CellPinView:
@@ -164,7 +174,10 @@ class CellPinView:
         return self._context._get_value(self._node_path, self._path)
 
     def set(self, value):
-        self._context._set_cell_value(self._node_path, self._path, value)
+        if self._context._is_bound_source(value):
+            self._context._add_edge(self._context._source_path(value), self._node_path + self._path)
+        else:
+            self._context._set_cell_value(self._node_path, self._path, value)
 
     def set_checksum(self, checksum):
         self._context._set_cell_checksum(self._node_path, self._path, checksum)
@@ -203,11 +216,23 @@ class TransformerView:
     def pins(self):
         return TransformerPinsView(self._context, self._node_path)
 
+    @property
+    def scratch(self):
+        return self._context._graph.nodes[self._node_path].transformer_config.scratch
+
+    @scratch.setter
+    def scratch(self, value):
+        self._context._graph.nodes[self._node_path].transformer_config.scratch = bool(value)
+
     def __getitem__(self, key: str):
         return TransformerPinView(self._context, self._node_path, (str(key),))
 
     def __setitem__(self, key: str, value):
-        self._context._set_transformer_pin(self._node_path, (str(key),), value)
+        path = (str(key),)
+        if self._context._is_bound_source(value):
+            self._context._add_edge(self._context._source_path(value), self._node_path + path)
+        else:
+            self._context._set_transformer_pin(self._node_path, path, value)
 
     def __getattr__(self, name: str):
         if name.startswith("_"):
@@ -220,6 +245,9 @@ class TransformerView:
     def __setattr__(self, name: str, value):
         if name.startswith("_"):
             object.__setattr__(self, name, value)
+            return
+        if name == "scratch":
+            self._context._graph.nodes[self._node_path].transformer_config.scratch = bool(value)
             return
         cfg = self._context._graph.nodes[self._node_path].transformer_config
         if name in cfg.pins and not hasattr(type(self), name):
@@ -262,7 +290,11 @@ class TransformerInputView:
         if name.startswith("_"):
             object.__setattr__(self, name, value)
             return
-        self._context._set_transformer_pin(self._node_path, (name,), value)
+        path = (name,)
+        if self._context._is_bound_source(value):
+            self._context._add_edge(self._context._source_path(value), self._node_path + path)
+        else:
+            self._context._set_transformer_pin(self._node_path, path, value)
 
 
 class TransformerPinsView(TransformerInputView):
@@ -270,7 +302,11 @@ class TransformerPinsView(TransformerInputView):
         return TransformerPinView(self._context, self._node_path, (str(key),))
 
     def __setitem__(self, key: str, value):
-        self._context._set_transformer_pin(self._node_path, (str(key),), value)
+        path = (str(key),)
+        if self._context._is_bound_source(value):
+            self._context._add_edge(self._context._source_path(value), self._node_path + path)
+        else:
+            self._context._set_transformer_pin(self._node_path, path, value)
 
 
 class TransformerPinView:
@@ -288,12 +324,25 @@ class TransformerPinView:
         return self._context._get_transformer_pin_value(self._node_path, self._path)
 
     def set(self, value):
-        self._context._set_transformer_pin(self._node_path, self._path, value)
+        if self._context._is_bound_source(value):
+            self._context._add_edge(self._context._source_path(value), self._node_path + self._path)
+        else:
+            self._context._set_transformer_pin(self._node_path, self._path, value)
 
     def __getattr__(self, name: str):
         if name.startswith("_"):
             raise AttributeError(name)
         return TransformerPinView(self._context, self._node_path, self._path + (name,))
+
+    def __setattr__(self, name: str, value):
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        path = self._path + (name,)
+        if self._context._is_bound_source(value):
+            self._context._add_edge(self._context._source_path(value), self._node_path + path)
+        else:
+            self._context._set_transformer_pin(self._node_path, path, value)
 
 
 __all__ = [

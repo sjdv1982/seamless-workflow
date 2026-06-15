@@ -188,7 +188,21 @@ class Context:
         )
         node.cell_overlay = Overlay()
         input_ref = cell.input_ref
-        if input_ref is not None:
+        if isinstance(input_ref, Cell):
+            if input_ref._workflow_backend is not None:
+                if input_ref._workflow_backend.context is not self:
+                    raise DependencyError("Cross-top-level dependencies are not supported")
+                self._add_edge(
+                    input_ref._workflow_backend.node_path + input_ref._workflow_backend.owner_path,
+                    path,
+                )
+            else:
+                upstream_path = self._graph.first_free("cell")
+                self._create_cell_from_builder(upstream_path, input_ref)
+                self._add_edge(upstream_path, path)
+        elif self._is_bound_source(input_ref):
+            self._add_edge(self._source_path(input_ref), path)
+        elif input_ref is not None:
             self._set_cell_value(path, (), input_ref)
         cell._workflow_backend = BoundCellBackend(self, path)
 
@@ -360,12 +374,20 @@ class Context:
 
     def _source_path(self, value: Any) -> tuple[str, ...]:
         if isinstance(value, CellView):
+            if value._context is not self:
+                raise DependencyError("Cross-top-level dependencies are not supported")
             return value._node_path
         if isinstance(value, TransformerResultView):
+            if value._context is not self:
+                raise DependencyError("Cross-top-level dependencies are not supported")
             return value._node_path
         if isinstance(value, TransformerView):
+            if value._context is not self:
+                raise DependencyError("Cross-top-level dependencies are not supported")
             return value._node_path
         if isinstance(value, Cell) and value._workflow_backend is not None:
+            if value._workflow_backend.context is not self:
+                raise DependencyError("Cross-top-level dependencies are not supported")
             return value._workflow_backend.node_path + value._workflow_backend.owner_path
         raise DependencyError(value)
 
@@ -416,6 +438,7 @@ class Context:
             if local == ():
                 node.cell_overlay.entries.clear()
             else:
+                node.cell_overlay.entries.pop((), None)
                 node.cell_overlay.entries.pop(local, None)
         elif local:
             overlay = node.transformer_pin_overlays.get(local[0])
@@ -507,16 +530,13 @@ class Context:
         for pin in sorted(cfg.pins):
             if pin in cfg.optional_pins:
                 continue
-            state_checksum = incoming.get((pin,))
-            overlay = node.transformer_pin_overlays.get(pin)
-            checksum = overlay.entries.get((), None).checksum if overlay and () in overlay.entries else None
-            if state_checksum is not None:
-                state, checksum = state_checksum
-                if state != "complete":
-                    node.state = "blocked" if state in {"blocked", "failed", "unwired"} else "waiting"
-                    node.block_reason = "blocked-by-error" if state == "failed" else "blocked-by-unwired"
-                    node.current_checksum = None
-                    return
+            checksum = self._assembled_pin_checksum(path, pin, incoming)
+            if isinstance(checksum, tuple):
+                state = checksum[0]
+                node.state = "blocked" if state in {"blocked", "failed", "unwired"} else "waiting"
+                node.block_reason = "blocked-by-error" if state == "failed" else "blocked-by-unwired"
+                node.current_checksum = None
+                return
             if checksum is None:
                 node.state = "unwired"
                 node.current_checksum = None
@@ -539,6 +559,41 @@ class Context:
             node.current_checksum = None
             node.state = "failed"
             node.block_reason = None
+
+    def _assembled_pin_checksum(self, node_path: NodePath, pin: str, incoming):
+        node = self._graph.nodes[node_path]
+        cfg = node.transformer_config
+        overlay = node.transformer_pin_overlays.get(pin)
+        if overlay and () in overlay.entries:
+            return overlay.entries[()].checksum
+        if (pin,) in incoming:
+            state, checksum = incoming[(pin,)]
+            return checksum if state == "complete" else (state, None)
+        pieces = {}
+        has_piece = False
+        if overlay:
+            for local, producer in sorted(overlay.entries.items()):
+                if not local:
+                    continue
+                has_piece = True
+                cursor = pieces
+                for part in local[:-1]:
+                    cursor = cursor.setdefault(part, {})
+                cursor[local[-1]] = value_for_checksum(producer.checksum, producer.celltype)
+        for local, (state, checksum) in sorted(incoming.items()):
+            if not local or local[0] != pin or len(local) == 1:
+                continue
+            has_piece = True
+            if state != "complete":
+                return (state, None)
+            subpath = local[1:]
+            cursor = pieces
+            for part in subpath[:-1]:
+                cursor = cursor.setdefault(part, {})
+            cursor[subpath[-1]] = value_for_checksum(checksum, cfg.celltypes.get(pin, "mixed"))
+        if not has_piece:
+            return None
+        return checksum_for_value(pieces, cfg.celltypes.get(pin, "mixed"))
 
     def _incoming_values(self, path: NodePath) -> dict[tuple[str, ...], tuple[str, Checksum | None]]:
         result = {}
@@ -670,6 +725,13 @@ class Context:
                     "pins": {pin: {"celltype": cfg.celltypes.get(pin, "mixed")} for pin in sorted(cfg.pins)},
                     "optional_pins": sorted(cfg.optional_pins),
                     "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None},
+                    "overlays": {
+                        pin: [
+                            {"path": list(local), "checksum": producer.checksum.hex(), "celltype": producer.celltype}
+                            for local, producer in sorted(overlay.entries.items())
+                        ]
+                        for pin, overlay in sorted(node.transformer_pin_overlays.items())
+                    },
                 }
             if runtime:
                 entry["runtime"] = {
@@ -710,7 +772,18 @@ class Context:
                     optional_pins=set(entry.get("optional_pins", [])),
                 )
                 cfg.celltypes.setdefault("result", "mixed")
-                self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg, transformer_pin_overlays={})
+                overlays = {}
+                for pin, producers in entry.get("overlays", {}).items():
+                    overlays[pin] = Overlay(
+                        {
+                            tuple(producer["path"]): ConstantProducer(
+                                Checksum(producer["checksum"]),
+                                producer.get("celltype", cfg.celltypes.get(pin, "mixed")),
+                            )
+                            for producer in producers
+                        }
+                    )
+                self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg, transformer_pin_overlays=overlays)
         for edge in graph.get("connections", []):
             self._graph.edges.append(Edge(tuple(edge["source"]), tuple(edge["target"])))
         self._derive_all()
