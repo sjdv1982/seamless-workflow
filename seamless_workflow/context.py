@@ -11,7 +11,7 @@ from uuid import uuid4
 from seamless import Buffer, Cell, Checksum
 
 from .adapters import buffer_for_checksum, checksum_for_value, normalize_checksum, value_for_checksum
-from .builder_state import BoundCellBackend
+from .builder_state import BoundCellBackend, BoundTransformerBackend
 from .errors import AuthorityError, DependencyError, NodeError, PathError
 from .graph import (
     CellConfig,
@@ -211,12 +211,16 @@ class Context:
             self._graph.nodes[path].transformer_pin_overlays["code"] = Overlay(
                 {(): ConstantProducer(cfg.code_checksum, "python" if cfg.language == "python" else "text")}
             )
+        for pin, value in transformer._args.items():
+            self._set_transformer_pin(path, (pin,), value)
+        transformer._workflow_backend = BoundTransformerBackend(self, path)
 
     def _replace_transformer_from_builder(self, path: NodePath, transformer) -> None:
         old = self._graph.nodes[path].transformer_config
         new = self._transformer_config_from_builder(transformer)
         new.pins.update(old.pins)
         self._graph.nodes[path].transformer_config = new
+        transformer._workflow_backend = BoundTransformerBackend(self, path)
 
     def _transformer_config_from_code(self, code: Any) -> TransformerConfig:
         cfg = TransformerConfig(code=code, callable=code if callable(code) else None)
@@ -237,6 +241,7 @@ class Context:
         cfg.language = transformer.language
         cfg.code = transformer.code
         cfg.code_checksum = transformer.code.get_checksum()
+        cfg.callable = getattr(transformer, "_workflow_callable", None)
         cfg.pins = {k for k in transformer._celltypes if k != "result"}
         cfg.celltypes = dict(transformer._celltypes)
         cfg.optional_pins = set(transformer.optional_pins)

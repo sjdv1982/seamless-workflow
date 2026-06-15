@@ -111,4 +111,181 @@ class StandaloneCellPins:
         self.values: dict[str, Any] = {}
 
 
-__all__ = ["BoundCellBackend", "StandaloneCellPins"]
+class WorkflowTransformerPins:
+    def __init__(self, context, node_path: tuple[str, ...]) -> None:
+        object.__setattr__(self, "_context", context)
+        object.__setattr__(self, "_node_path", node_path)
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self._context._get_transformer_pin_value(self._node_path, (name,))
+
+    def __getitem__(self, key: str):
+        return self._context._get_transformer_pin_value(self._node_path, (str(key),))
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        self.__setitem__(name, value)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._context._set_transformer_pin(self._node_path, (str(key),), value)
+
+    def __delattr__(self, name: str) -> None:
+        if name.startswith("_"):
+            object.__delattr__(self, name)
+            return
+        self.__delitem__(name)
+
+    def __delitem__(self, key: str) -> None:
+        self._context._delete_transformer_pin(self._node_path, (str(key),))
+
+
+class WorkflowCelltypes:
+    def __init__(self, context, node_path: tuple[str, ...]) -> None:
+        object.__setattr__(self, "_context", context)
+        object.__setattr__(self, "_node_path", node_path)
+
+    @property
+    def _cfg(self):
+        return self._context._graph.nodes[self._node_path].transformer_config
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self._cfg.celltypes[name]
+
+    def __getitem__(self, key: str):
+        return self._cfg.celltypes[str(key)]
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        self.__setitem__(name, value)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._cfg.celltypes[str(key)] = str(value)
+        if key != "result":
+            self._cfg.pins.add(str(key))
+        self._context._derive_all()
+
+
+class BoundTransformerBackend:
+    def __init__(self, context, node_path: tuple[str, ...]) -> None:
+        self.context = context
+        self.node_path = node_path
+
+    @property
+    def cfg(self):
+        return self.context._graph.nodes[self.node_path].transformer_config
+
+    @property
+    def language(self):
+        return self.cfg.language
+
+    @language.setter
+    def language(self, value):
+        self.cfg.language = "python" if value is None else value
+        self.context._derive_all()
+
+    @property
+    def code(self):
+        return self.cfg.code
+
+    @code.setter
+    def code(self, value):
+        self.context._set_transformer_code(self.node_path, value)
+
+    @property
+    def pins(self):
+        return WorkflowTransformerPins(self.context, self.node_path)
+
+    args = pins
+
+    @property
+    def celltypes(self):
+        return WorkflowCelltypes(self.context, self.node_path)
+
+    @property
+    def optional_pins(self):
+        return self.cfg.optional_pins
+
+    @optional_pins.setter
+    def optional_pins(self, value):
+        self.cfg.optional_pins = set(value or ())
+        self.context._derive_all()
+
+    @property
+    def modules(self):
+        return self.cfg.modules
+
+    @property
+    def globals(self):
+        return self.cfg.globals
+
+    @property
+    def environment(self):
+        return self.cfg.environment
+
+    @property
+    def meta(self):
+        return self.cfg.meta
+
+    @meta.setter
+    def meta(self, value):
+        self.cfg.meta.update(value)
+
+    @property
+    def scratch(self):
+        return self.cfg.scratch
+
+    @scratch.setter
+    def scratch(self, value):
+        self.cfg.scratch = bool(value)
+
+    @property
+    def direct_print(self):
+        return self.cfg.direct_print
+
+    @direct_print.setter
+    def direct_print(self, value):
+        self.cfg.direct_print = bool(value)
+
+    @property
+    def local(self):
+        return self.cfg.local
+
+    @local.setter
+    def local(self, value):
+        self.cfg.local = value
+        self.cfg.meta["local"] = value
+
+    def call(self, *args, **kwargs):
+        cfg = self.cfg
+        signature = None
+        if callable(cfg.callable):
+            import inspect
+
+            signature = inspect.signature(cfg.callable)
+        if signature is not None:
+            bound = signature.bind_partial(*args, **kwargs).arguments
+            for name, value in bound.items():
+                self.context._set_transformer_pin(self.node_path, (name,), value)
+        elif args:
+            raise TypeError("No function signature: positional arguments not supported")
+        else:
+            for name, value in kwargs.items():
+                self.context._set_transformer_pin(self.node_path, (name,), value)
+        return self.context._compute_node(self.node_path)
+
+
+__all__ = [
+    "BoundCellBackend",
+    "BoundTransformerBackend",
+    "StandaloneCellPins",
+    "WorkflowCelltypes",
+    "WorkflowTransformerPins",
+]
