@@ -38,3 +38,6 @@ Issues = "https://github.com/sjdv1982/seamless/issues"
 where = ["."]
 include = ["seamless_workflow*"]
 exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
