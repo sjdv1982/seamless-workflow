@@ -668,11 +668,24 @@ class Context:
     def _compute_node(self, node_path: NodePath):
         node = self._graph.nodes[node_path]
         if not self.eager:
+            upstream = self._upstream_cone(node_path)
             node.active_count += 1
+            for upstream_path in upstream:
+                self._graph.nodes[upstream_path].derived_active_count += 1
             try:
                 self._derive_all()
+                if node.state == "unwired":
+                    raise NodeError("Node is unwired")
+                if node.state == "blocked":
+                    raise NodeError(f"Node is blocked: {node.block_reason}")
+                if node.state == "failed":
+                    raise node.exception
+                return self._get_value(node_path, ())
             finally:
                 node.active_count -= 1
+                for upstream_path in upstream:
+                    self._graph.nodes[upstream_path].derived_active_count -= 1
+                self._derive_all()
         if node.state == "unwired":
             raise NodeError("Node is unwired")
         if node.state == "blocked":
@@ -680,6 +693,23 @@ class Context:
         if node.state == "failed":
             raise node.exception
         return self._get_value(node_path, ())
+
+    def _upstream_cone(self, node_path: NodePath) -> set[NodePath]:
+        result: set[NodePath] = set()
+        stack = [node_path]
+        while stack:
+            current = stack.pop()
+            for edge in self._graph.edges:
+                try:
+                    source, _ = self._graph.resolve_existing(edge.source)
+                    target, _ = self._graph.resolve_existing(edge.target)
+                except KeyError:
+                    continue
+                if target == current and source not in result:
+                    result.add(source)
+                    stack.append(source)
+        result.discard(node_path)
+        return result
 
     def _build_cell_expression(self, node_path, local, input_ref):
         from seamless import Expression

@@ -91,11 +91,11 @@ class CellView:
 
     run = compute
 
-    def prune(self):
-        return self._context.prune(self._node_path)
-
     def clear_exception(self):
         return self._context._clear_exception(self._node_path)
+
+    def prune(self):
+        return self._context.prune(self._node_path)
 
     def __getitem__(self, key: str):
         return CellPinView(self._context, self._node_path, (str(key),))
@@ -259,6 +259,9 @@ class TransformerView:
         return self._context._compute_node(self._node_path)
 
     run = compute
+
+    def clear_exception(self):
+        return self._context._clear_exception(self._node_path)
 
 
 class TransformerResultView(CellView):
