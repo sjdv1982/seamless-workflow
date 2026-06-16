@@ -306,14 +306,30 @@ class BoundTransformerBackend:
 
             signature = inspect.signature(cfg.callable)
         if signature is not None:
-            bound = signature.bind_partial(*args, **kwargs).arguments
-            for name, value in bound.items():
-                self.context._set_transformer_pin(self.node_path, (name,), value)
-        elif args:
+            explicit = signature.bind_partial(*args, **kwargs).arguments
+            merged = {}
+            for name, parameter in signature.parameters.items():
+                if name in explicit:
+                    merged[name] = explicit[name]
+                    continue
+                value = self.context._get_transformer_pin_value(self.node_path, (name,))
+                if value is not None:
+                    merged[name] = value
+                elif parameter.default is not parameter.empty:
+                    merged[name] = parameter.default
+            return cfg.callable(**signature.bind(**merged).arguments)
+        if args:
             raise TypeError("No function signature: positional arguments not supported")
-        else:
-            for name, value in kwargs.items():
-                self.context._set_transformer_pin(self.node_path, (name,), value)
+        if kwargs:
+            merged = {
+                pin: self.context._get_transformer_pin_value(self.node_path, (pin,))
+                for pin in cfg.pins
+                if self.context._get_transformer_pin_value(self.node_path, (pin,)) is not None
+            }
+            merged.update(kwargs)
+            if cfg.callable is None:
+                raise TypeError("Bound text transformers cannot be called with ad-hoc pins")
+            return cfg.callable(**merged)
         return self.context._compute_node(self.node_path)
 
 
