@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+from hashlib import sha256
 from types import FunctionType
 from typing import Any
 from uuid import uuid4
@@ -23,6 +24,7 @@ from .graph import (
     Overlay,
     TransformerConfig,
 )
+from .scheduler import ContextRuntime, ExceptionInfo, RunRecord
 from .views import CellView, MissingView, SubContextView, TransformerResultView, TransformerView
 
 PIN_CELLTYPES = {"plain", "mixed", "deepcell", "deepfolder", "folder"}
@@ -34,6 +36,7 @@ class Context:
     def __init__(self, eager: bool = True) -> None:
         object.__setattr__(self, "top_id", uuid4().hex)
         object.__setattr__(self, "_graph", ContextGraph())
+        object.__setattr__(self, "_runtime", ContextRuntime())
         object.__setattr__(self, "eager", eager)
         object.__setattr__(self, "_prefix", ())
 
@@ -139,6 +142,8 @@ class Context:
         if path in self._graph.nodes:
             for node_path in self._graph.descendants(path):
                 self._graph.nodes.pop(node_path, None)
+                self._runtime.current_runs.pop(node_path, None)
+                self._runtime.superseded_runs.pop(node_path, None)
             removed = True
         if path in self._graph.namespaces:
             self._graph.namespaces = {p for p in self._graph.namespaces if p[: len(path)] != path}
@@ -476,11 +481,47 @@ class Context:
 
     def _derive_node(self, path: NodePath) -> None:
         node = self._graph.nodes[path]
+        old_identity = self._run_identity(path, node)
         node.exception = None
         if node.kind == "cell":
             self._derive_cell(path, node)
         else:
             self._derive_transformer(path, node)
+        self._sync_run_record(path, old_identity, node)
+
+    def _run_identity(self, path: NodePath, node: Node) -> str | None:
+        checksum = node.current_checksum.hex() if node.current_checksum else ""
+        return f"{node.kind}:{'.'.join(path)}:{node.state}:{checksum}"
+
+    def _identity_checksum(self, identity: str | None) -> Checksum | None:
+        if identity is None:
+            return None
+        return Checksum(sha256(identity.encode()).digest())
+
+    def _sync_run_record(self, path: NodePath, old_identity: str | None, node: Node) -> None:
+        new_identity = self._run_identity(path, node)
+        current = self._runtime.current_runs.get(path)
+        current_identity = (
+            current.identity_checksum.hex() if current and current.identity_checksum else None
+        )
+        new_identity_checksum = self._identity_checksum(new_identity)
+        new_identity_hex = new_identity_checksum.hex() if new_identity_checksum else None
+        if current is not None and current_identity != new_identity_hex:
+            self._runtime.supersede(path)
+        if node.state in {"complete", "failed", "computing"}:
+            exception = ExceptionInfo.from_exception(node.exception) if node.exception else None
+            phase = "completed" if node.state in {"complete", "failed"} else "running"
+            self._runtime.current_runs[path] = RunRecord(
+                node_path=path,
+                et=new_identity,
+                identity_checksum=new_identity_checksum,
+                result_checksum=node.current_checksum,
+                exception=exception,
+                phase=phase,
+                generation=self._runtime.next_generation(),
+            )
+        else:
+            self._runtime.current_runs.pop(path, None)
 
     def _derive_cell(self, path: NodePath, node: Node) -> None:
         overlay = node.cell_overlay.entries
@@ -528,9 +569,9 @@ class Context:
         kwargs = {}
         incoming = self._incoming_values(path)
         for pin in sorted(cfg.pins):
-            if pin in cfg.optional_pins:
-                continue
             checksum = self._assembled_pin_checksum(path, pin, incoming)
+            if pin in cfg.optional_pins and checksum is None:
+                continue
             if isinstance(checksum, tuple):
                 state = checksum[0]
                 node.state = "blocked" if state in {"blocked", "failed", "unwired"} else "waiting"
@@ -723,11 +764,33 @@ class Context:
     def _clear_exception(self, node_path: NodePath):
         node = self._graph.nodes[node_path]
         node.exception = None
+        record = self._runtime.current_runs.get(node_path)
+        if record is not None:
+            record.exception = None
         self._derive_all()
         return None
 
     def prune(self, node_path: NodePath | None = None):
-        return None
+        paths = None
+        if node_path is not None:
+            paths = {node_path} | self._downstream_cone(node_path)
+        return {"cancelled": self._runtime.prune(paths)}
+
+    def _downstream_cone(self, node_path: NodePath) -> set[NodePath]:
+        result: set[NodePath] = set()
+        stack = [node_path]
+        while stack:
+            current = stack.pop()
+            for edge in self._graph.edges:
+                try:
+                    source, _ = self._graph.resolve_existing(edge.source)
+                    target, _ = self._graph.resolve_existing(edge.target)
+                except KeyError:
+                    continue
+                if source == current and target not in result:
+                    result.add(target)
+                    stack.append(target)
+        return result
 
     def translate(self):
         return None
@@ -769,6 +832,7 @@ class Context:
                     "block_reason": node.block_reason,
                     "checksum": node.current_checksum.hex() if node.current_checksum else None,
                     "exception": type(node.exception).__name__ if node.exception else None,
+                    "run": self._runtime_graph_entry(path),
                 }
             nodes.append(entry)
         return {
@@ -783,6 +847,7 @@ class Context:
 
     def set_graph(self, graph: dict[str, Any]) -> None:
         self._graph = ContextGraph()
+        self._runtime = ContextRuntime()
         self.eager = graph.get("params", {}).get("eager", True)
         for entry in graph.get("nodes", []):
             path = tuple(entry["path"])
@@ -817,6 +882,40 @@ class Context:
         for edge in graph.get("connections", []):
             self._graph.edges.append(Edge(tuple(edge["source"]), tuple(edge["target"])))
         self._derive_all()
+
+    def _runtime_graph_entry(self, path: NodePath) -> dict[str, Any]:
+        current = self._runtime.current_runs.get(path)
+        superseded = self._runtime.superseded_runs.get(path, ())
+        return {
+            "current": None
+            if current is None
+            else {
+                "identity": current.identity_checksum.hex()
+                if current.identity_checksum
+                else None,
+                "result": current.result_checksum.hex() if current.result_checksum else None,
+                "phase": current.phase,
+                "generation": current.generation,
+                "exception": None
+                if current.exception is None
+                else {"type": current.exception.type, "message": current.exception.message},
+            },
+            "superseded": [
+                {
+                    "identity": record.identity_checksum.hex()
+                    if record.identity_checksum
+                    else None,
+                    "result": record.result_checksum.hex()
+                    if record.result_checksum
+                    else None,
+                    "phase": record.phase,
+                    "generation": record.generation,
+                    "hold_kind": record.hold_kind,
+                    "hold_deadline": record.hold_deadline,
+                }
+                for record in superseded
+            ],
+        }
 
     def _copy_subcontext(self, source_prefix: NodePath, target_prefix: NodePath) -> None:
         self._graph.namespaces.add(target_prefix)

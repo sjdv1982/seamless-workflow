@@ -107,8 +107,39 @@ class BoundCellBackend:
 
 
 class StandaloneCellPins:
-    def __init__(self) -> None:
-        self.values: dict[str, Any] = {}
+    def __init__(self, owner=None) -> None:
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "values", {})
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self.values.get(name)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.values.get(str(key))
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_") or name == "values":
+            object.__setattr__(self, name, value)
+            return
+        self.values[name] = value
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.values[str(key)] = value
+
+    def __delattr__(self, name: str) -> None:
+        if name.startswith("_"):
+            object.__delattr__(self, name)
+            return
+        self.values.pop(name, None)
+
+    def __delitem__(self, key: str) -> None:
+        self.values.pop(str(key), None)
+
+    def update(self, mapping) -> None:
+        for key, value in mapping.items():
+            self.values[str(key)] = value
 
 
 class WorkflowTransformerPins:

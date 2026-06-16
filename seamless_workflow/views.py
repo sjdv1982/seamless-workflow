@@ -217,6 +217,16 @@ class TransformerView:
         return TransformerPinsView(self._context, self._node_path)
 
     @property
+    def optional_pins(self):
+        return self._context._graph.nodes[self._node_path].transformer_config.optional_pins
+
+    @optional_pins.setter
+    def optional_pins(self, value):
+        cfg = self._context._graph.nodes[self._node_path].transformer_config
+        cfg.optional_pins = set(value or ())
+        self._context._derive_all()
+
+    @property
     def scratch(self):
         return self._context._graph.nodes[self._node_path].transformer_config.scratch
 
@@ -248,6 +258,11 @@ class TransformerView:
             return
         if name == "scratch":
             self._context._graph.nodes[self._node_path].transformer_config.scratch = bool(value)
+            return
+        if name == "optional_pins":
+            cfg = self._context._graph.nodes[self._node_path].transformer_config
+            cfg.optional_pins = set(value or ())
+            self._context._derive_all()
             return
         cfg = self._context._graph.nodes[self._node_path].transformer_config
         if name in cfg.pins and not hasattr(type(self), name):
