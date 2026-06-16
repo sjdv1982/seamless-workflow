@@ -506,6 +506,11 @@ class Context:
         )
         new_identity_checksum = self._identity_checksum(new_identity)
         new_identity_hex = new_identity_checksum.hex() if new_identity_checksum else None
+        if current is not None and current_identity == new_identity_hex:
+            current.result_checksum = node.current_checksum
+            current.exception = ExceptionInfo.from_exception(node.exception) if node.exception else None
+            current.phase = "completed" if node.state in {"complete", "failed"} else "running"
+            return
         if current is not None and current_identity != new_identity_hex:
             self._runtime.supersede(path)
         if node.state in {"complete", "failed", "computing"}:

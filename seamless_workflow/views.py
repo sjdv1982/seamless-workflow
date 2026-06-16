@@ -266,7 +266,20 @@ class TransformerView:
             return
         cfg = self._context._graph.nodes[self._node_path].transformer_config
         if name in cfg.pins and not hasattr(type(self), name):
-            self._context._set_transformer_pin(self._node_path, (name,), value)
+            if value is None:
+                self._context._delete_transformer_pin(self._node_path, (name,))
+            else:
+                self._context._set_transformer_pin(self._node_path, (name,), value)
+            return
+        raise AttributeError(name)
+
+    def __delattr__(self, name: str) -> None:
+        if name.startswith("_"):
+            object.__delattr__(self, name)
+            return
+        cfg = self._context._graph.nodes[self._node_path].transformer_config
+        if name in cfg.pins and not hasattr(type(self), name):
+            self._context._delete_transformer_pin(self._node_path, (name,))
             return
         raise AttributeError(name)
 
@@ -309,10 +322,18 @@ class TransformerInputView:
             object.__setattr__(self, name, value)
             return
         path = (name,)
-        if self._context._is_bound_source(value):
+        if value is None:
+            self._context._delete_transformer_pin(self._node_path, path)
+        elif self._context._is_bound_source(value):
             self._context._add_edge(self._context._source_path(value), self._node_path + path)
         else:
             self._context._set_transformer_pin(self._node_path, path, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name.startswith("_"):
+            object.__delattr__(self, name)
+            return
+        self._context._delete_transformer_pin(self._node_path, (name,))
 
 
 class TransformerPinsView(TransformerInputView):
@@ -321,10 +342,15 @@ class TransformerPinsView(TransformerInputView):
 
     def __setitem__(self, key: str, value):
         path = (str(key),)
-        if self._context._is_bound_source(value):
+        if value is None:
+            self._context._delete_transformer_pin(self._node_path, path)
+        elif self._context._is_bound_source(value):
             self._context._add_edge(self._context._source_path(value), self._node_path + path)
         else:
             self._context._set_transformer_pin(self._node_path, path, value)
+
+    def __delitem__(self, key: str) -> None:
+        self._context._delete_transformer_pin(self._node_path, (str(key),))
 
 
 class TransformerPinView:
@@ -357,7 +383,9 @@ class TransformerPinView:
             object.__setattr__(self, name, value)
             return
         path = self._path + (name,)
-        if self._context._is_bound_source(value):
+        if value is None:
+            self._context._delete_transformer_pin(self._node_path, path)
+        elif self._context._is_bound_source(value):
             self._context._add_edge(self._context._source_path(value), self._node_path + path)
         else:
             self._context._set_transformer_pin(self._node_path, path, value)
