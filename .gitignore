@@ -1,0 +1,10 @@
+.vscode/
+*.pyc
+*.egg-info/
+build/
+dist/
+*.*~
+*/__pycache__/
+*/.ipynb_checkpoints/
+*/*-BAK*/
+**/.seamless-queue
