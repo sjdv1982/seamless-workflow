@@ -21,10 +21,25 @@ class NodeError(WorkflowError):
     """Raised for invalid node operations."""
 
 
+class ReadOnlyEndpointError(WorkflowError):
+    """Raised when a producer operation targets a transformer result."""
+
+
+class StaleWorkflowHandleError(WorkflowError):
+    """Raised when a bound builder outlives its Context node."""
+
+
+class ValueUnavailableError(WorkflowError):
+    """Raised when a value update cannot materialize its current root value."""
+
+
 __all__ = [
     "WorkflowError",
     "AuthorityError",
     "DependencyError",
     "PathError",
     "NodeError",
+    "ReadOnlyEndpointError",
+    "StaleWorkflowHandleError",
+    "ValueUnavailableError",
 ]
