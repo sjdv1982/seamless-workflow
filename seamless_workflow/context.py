@@ -424,6 +424,8 @@ class Context:
         if target.endpoint_kind == "cell-subvalue":
             if len(target.local_path) != 1 or isinstance(target.local_path[0], slice):
                 raise PathError("Cell connection targets are limited to one point component")
+            if self._graph.nodes[target.node_path].cell_config.celltype not in PIN_CELLTYPES:
+                raise PathError("Cell subvalue connections require a container-capable Cell")
             component = target.local_path[0]
             if isinstance(component, int):
                 current = self._get_value(target.node_path, ())

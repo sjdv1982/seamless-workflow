@@ -7,8 +7,8 @@ from seamless_workflow import Context
 from seamless_workflow.errors import DependencyError
 
 
-def pick(d):
-    return d["left"] + d["right"]
+def pick(left, right):
+    return left + right
 
 
 def identity(scratch):
@@ -19,13 +19,13 @@ def test_bound_edges_into_cell_pins_and_transformer_pins():
     ctx = Context()
     ctx.src = 4
     ctx.box = {}
-    ctx.box.pins.value = ctx.src
+    ctx.box["value"] = ctx.src
 
     assert ctx.box.value == {"value": 4}
 
     ctx.pick = pick
-    ctx.pick.pins.d.left.set(ctx.src)
-    ctx.pick.pins.d.right = 6
+    ctx.pick.pins.left = ctx.src
+    ctx.pick.pins.right = 6
     assert ctx.pick.result.value == 10
 
 
@@ -64,11 +64,11 @@ def test_transformer_pin_named_scratch_uses_item_syntax_when_colliding():
     assert ctx.tf.result.value == "pin-value"
 
 
-def test_transformer_pin_overlays_roundtrip():
+def test_transformer_whole_pin_producers_roundtrip():
     ctx = Context()
     ctx.pick = pick
-    ctx.pick.pins.d.left = 8
-    ctx.pick.pins.d.right = 9
+    ctx.pick.pins.left = 8
+    ctx.pick.pins.right = 9
 
     clone = Context()
     clone.set_graph(ctx.get_graph())

@@ -2,5 +2,7 @@
 
 Reactive workflow `Context` layer for Seamless.
 
-This repository is intentionally scaffold-only until the implementation plan in
-`../seamless/context-workflow-internals-implementation-plan.md` is executed.
+Context nodes are exposed through the canonical `seamless.Cell` and
+`seamless_transformer.Transformer` handles. The experimental wrapper/view surface
+described by the earlier context handoff documents is superseded by
+[`context-internals-followup-plan.md`](../seamless/context-internals-followup-plan.md).

@@ -22,14 +22,15 @@ def test_assigning_same_value_does_not_supersede_current_run():
     assert second_runtime["superseded"] == []
 
 
-def test_transformer_pin_none_and_del_are_deletion_sugar():
+def test_transformer_pin_none_is_a_value_and_del_is_deletion():
     ctx = Context()
     ctx.echo = echo
     ctx.echo.pins.x = 1
     assert ctx.echo.result.value == 1
 
     ctx.echo.x = None
-    assert ctx._graph.nodes[("echo",)].state == "unwired"
+    assert ctx._graph.nodes[("echo",)].state == "complete"
+    assert ctx.echo.result.value is None
 
     ctx.echo.pins.x = 2
     assert ctx.echo.result.value == 2

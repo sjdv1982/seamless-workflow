@@ -4,6 +4,7 @@ import pytest
 
 from seamless_workflow import Context
 from seamless_workflow.errors import NodeError
+from seamless import Checksum
 
 
 def double(x):
@@ -28,7 +29,7 @@ def test_non_eager_compute_activates_upstream_cone_and_releases():
     assert ctx.double.result.value is None
     assert ctx.inc.result.value is None
 
-    assert ctx.inc.compute() == 7
+    assert isinstance(ctx.inc.compute(), Checksum)
     assert ctx._graph.nodes[("inc",)].active_count == 0
     assert ctx._graph.nodes[("double",)].derived_active_count == 0
 

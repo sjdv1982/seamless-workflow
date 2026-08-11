@@ -33,31 +33,34 @@ def test_bound_alias_survives_assignment():
     assert ctx.a.value == {"a": 3}
 
 
-def test_cell_pins_assignment_update_and_delete():
+def test_cell_projection_assignment_and_delete():
     ctx = Context()
     ctx.a = {}
 
-    ctx.a.pins.b = {"c": 3}
+    ctx.a.b = {"c": 3}
     ctx.a["d"] = 4
-    ctx.a.pins.update({"e": 5, "f": 6})
+    ctx.a["e"] = 5
+    ctx.a["f"] = 6
 
     assert ctx.a.value == {"b": {"c": 3}, "d": 4, "e": 5, "f": 6}
 
     del ctx.a["d"]
-    del ctx.a.pins.e
+    del ctx.a.e
     assert ctx.a.value == {"b": {"c": 3}, "f": 6}
 
 
 def test_cell_subcell_depth_and_celltype_validation():
     ctx = Context()
     ctx.a = {}
-    with pytest.raises(AttributeError):
-        ctx.a.pins.b.c.set(3)
+    ctx.a.b.c.set(3)
+    assert ctx.a.value == {"b": {"c": 3}}
 
     cell = Cell(celltype="str")
     ctx.s = cell
+    source = 1
+    ctx.source = source
     with pytest.raises(PathError):
-        ctx.s.pins.x = "bad"
+        ctx.s.x = ctx.source
 
 
 def test_incoming_edge_blocks_local_set_at_root():

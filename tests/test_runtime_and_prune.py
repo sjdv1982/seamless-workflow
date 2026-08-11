@@ -60,9 +60,7 @@ def test_connected_optional_pin_participates_but_absent_optional_is_skipped():
     assert ctx.add.result.value == 8
 
 
-def test_standalone_cell_pins_build_and_run_dictionary():
+def test_standalone_cell_has_no_public_pins_namespace():
     cell = Cell(celltype="mixed")
-    cell.pins.x = 1
-    cell.pins["y"] = 2
-
-    assert cell.run() == {"x": 1, "y": 2}
+    assert not hasattr(Cell, "pins")
+    assert isinstance(cell.pins, Cell)

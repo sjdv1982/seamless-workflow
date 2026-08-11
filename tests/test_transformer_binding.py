@@ -30,7 +30,7 @@ def test_binding_transformer_moves_prebound_pins_to_context():
 
     ctx.tf.pins.x = 3
     assert tf.pins.x == 3
-    assert tf() == 10
+    assert tf().run() == 10
 
 
 def test_bound_transformer_call_arguments_override_pins_for_call_only():
@@ -41,7 +41,7 @@ def test_bound_transformer_call_arguments_override_pins_for_call_only():
     ctx = Context()
     ctx.tf = tf
 
-    assert tf(y=5) == 15
+    assert tf(y=5).run() == 15
     assert tf.pins.y == 1
     assert ctx.tf.result.value == 11
 
