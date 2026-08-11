@@ -391,9 +391,9 @@ class BoundTransformerBackend:
     @property
     def globals(self): return WorkflowMapping(self, "globals")
     @property
-    def environment(self): return self.cfg.environment
+    def environment(self): return copy.deepcopy(self.cfg.environment)
     @property
-    def meta(self): return self.cfg.meta
+    def meta(self): return copy.deepcopy(self.cfg.meta)
     @meta.setter
     def meta(self, value): self.cfg.meta.update(copy.deepcopy(value)); self.context._derive_all()
     @property

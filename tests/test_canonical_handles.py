@@ -6,6 +6,7 @@ import pytest
 
 from seamless import Cell
 from seamless import Checksum
+from seamless import Buffer
 from seamless_transformer import direct
 from seamless_transformer.transformation_class import Transformation
 from seamless_workflow import Context
@@ -161,3 +162,29 @@ def test_non_eager_demand_releases_activation_leases():
     assert isinstance(ctx.add.compute(), Checksum)
     assert ctx._graph.nodes[("add",)].active_count == 0
     assert ctx._graph.nodes[("add",)].derived_active_count == 0
+
+
+def test_transformer_pin_namespaces_collisions_and_metadata_parity():
+    def pins(scratch, inp):
+        return (scratch, inp)
+
+    ctx = Context()
+    ctx.tf = pins
+    ctx.tf["scratch"] = "pin"
+    ctx.tf.pins.inp = "input"
+    assert ctx.tf.scratch is False
+    assert ctx.tf["scratch"] == "pin"
+    assert ctx.tf.inp == "input"
+    assert ctx.tf.pins.inp == ctx.tf.args.inp == "input"
+    with pytest.raises(AttributeError):
+        _ = ctx.tf.typo
+
+    metadata = ctx.tf.meta
+    metadata["changed"] = True
+    assert "changed" not in ctx.tf.meta
+    ctx.tf.meta = {"changed": True}
+    assert ctx.tf.meta["changed"] is True
+    assert isinstance(ctx.tf.code, Buffer)
+
+    del ctx.tf["scratch"]
+    assert ctx.tf["scratch"] is None
