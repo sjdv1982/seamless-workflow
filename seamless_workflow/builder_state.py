@@ -44,12 +44,14 @@ class BoundCellBackend:
 
     @property
     def path(self):
+        self._node()
         return _path_string(self.local_path)
 
     path_python = path
 
     @property
     def input_ref(self):
+        self._node()
         return self.context._get_checksum(self.node_path, self.local_path)
 
     @property
