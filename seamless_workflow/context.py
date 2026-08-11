@@ -264,9 +264,13 @@ class Context:
         self._derive_all()
 
     def _set_cell_root(self, path, checksum, celltype):
+        self._set_cell_root_with_edges(path, checksum, celltype, clear_edges=True)
+
+    def _set_cell_root_with_edges(self, path, checksum, celltype, *, clear_edges):
         node = self._graph.nodes[path]
         node.cell_root_producer = ConstantProducer(normalize_checksum(checksum), celltype)
-        self._remove_edges_targeting(path, (), descendants=True)
+        if clear_edges:
+            self._remove_edges_targeting(path, (), descendants=True)
 
     def _set_cell_value(self, path, local, value):
         self._cell_operation(path, local, value)
@@ -292,6 +296,8 @@ class Context:
             except Exception as exc:
                 raise ValueUnavailableError(f"Cannot materialize {node_path!r}{local!r}") from exc
         if not local:
+            if self._incoming_edge(node_path, ()) is not None:
+                raise AuthorityError(f"Cell {node_path!r} root is controlled by an incoming edge")
             self._set_cell_root(node_path, checksum_for_value(value, node.cell_config.celltype), node.cell_config.celltype)
             self._derive_all()
             return
@@ -299,7 +305,8 @@ class Context:
         root = self._materialize_cell_for_update(node_path, local)
         updated = copy.deepcopy(root)
         _assign_path(updated, local, value)
-        self._set_cell_root(node_path, checksum_for_value(updated, node.cell_config.celltype), node.cell_config.celltype)
+        self._set_cell_root_with_edges(node_path, checksum_for_value(updated, node.cell_config.celltype), node.cell_config.celltype, clear_edges=False)
+        self._remove_edges_targeting(node_path, local, descendants=True)
         self._derive_all()
 
     def _materialize_cell_for_update(self, node_path, local):
@@ -337,7 +344,8 @@ class Context:
         root = self._materialize_cell_for_update(node_path, local)
         updated = copy.deepcopy(root)
         _delete_path(updated, local)
-        self._set_cell_root(node_path, checksum_for_value(updated, self._graph.nodes[node_path].cell_config.celltype), self._graph.nodes[node_path].cell_config.celltype)
+        self._set_cell_root_with_edges(node_path, checksum_for_value(updated, self._graph.nodes[node_path].cell_config.celltype), self._graph.nodes[node_path].cell_config.celltype, clear_edges=False)
+        self._remove_edges_targeting(node_path, local, descendants=True)
         self._derive_all()
 
     def _set_transformer_code(self, node_path, code):
@@ -415,6 +423,13 @@ class Context:
         if target.endpoint_kind == "cell-subvalue":
             if len(target.local_path) != 1 or isinstance(target.local_path[0], slice):
                 raise PathError("Cell connection targets are limited to one point component")
+            component = target.local_path[0]
+            if isinstance(component, int):
+                current = self._get_value(target.node_path, ())
+                if not isinstance(current, (list, tuple)):
+                    raise TypeError("Integer Cell connection targets require an existing sequence")
+                if component >= len(current) or component < -len(current):
+                    raise IndexError(component)
         elif target.endpoint_kind == "transformer-input":
             if len(target.local_path) != 1:
                 raise PathError("Transformer targets must address a whole pin")

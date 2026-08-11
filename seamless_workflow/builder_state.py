@@ -170,11 +170,15 @@ class BoundCellBackend:
     def assign(self, owner_path, name, value):
         self._ensure_writable()
         path = self.local_path if isinstance(owner_path, str) else tuple(owner_path)
+        if _same_endpoint(value, self._endpoint_for_local(path + (name,))):
+            return
         self.context._cell_operation(self.node_path, path + (name,), value)
 
     def assign_item(self, owner_path, key, value):
         self._ensure_writable()
         path = self.local_path if isinstance(owner_path, str) else tuple(owner_path)
+        if _same_endpoint(value, self._endpoint_for_local(path + (key,))):
+            return
         self.context._cell_operation(self.node_path, path + (key,), value)
 
     def delete(self, owner_path, name):
@@ -189,11 +193,12 @@ class BoundCellBackend:
 
     def augmented(self, path, operation, value):
         self._ensure_writable()
-        current = self.context._get_value(self.node_path, tuple(path), celltype=self.celltype)
+        local = self.local_path if isinstance(path, str) else tuple(path)
+        current = self.context._get_value(self.node_path, local, celltype=self.celltype)
         if current is None:
             raise TypeError(f"Cannot apply {operation} to an empty Cell endpoint")
         result = getattr(operator, operation)(current, value)
-        self.context._cell_operation(self.node_path, tuple(path), result)
+        self.context._cell_operation(self.node_path, local, result)
 
     def build(self, input_ref):
         self._node()
@@ -237,6 +242,20 @@ class BoundCellBackend:
             can_source=True,
             can_target=not self.readonly,
             can_set=not self.readonly,
+        )
+
+    def _endpoint_for_local(self, local):
+        kind = "transformer-result" if self.readonly else (
+            "cell-result" if not local else "cell-subvalue"
+        )
+        return BoundEndpoint(
+            self.context.top_id,
+            self.node_path,
+            kind,
+            tuple(local),
+            True,
+            not self.readonly,
+            not self.readonly,
         )
 
     def capture_source(self):
@@ -477,3 +496,13 @@ __all__ = [
     "WorkflowMapping",
     "WorkflowTransformerPins",
 ]
+
+
+def _same_endpoint(value, endpoint):
+    method = getattr(value, "_workflow_endpoint", None)
+    if not callable(method):
+        return False
+    try:
+        return method() == endpoint
+    except Exception:
+        return False

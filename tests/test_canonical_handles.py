@@ -93,3 +93,40 @@ def test_original_bound_alias_and_fresh_lookup_share_state():
     ctx.tf.pins.y = 4
     assert tf.pins.y == 4
     assert ctx.tf() == 7
+
+
+def test_rmw_preserves_unrelated_one_level_edges_and_augmented_writes_once():
+    ctx = Context()
+    ctx.left = 10
+    ctx.right = 20
+    ctx.data = {"left": 0, "right": 0, "nested": {"n": 1}}
+    ctx.data.left = ctx.left
+    ctx.data.right = ctx.right
+    ctx.data.nested.n += 1
+
+    assert ctx.data.value == {"left": 10, "right": 20, "nested": {"n": 2}}
+    targets = {tuple(edge["target"]) for edge in ctx.get_graph()["connections"]}
+    assert ("data", "left") in targets
+    assert ("data", "right") in targets
+
+
+def test_connection_target_depth_and_sequence_validation():
+    ctx = Context()
+    ctx.src = 3
+    ctx.data = [0]
+    ctx.data[0] = ctx.src
+    assert ctx.data.value == [3]
+
+    with pytest.raises(PathError):
+        ctx.data[0].child = ctx.src
+
+    ctx.mapping = {}
+    ctx.mapping["x"] = ctx.src
+    assert ctx.mapping.value == {"x": 3}
+
+    ctx.sequence = {}
+    with pytest.raises(TypeError):
+        ctx.sequence[0] = ctx.src
+
+    with pytest.raises(PathError):
+        ctx.mapping[0:1] = ctx.src
