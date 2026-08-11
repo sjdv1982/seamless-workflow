@@ -65,3 +65,31 @@ def test_stale_handles_raise_typed_error():
     del ctx.data
     with pytest.raises(StaleWorkflowHandleError):
         _ = handle.value
+
+
+def test_bound_transformer_assignment_wires_result_instead_of_rebinding():
+    ctx = Context()
+    ctx.add = add
+    ctx.add.pins.x = 2
+    ctx.add.pins.y = 5
+    ctx.out = ctx.add
+
+    assert isinstance(ctx.out, Cell)
+    assert ctx.out.value == 7
+    assert ctx.add.result.value == 7
+
+
+def test_original_bound_alias_and_fresh_lookup_share_state():
+    source = Cell({"value": 1})
+    ctx = Context()
+    ctx.source = source
+    assert source.value == ctx.source.value == {"value": 1}
+    ctx.source["value"] = 4
+    assert source.value == ctx.source.value == {"value": 4}
+
+    tf = direct(add)
+    ctx.tf = tf
+    tf.pins.x = 3
+    ctx.tf.pins.y = 4
+    assert tf.pins.y == 4
+    assert ctx.tf() == 7
