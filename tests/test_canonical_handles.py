@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from seamless import Cell
+from seamless import Checksum
 from seamless_transformer import direct
 from seamless_transformer.transformation_class import Transformation
 from seamless_workflow import Context
@@ -130,3 +133,31 @@ def test_connection_target_depth_and_sequence_validation():
 
     with pytest.raises(PathError):
         ctx.mapping[0:1] = ctx.src
+
+
+def test_bound_cell_demand_has_snapshot_and_reactive_return_types():
+    ctx = Context()
+    ctx.data = {"n": 4}
+    assert ctx.data.compute() == ctx.data.checksum
+    assert ctx.data.run() == {"n": 4}
+
+    ctx.add = add
+    ctx.add.pins.x = 2
+    ctx.add.pins.y = 3
+    snapshot = ctx.add()
+    ctx.add.pins.x = 10
+    assert snapshot.run() == 5
+    assert ctx.add.run() == 13
+    assert isinstance(ctx.add.compute(), Checksum)
+    assert asyncio.run(ctx.add.task()) == 13
+
+
+def test_non_eager_demand_releases_activation_leases():
+    ctx = Context(eager=False)
+    ctx.add = add
+    ctx.add.pins.x = 2
+    ctx.add.pins.y = 3
+    assert ctx._graph.nodes[("add",)].state == "waiting"
+    assert isinstance(ctx.add.compute(), Checksum)
+    assert ctx._graph.nodes[("add",)].active_count == 0
+    assert ctx._graph.nodes[("add",)].derived_active_count == 0

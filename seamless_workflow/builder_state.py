@@ -7,7 +7,7 @@ import operator
 from typing import Any
 
 from seamless import Cell, Checksum
-from seamless.cell_class import append_item_path, append_slice_path
+from seamless.cell_class import _UNSET, append_item_path, append_slice_path
 from seamless_transformer.builder_snapshot import TransformerBuilderSnapshot
 
 from .endpoints import BoundEndpoint
@@ -260,9 +260,6 @@ class BoundCellBackend:
 
     def capture_source(self):
         return self.context._capture_endpoint(self._workflow_endpoint())
-
-
-_UNSET = object()
 
 
 class WorkflowTransformerPins:
