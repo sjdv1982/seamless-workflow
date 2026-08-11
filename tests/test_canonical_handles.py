@@ -188,3 +188,31 @@ def test_transformer_pin_namespaces_collisions_and_metadata_parity():
 
     del ctx.tf["scratch"]
     assert ctx.tf["scratch"] is None
+
+
+def test_graph_roundtrip_preserves_call_mode_and_source_paths():
+    ctx = Context()
+    ctx.data = {"nested": {"value": 2}}
+    ctx.add = add
+    ctx.add.pins.x = 3
+    ctx.add.pins.y = 4
+    ctx.out = ctx.data.nested["value"]
+    graph = ctx.get_graph()
+    add_entry = next(entry for entry in graph["nodes"] if entry["path"] == ["add"])
+    assert add_entry["call_mode"] == "delayed"
+    assert graph["connections"][-1]["source"] == ["data", "nested", "value"]
+
+    clone = Context()
+    clone.set_graph(graph)
+    assert type(clone.add).__name__ == "Transformer"
+    assert clone.add.run() == 7
+    assert clone.out.value == 2
+
+    direct_ctx = Context()
+    direct_ctx.add = direct(add)
+    direct_ctx.add.pins.x = 1
+    direct_ctx.add.pins.y = 2
+    direct_graph = direct_ctx.get_graph()
+    direct_clone = Context()
+    direct_clone.set_graph(direct_graph)
+    assert type(direct_clone.add).__name__ == "DirectTransformer"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import inspect
 import operator
+import textwrap
 from typing import Any
 from uuid import uuid4
 
@@ -800,7 +801,7 @@ class Context:
                 entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "target_celltype": node.cell_config.target_celltype, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
             else:
                 cfg = node.transformer_config
-                entry = {"type": "transformer", "path": list(path), "language": cfg.language, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
+                entry = {"type": "transformer", "path": list(path), "language": cfg.language, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code.decode() if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
             if runtime:
                 entry["runtime"] = {"state": node.state, "block_reason": node.block_reason, "checksum": node.current_checksum.hex() if node.current_checksum else None, "exception": type(node.exception).__name__ if node.exception else None, "run": self._runtime_graph_entry(path)}
             nodes.append(entry)
@@ -822,13 +823,40 @@ class Context:
             elif entry["type"] == "transformer":
                 if "overlays" in entry:
                     raise PathError("Alpha transformer overlays are not supported")
-                cfg = TransformerConfig(code_checksum=Checksum(entry["checksum"]["code"]) if entry.get("checksum", {}).get("code") else None, language=entry.get("language", "python"), pins=set(entry.get("pins", {})), celltypes={p: m.get("celltype", "mixed") for p, m in entry.get("pins", {}).items()}, optional_pins=set(entry.get("optional_pins", [])), call_mode=entry.get("call_mode", "delayed"))
+                if "call_mode" not in entry:
+                    raise PathError("Transformer graph entry is missing required call_mode")
+                code_text = entry.get("code")
+                code = Buffer(code_text, entry.get("language", "python")) if code_text is not None else None
+                callable_code = None
+                if code_text is not None and entry.get("language", "python") == "python":
+                    namespace = {}
+                    try:
+                        exec(textwrap.dedent(code_text), namespace)
+                    except Exception:
+                        namespace = {}
+                    candidates = [value for value in namespace.values() if callable(value) and not getattr(value, "__name__", "").startswith("__")]
+                    for candidate in candidates:
+                        try:
+                            if set(inspect.signature(candidate).parameters) <= set(entry.get("pins", {})):
+                                callable_code = candidate
+                                break
+                        except (TypeError, ValueError):
+                            continue
+                cfg = TransformerConfig(code=code, code_checksum=Checksum(entry["checksum"]["code"]) if entry.get("checksum", {}).get("code") else (code.get_checksum() if code is not None else None), language=entry.get("language", "python"), callable=callable_code, pins=set(entry.get("pins", {})), celltypes={p: m.get("celltype", "mixed") for p, m in entry.get("pins", {}).items()}, optional_pins=set(entry.get("optional_pins", [])), modules=copy.deepcopy(entry.get("modules", {})), globals=copy.deepcopy(entry.get("globals", {})), meta=copy.deepcopy(entry.get("meta", {})), environment=copy.deepcopy(entry.get("environment")), scratch=bool(entry.get("scratch", False)), local=entry.get("local"), direct_print=bool(entry.get("direct_print", False)), call_mode=entry["call_mode"])
                 cfg.celltypes.setdefault("result", "mixed")
                 producers = {p: ConstantProducer(Checksum(q["checksum"]), q.get("celltype", cfg.celltypes.get(p, "mixed"))) for p, q in entry.get("producers", {}).items()}
                 self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg, transformer_pin_producers=producers)
         for edge in graph.get("connections", []):
             source, target = tuple(edge["source"]), tuple(edge["target"])
-            self._graph.resolve_existing(source); self._graph.resolve_existing(target)
+            source_node, source_local = self._graph.resolve_existing(source)
+            target_node, target_local = self._graph.resolve_existing(target)
+            target_kind = self._graph.nodes[target_node].kind
+            if target_kind == "cell":
+                if len(target_local) > 1 or any(isinstance(component, slice) for component in target_local):
+                    raise PathError("Cell graph targets are limited to root or one point component")
+            elif target_kind == "transformer":
+                if len(target_local) != 1:
+                    raise PathError("Transformer graph targets must address one whole pin")
             self._graph.edges.append(Edge(source, target))
         self._derive_all()
 
