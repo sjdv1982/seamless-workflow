@@ -11,19 +11,14 @@ NodeKind = Literal["cell", "transformer"]
 NodeState = Literal["unwired", "blocked", "waiting", "computing", "complete", "failed"]
 BlockReason = Literal["blocked-by-unwired", "blocked-by-error"]
 NodePath = tuple[str, ...]
-Path = tuple[str, ...]
-ViewPath = tuple[str, ...]
+Path = tuple[Any, ...]
+ViewPath = tuple[Any, ...]
 
 
 @dataclass
 class ConstantProducer:
     checksum: Checksum
     celltype: str = "mixed"
-
-
-@dataclass
-class Overlay:
-    entries: dict[Path, ConstantProducer] = field(default_factory=dict)
 
 
 @dataclass
@@ -50,6 +45,7 @@ class TransformerConfig:
     scratch: bool = False
     local: bool | None = None
     direct_print: bool = False
+    call_mode: Literal["delayed", "direct"] = "delayed"
 
 
 @dataclass
@@ -59,8 +55,8 @@ class Node:
     block_reason: BlockReason | None = None
     cell_config: CellConfig | None = None
     transformer_config: TransformerConfig | None = None
-    cell_overlay: Overlay | None = None
-    transformer_pin_overlays: dict[str, Overlay] = field(default_factory=dict)
+    cell_root_producer: ConstantProducer | None = None
+    transformer_pin_producers: dict[str, ConstantProducer] = field(default_factory=dict)
     current_checksum: Checksum | None = None
     active_count: int = 0
     derived_active_count: int = 0
@@ -122,7 +118,6 @@ __all__ = [
     "NodeKind",
     "NodePath",
     "NodeState",
-    "Overlay",
     "Path",
     "TransformerConfig",
     "ViewPath",
