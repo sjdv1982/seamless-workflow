@@ -7,16 +7,12 @@ from typing import Any
 from seamless import Buffer, Checksum
 
 
-def checksum_for_value(
-    value: Any, celltype: str = "mixed", *, retain: bool = False
-) -> Checksum:
+def checksum_for_value(value: Any, celltype: str = "mixed") -> Checksum:
     """Serialize a Python value and return its checksum."""
 
     buffer = Buffer(value, celltype)
     checksum = buffer.get_checksum()
     buffer.tempref()
-    if retain:
-        buffer.incref()
     return checksum
 
 

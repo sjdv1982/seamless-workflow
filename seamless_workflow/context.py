@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import inspect
 import operator
+import sys
 import textwrap
 from typing import Any
 from uuid import uuid4
@@ -36,8 +37,21 @@ class Context:
         object.__setattr__(self, "top_id", uuid4().hex)
         object.__setattr__(self, "_graph", ContextGraph())
         object.__setattr__(self, "_runtime", ContextRuntime())
+        object.__setattr__(self, "_checksum_holds", {})
         object.__setattr__(self, "eager", bool(eager))
         object.__setattr__(self, "_prefix", ())
+
+    def __del__(self):
+        try:
+            self._release_all_producers()
+        except BaseException as exc:
+            try:
+                print(
+                    f"ERROR: workflow garbage collection failed: {exc}",
+                    file=sys.stderr,
+                )
+            except BaseException:
+                pass
 
     def __getattr__(self, name):
         if name.startswith("_"):
@@ -138,7 +152,9 @@ class Context:
         if path in self._graph.nodes:
             descendants = self._graph.descendants(path)
             for node_path in descendants:
-                self._graph.nodes.pop(node_path, None)
+                node = self._graph.nodes.pop(node_path, None)
+                if node is not None:
+                    self._release_node_producers(node, node_path)
                 self._runtime.current_runs.pop(node_path, None)
                 self._runtime.superseded_runs.pop(node_path, None)
             self._graph.edges = [
@@ -186,6 +202,12 @@ class Context:
             self._add_endpoint_edge(input_ref, self._cell_endpoint(path))
         elif input_ref is not None:
             self._set_cell_root(path, checksum_for_value(input_ref, cell.celltype), cell.celltype)
+        else:
+            producer = node.cell_root_producer
+            node.cell_root_producer = None
+            if producer is not None:
+                self._release_producer(producer, path)
+            self._remove_edges_targeting(path, (), descendants=True)
         object.__setattr__(cell, "_workflow_backend", BoundCellBackend(self, path))
 
     def _transformer_config_from_snapshot(self, snapshot, *, direct=False):
@@ -251,6 +273,8 @@ class Context:
         cfg, snapshot = self._transformer_config_from_snapshot(snapshot, direct=transformer.__class__.__name__ == "DirectTransformer")
         cfg.pins.update(node.transformer_config.pins)
         node.transformer_config = cfg
+        for pin, producer in list(node.transformer_pin_producers.items()):
+            self._release_producer(producer, path + (pin,))
         node.transformer_pin_producers.clear()
         for pin, value in snapshot.args.items():
             self._set_transformer_pin(path, pin, value)
@@ -269,7 +293,11 @@ class Context:
 
     def _set_cell_root_with_edges(self, path, checksum, celltype, *, clear_edges):
         node = self._graph.nodes[path]
-        node.cell_root_producer = ConstantProducer(normalize_checksum(checksum), celltype)
+        producer = self._retain_producer(checksum, celltype)
+        old_producer = node.cell_root_producer
+        node.cell_root_producer = producer
+        if old_producer is not None:
+            self._release_producer(old_producer, path)
         if clear_edges:
             self._remove_edges_targeting(path, (), descendants=True)
 
@@ -332,7 +360,11 @@ class Context:
     def _cell_delete_path(self, node_path, local):
         local = tuple(local)
         if not local:
-            self._graph.nodes[node_path].cell_root_producer = None
+            node = self._graph.nodes[node_path]
+            producer = node.cell_root_producer
+            node.cell_root_producer = None
+            if producer is not None:
+                self._release_producer(producer, node_path)
             self._remove_edges_targeting(node_path, (), descendants=True)
             self._derive_all()
             return
@@ -375,18 +407,27 @@ class Context:
         if endpoint is not None:
             self._add_endpoint_edge(value, self._transformer_endpoint(node_path, pin))
         else:
-            checksum = checksum_for_value(
-                value, cfg.celltypes.get(pin, "mixed"), retain=True
-            )
             self._check_authority(node_path, (pin,))
-            self._graph.nodes[node_path].transformer_pin_producers[pin] = ConstantProducer(checksum, cfg.celltypes.get(pin, "mixed"))
+            checksum = checksum_for_value(value, cfg.celltypes.get(pin, "mixed"))
+            producer = self._retain_producer(
+                checksum, cfg.celltypes.get(pin, "mixed")
+            )
+            node = self._graph.nodes[node_path]
+            old_producer = node.transformer_pin_producers.get(pin)
+            node.transformer_pin_producers[pin] = producer
+            if old_producer is not None:
+                self._release_producer(old_producer, node_path + (pin,))
             self._remove_edges_targeting(node_path, (pin,), descendants=True)
         self._derive_all()
 
     def _delete_transformer_pin(self, node_path, pin):
         if not pin:
             raise PathError("Transformer pin name must be non-empty")
-        self._graph.nodes[node_path].transformer_pin_producers.pop(pin, None)
+        producer = self._graph.nodes[node_path].transformer_pin_producers.pop(
+            pin, None
+        )
+        if producer is not None:
+            self._release_producer(producer, node_path + (pin,))
         self._remove_edges_targeting(node_path, (pin,), descendants=True)
         self._derive_all()
 
@@ -440,6 +481,17 @@ class Context:
             if len(target.local_path) != 1:
                 raise PathError("Transformer targets must address a whole pin")
         self._add_edge(source_ep.node_path + source_ep.local_path, target.node_path + target.local_path)
+        target_node = self._graph.nodes[target.node_path]
+        if target_node.kind == "cell" and not target.local_path:
+            producer = target_node.cell_root_producer
+            target_node.cell_root_producer = None
+            if producer is not None:
+                self._release_producer(producer, target.node_path)
+        elif target_node.kind == "transformer" and len(target.local_path) == 1:
+            pin = target.local_path[0]
+            producer = target_node.transformer_pin_producers.pop(pin, None)
+            if producer is not None:
+                self._release_producer(producer, target.node_path + (pin,))
 
     def _add_edge(self, source, target):
         source_node, _ = self._graph.resolve_existing(tuple(source))
@@ -522,6 +574,52 @@ class Context:
 
     def _value_from_producer(self, producer):
         return value_for_checksum(producer.checksum, producer.celltype)
+
+    def _retain_producer(self, checksum, celltype):
+        checksum = normalize_checksum(checksum)
+        checksum.incref()
+        holds = self._checksum_holds
+        holds[checksum] = holds.get(checksum, 0) + 1
+        return ConstantProducer(checksum, celltype)
+
+    def _release_producer(self, producer, owner):
+        checksum = producer.checksum
+        holds = self._checksum_holds
+        count = holds.get(checksum, 0)
+        if count == 0:
+            self._report_refcount_error(checksum, owner, "workflow ownership")
+            return
+        if count == 1:
+            holds.pop(checksum)
+        else:
+            holds[checksum] = count - 1
+        if not checksum.decref():
+            self._report_refcount_error(checksum, owner, "buffer cache")
+
+    @staticmethod
+    def _report_refcount_error(checksum, owner, refcount):
+        path = ".".join(str(component) for component in owner)
+        print(
+            f"ERROR: {refcount} refcount already zero for workflow checksum "
+            f"{checksum.hex()} at {path}",
+            file=sys.stderr,
+        )
+
+    def _release_node_producers(self, node, path):
+        if node.cell_root_producer is not None:
+            self._release_producer(node.cell_root_producer, path)
+        for pin, producer in node.transformer_pin_producers.items():
+            self._release_producer(producer, path + (pin,))
+
+    def _release_all_producers(self):
+        holds = getattr(self, "_checksum_holds", None)
+        if not holds:
+            return
+        for checksum, count in list(holds.items()):
+            for _ in range(count):
+                if not checksum.decref():
+                    self._report_refcount_error(checksum, ("<garbage-collection>",), "buffer cache")
+        holds.clear()
 
     def _derive_all(self):
         # A source may sort after its target; converge the small durable graph
@@ -820,6 +918,7 @@ class Context:
         return {"__seamless_workflow__": "0.2", "nodes": nodes, "connections": [{"type": "connection", "source": list(e.source), "target": list(e.target)} for e in sorted(self._graph.edges, key=lambda e: (e.source, e.target))], "params": {"eager": self.eager}}
 
     def set_graph(self, graph):
+        self._release_all_producers()
         self._graph, self._runtime = ContextGraph(), ContextRuntime()
         self.eager = graph.get("params", {}).get("eager", True)
         for entry in graph.get("nodes", []):
@@ -831,7 +930,10 @@ class Context:
                     raise PathError("Alpha overlay graph data is not supported")
                 value = entry.get("value")
                 if value is not None:
-                    node.cell_root_producer = ConstantProducer(Checksum(value["checksum"]), value.get("celltype", node.cell_config.celltype))
+                    node.cell_root_producer = self._retain_producer(
+                        Checksum(value["checksum"]),
+                        value.get("celltype", node.cell_config.celltype),
+                    )
             elif entry["type"] == "transformer":
                 if "overlays" in entry:
                     raise PathError("Alpha transformer overlays are not supported")
@@ -856,7 +958,13 @@ class Context:
                             continue
                 cfg = TransformerConfig(code=code, code_checksum=Checksum(entry["checksum"]["code"]) if entry.get("checksum", {}).get("code") else (code.get_checksum() if code is not None else None), language=entry.get("language", "python"), callable=callable_code, pins=set(entry.get("pins", {})), celltypes={p: m.get("celltype", "mixed") for p, m in entry.get("pins", {}).items()}, optional_pins=set(entry.get("optional_pins", [])), modules=copy.deepcopy(entry.get("modules", {})), globals=copy.deepcopy(entry.get("globals", {})), meta=copy.deepcopy(entry.get("meta", {})), environment=copy.deepcopy(entry.get("environment")), scratch=bool(entry.get("scratch", False)), local=entry.get("local"), direct_print=bool(entry.get("direct_print", False)), call_mode=entry["call_mode"])
                 cfg.celltypes.setdefault("result", "mixed")
-                producers = {p: ConstantProducer(Checksum(q["checksum"]), q.get("celltype", cfg.celltypes.get(p, "mixed"))) for p, q in entry.get("producers", {}).items()}
+                producers = {
+                    p: self._retain_producer(
+                        Checksum(q["checksum"]),
+                        q.get("celltype", cfg.celltypes.get(p, "mixed")),
+                    )
+                    for p, q in entry.get("producers", {}).items()
+                }
                 self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg, transformer_pin_producers=producers)
         for edge in graph.get("connections", []):
             source, target = tuple(edge["source"]), tuple(edge["target"])
@@ -875,7 +983,18 @@ class Context:
     def _copy_subcontext(self, source_prefix, target_prefix):
         self._graph.namespaces.add(target_prefix)
         for path in self._graph.descendants(source_prefix):
-            self._graph.nodes[target_prefix + path[len(source_prefix):]] = copy.deepcopy(self._graph.nodes[path])
+            copied_path = target_prefix + path[len(source_prefix):]
+            copied_node = copy.deepcopy(self._graph.nodes[path])
+            self._graph.nodes[copied_path] = copied_node
+            if copied_node.cell_root_producer is not None:
+                producer = copied_node.cell_root_producer
+                copied_node.cell_root_producer = self._retain_producer(
+                    producer.checksum, producer.celltype
+                )
+            for pin, producer in list(copied_node.transformer_pin_producers.items()):
+                copied_node.transformer_pin_producers[pin] = self._retain_producer(
+                    producer.checksum, producer.celltype
+                )
         for edge in list(self._graph.edges):
             if edge.source[:len(source_prefix)] == source_prefix and edge.target[:len(source_prefix)] == source_prefix:
                 self._graph.edges.append(Edge(target_prefix + edge.source[len(source_prefix):], target_prefix + edge.target[len(source_prefix):], edge.source_celltype, edge.target_celltype))
