@@ -6,15 +6,17 @@ from typing import Any
 
 from seamless import Buffer, Checksum
 
-_LOCAL_BUFFERS: dict[str, Buffer] = {}
 
-
-def checksum_for_value(value: Any, celltype: str = "mixed") -> Checksum:
+def checksum_for_value(
+    value: Any, celltype: str = "mixed", *, retain: bool = False
+) -> Checksum:
     """Serialize a Python value and return its checksum."""
 
     buffer = Buffer(value, celltype)
     checksum = buffer.get_checksum()
-    _LOCAL_BUFFERS[checksum.hex()] = buffer
+    buffer.tempref()
+    if retain:
+        buffer.incref()
     return checksum
 
 

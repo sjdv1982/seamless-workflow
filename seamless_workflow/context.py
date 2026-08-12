@@ -375,7 +375,9 @@ class Context:
         if endpoint is not None:
             self._add_endpoint_edge(value, self._transformer_endpoint(node_path, pin))
         else:
-            checksum = checksum_for_value(value, cfg.celltypes.get(pin, "mixed"))
+            checksum = checksum_for_value(
+                value, cfg.celltypes.get(pin, "mixed"), retain=True
+            )
             self._check_authority(node_path, (pin,))
             self._graph.nodes[node_path].transformer_pin_producers[pin] = ConstantProducer(checksum, cfg.celltypes.get(pin, "mixed"))
             self._remove_edges_targeting(node_path, (pin,), descendants=True)
@@ -595,34 +597,41 @@ class Context:
         if code_checksum is None:
             node.state, node.current_checksum = "unwired", None
             return
-        kwargs = {}
-        for pin in sorted(cfg.pins):
-            edge = incoming.get((pin,))
-            if edge is not None:
-                state, checksum = self._source_state(edge)
-                if state != "complete":
-                    self._apply_pending(node, [edge]); return
-            else:
-                producer = node.transformer_pin_producers.get(pin)
-                checksum = producer.checksum if producer is not None else None
-            if checksum is None:
-                if pin in cfg.optional_pins:
-                    continue
-                node.state, node.current_checksum, node.block_reason = "unwired", None, None
-                return
-            kwargs[pin] = value_for_checksum(checksum, cfg.celltypes.get(pin, "mixed"))
-        if cfg.callable is None:
-            node.state, node.current_checksum, node.block_reason = "complete", None, None
-            return
-        if not self.eager and node.active_count == 0 and node.derived_active_count == 0:
-            node.state, node.current_checksum = "waiting", None
-            return
         try:
+            kwargs = {}
+            for pin in sorted(cfg.pins):
+                edge = incoming.get((pin,))
+                if edge is not None:
+                    state, checksum = self._source_state(edge)
+                    if state != "complete":
+                        self._apply_pending(node, [edge]); return
+                else:
+                    producer = node.transformer_pin_producers.get(pin)
+                    checksum = producer.checksum if producer is not None else None
+                if checksum is None:
+                    if pin in cfg.optional_pins:
+                        continue
+                    node.state, node.current_checksum, node.block_reason = "unwired", None, None
+                    return
+                kwargs[pin] = value_for_checksum(
+                    checksum, cfg.celltypes.get(pin, "mixed")
+                )
+            if cfg.callable is None:
+                node.state, node.current_checksum, node.block_reason = "complete", None, None
+                return
+            if not self.eager and node.active_count == 0 and node.derived_active_count == 0:
+                node.state, node.current_checksum = "waiting", None
+                return
             result = cfg.callable(**kwargs)
             node.current_checksum = checksum_for_value(result, cfg.celltypes.get("result", "mixed"))
             node.state, node.block_reason, node.exception = "complete", None, None
         except BaseException as exc:
-            node.state, node.current_checksum, node.exception = "failed", None, exc
+            node.state, node.current_checksum, node.block_reason, node.exception = (
+                "failed",
+                None,
+                None,
+                exc,
+            )
 
     def _source_state(self, edge):
         source_node, source_local = self._graph.resolve_existing(edge.source)
