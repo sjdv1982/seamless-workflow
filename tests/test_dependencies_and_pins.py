@@ -53,14 +53,15 @@ def test_cross_top_level_dependency_rejected():
         ctx2.b = ctx1.a
 
 
-def test_transformer_pin_named_scratch_uses_item_syntax_when_colliding():
+def test_transformer_pin_named_scratch_never_collides_with_the_setting():
     ctx = Context()
     ctx.tf = identity
-    ctx.tf["scratch"] = "pin-value"
+    ctx.tf.pins.scratch = "pin-value"
 
     assert ctx.tf.scratch is False
     ctx.tf.scratch = True
     assert ctx.tf.scratch is True
+    assert ctx.tf.pins.scratch == "pin-value"
     assert ctx.tf.result.value == "pin-value"
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -46,6 +47,42 @@ class TransformerConfig:
     local: bool | None = None
     direct_print: bool = False
     call_mode: Literal["delayed", "direct"] = "delayed"
+
+    def signature_parameters(self) -> set[str] | None:
+        """Parameter names the code accepts, or None when unconstrained.
+
+        A transformer whose code is a Python callable has a fixed input signature,
+        exactly as a standalone builder does.  Text/bash code has none, so any pin
+        name may be declared.
+        """
+
+        if not callable(self.callable):
+            return None
+        try:
+            return set(inspect.signature(self.callable).parameters)
+        except (TypeError, ValueError):
+            return None
+
+    def check_pin_name(self, name: str, *, allow_result: bool = False) -> None:
+        """Reject a pin name the transformer signature cannot accept.
+
+        Mirrors the standalone `ArgsWrapper`/`CelltypesWrapper` rule: an already
+        declared name is always assignable, an unknown name is only declarable when
+        the code has no fixed signature.  Without this, `.pins` silently declares a
+        typo as a new pin and every later run fails with an unexpected-keyword
+        `TypeError`.
+        """
+
+        if name == "result" and not allow_result:
+            raise AttributeError("'result' is the transformer result, not an input pin")
+        if name in self.celltypes or name in self.pins:
+            return
+        parameters = self.signature_parameters()
+        if parameters is not None and name not in parameters:
+            raise AttributeError(
+                f"Unknown transformer pin '{name}': the transformer signature has no "
+                f"such parameter (declared pins: {', '.join(sorted(self.pins)) or 'none'})"
+            )
 
 
 @dataclass

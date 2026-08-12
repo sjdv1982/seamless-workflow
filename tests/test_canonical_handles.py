@@ -7,11 +7,12 @@ import pytest
 from seamless import Cell
 from seamless import Checksum
 from seamless import Buffer
-from seamless_transformer import direct
+from seamless_transformer import delayed, direct
 from seamless_transformer.transformation_class import Transformation
 from seamless_workflow import Context
 from seamless_workflow.endpoints import BoundEndpoint
 from seamless_workflow.errors import PathError, ReadOnlyEndpointError, StaleWorkflowHandleError
+from seamless_workflow.views import MissingView
 
 
 def add(x, y):
@@ -164,18 +165,35 @@ def test_non_eager_demand_releases_activation_leases():
     assert ctx._graph.nodes[("add",)].derived_active_count == 0
 
 
-def test_transformer_pin_namespaces_collisions_and_metadata_parity():
+def test_pins_is_the_only_transformer_input_namespace():
     def pins(scratch, inp):
         return (scratch, inp)
 
     ctx = Context()
     ctx.tf = pins
-    ctx.tf["scratch"] = "pin"
+    ctx.tf.pins.scratch = "pin"
     ctx.tf.pins.inp = "input"
+
+    # A pin named like an execution setting is unambiguous: the attribute is always
+    # the setting, the pin is always in .pins.
     assert ctx.tf.scratch is False
-    assert ctx.tf["scratch"] == "pin"
-    assert ctx.tf.inp == "input"
+    ctx.tf.scratch = True
+    assert ctx.tf.scratch is True
+    assert ctx.tf.pins.scratch == "pin"
     assert ctx.tf.pins.inp == ctx.tf.args.inp == "input"
+    assert ctx.tf.run() == ["pin", "input"]
+
+    # No attribute or item pin sugar in either direction.
+    with pytest.raises(AttributeError):
+        _ = ctx.tf.inp
+    with pytest.raises(AttributeError):
+        ctx.tf.inp = "other"
+    with pytest.raises(AttributeError):
+        del ctx.tf.inp
+    with pytest.raises(TypeError):
+        _ = ctx.tf["inp"]
+    with pytest.raises(TypeError):
+        ctx.tf["inp"] = "other"
     with pytest.raises(AttributeError):
         _ = ctx.tf.typo
 
@@ -186,8 +204,58 @@ def test_transformer_pin_namespaces_collisions_and_metadata_parity():
     assert ctx.tf.meta["changed"] is True
     assert isinstance(ctx.tf.code, Buffer)
 
-    del ctx.tf["scratch"]
-    assert ctx.tf["scratch"] is None
+    del ctx.tf.pins.scratch
+    assert ctx.tf.pins.scratch is None
+
+
+def test_unknown_transformer_attribute_raises_instead_of_navigating():
+    ctx = Context()
+    ctx.add = add
+    ctx.sub = Context()
+    ctx.sub.tf = add
+
+    # A bound Transformer resolves attributes as a class, not as a Context path:
+    # an unknown name is an error, never a namespace view.
+    with pytest.raises(AttributeError):
+        _ = ctx.add.whatever
+    with pytest.raises(AttributeError):
+        _ = ctx.sub.tf.whatever
+    with pytest.raises(AttributeError):
+        ctx.add.whatever = 5
+    with pytest.raises(AttributeError):
+        del ctx.add.whatever
+
+    # Only a path whose owning node does not exist is still an unresolved namespace.
+    assert isinstance(ctx.nonode.whatever, MissingView)
+
+
+def test_bound_pin_writes_respect_the_transformer_signature():
+    ctx = Context()
+    ctx.add = add
+
+    with pytest.raises(AttributeError):
+        ctx.add.pins.typo = 1
+    with pytest.raises(AttributeError):
+        ctx.add.pins["typo"] = 1
+    with pytest.raises(AttributeError):
+        ctx.add.celltypes.typo = "int"
+    with pytest.raises(AttributeError):
+        ctx.add.pins.result = 1
+    assert sorted(ctx._graph.nodes[("add",)].transformer_config.pins) == ["x", "y"]
+
+    # Same rule as the standalone builder it was bound from.
+    standalone = delayed(add)
+    with pytest.raises(AttributeError):
+        standalone.pins.typo = 1
+
+    ctx.add.pins.x = 2
+    ctx.add.pins.y = 3
+    assert ctx.add.run() == 5
+
+    # Code without a signature constrains nothing.
+    ctx.add.code = "result = 42"
+    ctx.add.pins.extra = 1
+    assert "extra" in ctx._graph.nodes[("add",)].transformer_config.pins
 
 
 def test_graph_roundtrip_preserves_call_mode_and_source_paths():

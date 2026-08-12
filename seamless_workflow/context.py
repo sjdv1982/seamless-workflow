@@ -368,6 +368,7 @@ class Context:
         if not isinstance(pin, str) or not pin:
             raise PathError("Transformer pin name must be non-empty")
         cfg = self._graph.nodes[node_path].transformer_config
+        cfg.check_pin_name(pin)
         cfg.pins.add(pin)
         cfg.celltypes.setdefault(pin, "mixed")
         endpoint = self._endpoint(value)

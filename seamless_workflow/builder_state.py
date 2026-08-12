@@ -340,6 +340,7 @@ class WorkflowCelltypes(WorkflowMapping):
     def __setitem__(self, key, value):
         cfg = self._backend.cfg
         key = str(key)
+        cfg.check_pin_name(key, allow_result=True)
         cfg.celltypes[key] = str(value)
         if key != "result":
             cfg.pins.add(key)
@@ -365,10 +366,6 @@ class BoundTransformerBackend:
     @property
     def cfg(self):
         return self._node().transformer_config
-
-    @property
-    def pin_names(self):
-        return set(self.cfg.pins)
 
     @property
     def language(self): return self.cfg.language
