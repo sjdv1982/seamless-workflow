@@ -62,3 +62,42 @@ def test_clear_exception_noop_and_successful_rederive_after_edit():
     ctx.reciprocal.pins.x = 2
     ctx.reciprocal.clear_exception()
     assert ctx.reciprocal.result.value == 0.5
+
+
+def test_public_status_reports_complete_and_unconnected_nodes():
+    ctx = Context()
+    ctx.value = 10
+    ctx.double = double
+
+    assert ctx.value.status == "Status: OK"
+    assert ctx.double.status == "Status: unconnected"
+    assert ctx.double.result.status == "Status: unconnected"
+
+    ctx.double.pins.x = ctx.value
+    assert ctx.double.status == "Status: OK"
+    assert ctx.double.result.status == "Status: OK"
+
+
+def test_public_status_and_exception_report_own_failure_only():
+    ctx = Context()
+    ctx.fail = fail
+    ctx.inc = inc
+    ctx.fail.pins.x = 1
+    ctx.inc.pins.x = ctx.fail
+
+    assert ctx.fail.status == "Status: error"
+    assert isinstance(ctx.fail.exception, RuntimeError)
+    assert str(ctx.fail.exception) == "boom"
+    assert ctx.fail.result.status == "Status: error"
+    assert ctx.fail.result.exception is ctx.fail.exception
+    assert ctx.inc.status == "Status: upstream"
+    assert ctx.inc.exception is None
+
+
+def test_public_status_reports_pending_in_lazy_context():
+    ctx = Context(eager=False)
+    ctx.double = double
+    ctx.double.pins.x = 3
+
+    assert ctx.double.status == "Status: pending"
+    assert ctx.double.result.status == "Status: pending"
