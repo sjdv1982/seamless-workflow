@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import inspect
-import logging
 import operator
 import textwrap
 from typing import Any
@@ -49,11 +48,11 @@ class Context:
 
     def __del__(self):
         try:
-            self._release_refholds()
-        except BaseException as exc:
-            logging.getLogger("seamless.references").warning(
-                "Context 0x%x reference cleanup raised: %s", id(self), exc
-            )
+            from seamless.reference_lifecycle import safe_release_refholder
+
+            safe_release_refholder(self)
+        except Exception:
+            pass
 
     def __getattr__(self, name):
         if name.startswith("_"):
@@ -152,28 +151,10 @@ class Context:
     def _delete(self, path):
         path = tuple(path)
         if path in self._graph.nodes:
-            descendants = self._graph.descendants(path)
-            for node_path in descendants:
-                node = self._graph.nodes.pop(node_path, None)
-                if node is not None:
-                    if node.current_checksum is not None:
-                        node.current_checksum.decref_refholder()
-                        node.current_checksum = None
-                    self._release_node_producers(node, node_path)
-                    self._release_code_checksum(node_path)
-                self._runtime.current_runs.pop(node_path, None)
-                self._runtime.superseded_runs.pop(node_path, None)
-                self._sync_module_refholds()
-                self._sync_superseded_refholds()
-            self._graph.edges = [
-                edge for edge in self._graph.edges
-                if not edge.source[: len(path)] == path and not edge.target[: len(path)] == path
-            ]
-            self._derive_all()
+            self._delete_subtree(path)
             return
-        if path in self._graph.namespaces:
-            self._graph.namespaces = {p for p in self._graph.namespaces if p[: len(path)] != path}
-            self._derive_all()
+        if path in self._graph.namespaces or self._graph.has_prefix(path):
+            self._delete_subtree(path)
             return
         try:
             node_path, local = self._graph.resolve_existing(path)
@@ -184,6 +165,35 @@ class Context:
         elif len(local) == 1:
             self._delete_transformer_pin(node_path, local[0])
 
+    def _delete_subtree(self, path):
+        """Remove a node or namespace subtree and release each role once."""
+
+        path = tuple(path)
+        for node_path in self._graph.descendants(path):
+            node = self._graph.nodes.pop(node_path, None)
+            if node is None:
+                continue
+            if node.current_checksum is not None:
+                node.current_checksum.decref_refholder()
+                node.current_checksum = None
+            self._release_node_producers(node, node_path)
+            self._release_code_checksum(node_path)
+            self._runtime.current_runs.pop(node_path, None)
+            self._runtime.superseded_runs.pop(node_path, None)
+        self._graph.namespaces = {
+            namespace
+            for namespace in self._graph.namespaces
+            if namespace[: len(path)] != path
+        }
+        self._graph.edges = [
+            edge
+            for edge in self._graph.edges
+            if edge.source[: len(path)] != path and edge.target[: len(path)] != path
+        ]
+        self._sync_module_refholds()
+        self._sync_superseded_refholds()
+        self._derive_all()
+
     def _create_cell(self, path, *, celltype="mixed"):
         if path in self._graph.nodes:
             raise NodeError(path)
@@ -193,12 +203,21 @@ class Context:
 
     def _create_cell_from_builder(self, path, cell):
         self._create_cell(path, celltype=cell.celltype)
-        self._replace_cell_from_builder(path, cell)
+        try:
+            self._replace_cell_from_builder(path, cell)
+        except Exception:
+            self._delete_subtree(path)
+            raise
 
     def _replace_cell_from_builder(self, path, cell):
         node = self._graph.nodes[path]
-        node.cell_config = CellConfig(cell.celltype, cell.target_celltype, cell.validator, cell.validator_language)
         input_ref = cell.input_ref
+        new_config = CellConfig(
+            cell.celltype,
+            cell.target_celltype,
+            cell.validator,
+            cell.validator_language,
+        )
         if isinstance(input_ref, Cell):
             if input_ref._workflow_backend is not None:
                 self._add_endpoint_edge(input_ref, self._cell_endpoint(path))
@@ -209,19 +228,36 @@ class Context:
         elif self._is_bound_source(input_ref):
             self._add_endpoint_edge(input_ref, self._cell_endpoint(path))
         elif input_ref is not None:
-            self._set_cell_root(path, checksum_for_value(input_ref, cell.celltype), cell.celltype)
+            # Serialize and acquire the replacement before mutating the
+            # graph's semantic configuration or releasing the old producer.
+            checksum = checksum_for_value(input_ref, cell.celltype)
+            producer = self._retain_producer(checksum, cell.celltype)
+            old_producer = node.cell_root_producer
+            node.cell_config = new_config
+            node.cell_root_producer = producer
+            if old_producer is not None:
+                self._release_producer(old_producer, path)
+            self._remove_edges_targeting(path, (), descendants=True)
         else:
+            node.cell_config = new_config
             producer = node.cell_root_producer
             node.cell_root_producer = None
             if producer is not None:
                 self._release_producer(producer, path)
             self._remove_edges_targeting(path, (), descendants=True)
+        if node.cell_config is not new_config and input_ref is not None:
+            node.cell_config = new_config
         object.__setattr__(cell, "_workflow_backend", BoundCellBackend(self, path))
+        cell._release_refholds()
 
     def _transformer_config_from_snapshot(self, snapshot, *, direct=False):
+        codebuf = snapshot.codebuf
+        code_checksum = (
+            codebuf if isinstance(codebuf, Checksum) else codebuf.get_checksum()
+        )
         cfg = TransformerConfig(
-            code=snapshot.codebuf,
-            code_checksum=snapshot.codebuf.get_checksum(),
+            code=codebuf,
+            code_checksum=code_checksum,
             language=snapshot.language,
             callable=snapshot.callable,
             pins=set(snapshot.celltypes) - {"result"},
@@ -268,29 +304,53 @@ class Context:
         self._retain_code_checksum(path, cfg.code_checksum)
 
     def _create_transformer_from_builder(self, path, transformer):
-        snapshot = transformer._snapshot_for_call()
-        cfg, snapshot = self._transformer_config_from_snapshot(
-            snapshot, direct=transformer.__class__.__name__ == "DirectTransformer"
-        )
-        self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg)
-        self._retain_code_checksum(path, cfg.code_checksum)
-        for pin, value in snapshot.args.items():
-            self._set_transformer_pin(path, pin, value)
-        object.__setattr__(transformer, "_workflow_backend", BoundTransformerBackend(self, path))
+        try:
+            snapshot = transformer._snapshot_for_call()
+            cfg, snapshot = self._transformer_config_from_snapshot(
+                snapshot, direct=transformer.__class__.__name__ == "DirectTransformer"
+            )
+            self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg)
+            self._retain_code_checksum(path, cfg.code_checksum)
+            for pin, value in snapshot.args.items():
+                self._set_transformer_pin(path, pin, value)
+            object.__setattr__(transformer, "_workflow_backend", BoundTransformerBackend(self, path))
+            transformer._release_refholds()
+        except Exception:
+            self._delete_subtree(path)
+            raise
 
     def _replace_transformer_from_builder(self, path, transformer):
         node = self._graph.nodes[path]
         snapshot = transformer._snapshot_for_call()
         cfg, snapshot = self._transformer_config_from_snapshot(snapshot, direct=transformer.__class__.__name__ == "DirectTransformer")
         cfg.pins.update(node.transformer_config.pins)
-        node.transformer_config = cfg
-        self._replace_code_checksum(path, cfg.code_checksum)
-        for pin, producer in list(node.transformer_pin_producers.items()):
-            self._release_producer(producer, path + (pin,))
-        node.transformer_pin_producers.clear()
-        for pin, value in snapshot.args.items():
-            self._set_transformer_pin(path, pin, value)
-        object.__setattr__(transformer, "_workflow_backend", BoundTransformerBackend(self, path))
+        new_producers = {}
+        try:
+            # Acquire all replacement state before touching the old semantic
+            # fields.  This makes a failed conversion leave the old node live.
+            for pin, value in snapshot.args.items():
+                if self._endpoint(value) is not None:
+                    continue
+                checksum = checksum_for_value(value, cfg.celltypes.get(pin, "mixed"))
+                new_producers[pin] = self._retain_producer(
+                    checksum, cfg.celltypes.get(pin, "mixed")
+                )
+            self._replace_code_checksum(path, cfg.code_checksum)
+            old_producers = node.transformer_pin_producers
+            node.transformer_config = cfg
+            node.transformer_pin_producers = new_producers
+            for pin, producer in old_producers.items():
+                self._release_producer(producer, path + (pin,))
+            for pin, value in snapshot.args.items():
+                if self._endpoint(value) is not None:
+                    self._set_transformer_pin(path, pin, value)
+            self._derive_all()
+            object.__setattr__(transformer, "_workflow_backend", BoundTransformerBackend(self, path))
+            transformer._release_refholds()
+        except Exception:
+            for producer in new_producers.values():
+                self._release_producer(producer, path)
+            raise
 
     def _set_cell_config(self, path, **updates):
         cfg = self._graph.nodes[path].cell_config
@@ -465,14 +525,15 @@ class Context:
             for module_name, module in node.transformer_config.modules.items():
                 if isinstance(module, Checksum):
                     active[(path, module_name)] = normalize_checksum(module)
+        for role, checksum in active.items():
+            old = self._module_refholds.get(role)
+            if old is None or old != checksum:
+                checksum.incref_refholder()
+                self._module_refholds[role] = checksum
         for role, checksum in list(self._module_refholds.items()):
             if role not in active or active[role] != checksum:
                 checksum.decref_refholder()
                 del self._module_refholds[role]
-        for role, checksum in active.items():
-            if role not in self._module_refholds:
-                checksum.incref_refholder()
-                self._module_refholds[role] = checksum
 
     def _delete_transformer_pin(self, node_path, pin):
         if not pin:
@@ -661,7 +722,7 @@ class Context:
                 claims.append((producer.checksum, f"transformer:{':'.join(path)}:pin:{pin}"))
             if node.kind == "transformer":
                 cfg = node.transformer_config
-                code_checksum = self._code_refholds.get(path)
+                code_checksum = cfg.code_checksum
                 if code_checksum is not None:
                     claims.append((code_checksum, f"transformer:{':'.join(path)}:code"))
                 for module_name, module in cfg.modules.items():
