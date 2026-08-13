@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import copy
 import inspect
+import logging
 import operator
-import sys
 import textwrap
 from typing import Any
 from uuid import uuid4
@@ -37,21 +37,23 @@ class Context:
         object.__setattr__(self, "top_id", uuid4().hex)
         object.__setattr__(self, "_graph", ContextGraph())
         object.__setattr__(self, "_runtime", ContextRuntime())
-        object.__setattr__(self, "_checksum_holds", {})
+        object.__setattr__(self, "_refholds_released", False)
+        object.__setattr__(self, "_code_refholds", {})
+        object.__setattr__(self, "_module_refholds", {})
+        object.__setattr__(self, "_superseded_refholds", {})
         object.__setattr__(self, "eager", bool(eager))
         object.__setattr__(self, "_prefix", ())
+        from seamless.reference_lifecycle import register_refholder
+
+        register_refholder(self)
 
     def __del__(self):
         try:
-            self._release_all_producers()
+            self._release_refholds()
         except BaseException as exc:
-            try:
-                print(
-                    f"ERROR: workflow garbage collection failed: {exc}",
-                    file=sys.stderr,
-                )
-            except BaseException:
-                pass
+            logging.getLogger("seamless.references").warning(
+                "Context 0x%x reference cleanup raised: %s", id(self), exc
+            )
 
     def __getattr__(self, name):
         if name.startswith("_"):
@@ -154,9 +156,15 @@ class Context:
             for node_path in descendants:
                 node = self._graph.nodes.pop(node_path, None)
                 if node is not None:
+                    if node.current_checksum is not None:
+                        node.current_checksum.decref_refholder()
+                        node.current_checksum = None
                     self._release_node_producers(node, node_path)
+                    self._release_code_checksum(node_path)
                 self._runtime.current_runs.pop(node_path, None)
                 self._runtime.superseded_runs.pop(node_path, None)
+                self._sync_module_refholds()
+                self._sync_superseded_refholds()
             self._graph.edges = [
                 edge for edge in self._graph.edges
                 if not edge.source[: len(path)] == path and not edge.target[: len(path)] == path
@@ -255,7 +263,9 @@ class Context:
         return TransformerConfig(code=buf, code_checksum=buf.get_checksum(), language="text", meta={"local": False})
 
     def _create_transformer(self, path, code):
-        self._graph.nodes[path] = Node(kind="transformer", transformer_config=self._transformer_config_from_code(code))
+        cfg = self._transformer_config_from_code(code)
+        self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg)
+        self._retain_code_checksum(path, cfg.code_checksum)
 
     def _create_transformer_from_builder(self, path, transformer):
         snapshot = transformer._snapshot_for_call()
@@ -263,6 +273,7 @@ class Context:
             snapshot, direct=transformer.__class__.__name__ == "DirectTransformer"
         )
         self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg)
+        self._retain_code_checksum(path, cfg.code_checksum)
         for pin, value in snapshot.args.items():
             self._set_transformer_pin(path, pin, value)
         object.__setattr__(transformer, "_workflow_backend", BoundTransformerBackend(self, path))
@@ -273,6 +284,7 @@ class Context:
         cfg, snapshot = self._transformer_config_from_snapshot(snapshot, direct=transformer.__class__.__name__ == "DirectTransformer")
         cfg.pins.update(node.transformer_config.pins)
         node.transformer_config = cfg
+        self._replace_code_checksum(path, cfg.code_checksum)
         for pin, producer in list(node.transformer_pin_producers.items()):
             self._release_producer(producer, path + (pin,))
         node.transformer_pin_producers.clear()
@@ -385,6 +397,7 @@ class Context:
         endpoint = self._endpoint(code)
         if endpoint is not None:
             self._add_endpoint_edge(code, self._transformer_endpoint(node_path, "code"))
+            self._release_code_checksum(node_path)
             self._graph.nodes[node_path].transformer_config.code_checksum = None
             self._derive_all()
             return
@@ -394,6 +407,7 @@ class Context:
         cfg.pins.update(old.pins)
         cfg.optional_pins = old.optional_pins & cfg.pins
         node.transformer_config = cfg
+        self._replace_code_checksum(node_path, cfg.code_checksum)
         self._derive_all()
 
     def _set_transformer_pin(self, node_path, pin, value):
@@ -419,6 +433,46 @@ class Context:
                 self._release_producer(old_producer, node_path + (pin,))
             self._remove_edges_targeting(node_path, (pin,), descendants=True)
         self._derive_all()
+
+    def _retain_code_checksum(self, path, checksum):
+        if checksum is None:
+            return
+        checksum = normalize_checksum(checksum)
+        checksum.incref_refholder()
+        self._code_refholds[tuple(path)] = checksum
+
+    def _replace_code_checksum(self, path, checksum):
+        old = self._code_refholds.get(tuple(path))
+        new = None if checksum is None else normalize_checksum(checksum)
+        if new is not None:
+            new.incref_refholder()
+            self._code_refholds[tuple(path)] = new
+        else:
+            self._code_refholds.pop(tuple(path), None)
+        if old is not None:
+            old.decref_refholder()
+
+    def _release_code_checksum(self, path):
+        old = self._code_refholds.pop(tuple(path), None)
+        if old is not None:
+            old.decref_refholder()
+
+    def _sync_module_refholds(self):
+        active = {}
+        for path, node in self._graph.nodes.items():
+            if node.kind != "transformer":
+                continue
+            for module_name, module in node.transformer_config.modules.items():
+                if isinstance(module, Checksum):
+                    active[(path, module_name)] = normalize_checksum(module)
+        for role, checksum in list(self._module_refholds.items()):
+            if role not in active or active[role] != checksum:
+                checksum.decref_refholder()
+                del self._module_refholds[role]
+        for role, checksum in active.items():
+            if role not in self._module_refholds:
+                checksum.incref_refholder()
+                self._module_refholds[role] = checksum
 
     def _delete_transformer_pin(self, node_path, pin):
         if not pin:
@@ -577,33 +631,60 @@ class Context:
 
     def _retain_producer(self, checksum, celltype):
         checksum = normalize_checksum(checksum)
-        checksum.incref()
-        holds = self._checksum_holds
-        holds[checksum] = holds.get(checksum, 0) + 1
+        checksum.incref_refholder()
         return ConstantProducer(checksum, celltype)
 
     def _release_producer(self, producer, owner):
         checksum = producer.checksum
-        holds = self._checksum_holds
-        count = holds.get(checksum, 0)
-        if count == 0:
-            self._report_refcount_error(checksum, owner, "workflow ownership")
-            return
-        if count == 1:
-            holds.pop(checksum)
-        else:
-            holds[checksum] = count - 1
-        if not checksum.decref():
-            self._report_refcount_error(checksum, owner, "buffer cache")
+        checksum.decref_refholder()
 
-    @staticmethod
-    def _report_refcount_error(checksum, owner, refcount):
-        path = ".".join(str(component) for component in owner)
-        print(
-            f"ERROR: {refcount} refcount already zero for workflow checksum "
-            f"{checksum.hex()} at {path}",
-            file=sys.stderr,
-        )
+    def _replace_current_checksum(self, node_path, checksum):
+        """Acquire a node current result before replacing its semantic field."""
+
+        node = self._graph.nodes[node_path]
+        new_checksum = None if checksum is None else normalize_checksum(checksum)
+        old_checksum = node.current_checksum
+        if new_checksum is not None:
+            new_checksum.incref_refholder()
+        node.current_checksum = new_checksum
+        if old_checksum is not None:
+            old_checksum.decref_refholder()
+
+    def _refheld_checksums(self):
+        if self._refholds_released:
+            return ()
+        claims = []
+        for path, node in self._graph.nodes.items():
+            if node.cell_root_producer is not None:
+                claims.append((node.cell_root_producer.checksum, f"cell:{':'.join(path)}:literal"))
+            for pin, producer in node.transformer_pin_producers.items():
+                claims.append((producer.checksum, f"transformer:{':'.join(path)}:pin:{pin}"))
+            if node.kind == "transformer":
+                cfg = node.transformer_config
+                code_checksum = self._code_refholds.get(path)
+                if code_checksum is not None:
+                    claims.append((code_checksum, f"transformer:{':'.join(path)}:code"))
+                for module_name, module in cfg.modules.items():
+                    if isinstance(module, Checksum):
+                        claims.append((module, f"transformer:{':'.join(path)}:module:{module_name}"))
+            if node.current_checksum is not None:
+                claims.append((node.current_checksum, f"node:{':'.join(path)}:current"))
+        for path, records in self._runtime.superseded_runs.items():
+            for record in records:
+                if record.result_checksum is not None and record.phase != "cancelled":
+                    claims.append((record.result_checksum, f"node:{':'.join(path)}:superseded:{record.generation}"))
+        return claims
+
+    def _release_refholds(self):
+        if self._refholds_released:
+            return
+        for checksum, _role in list(self._refheld_checksums()):
+            checksum.decref_refholder()
+        self._superseded_refholds.clear()
+        self._refholds_released = True
+
+    def _release_all_producers(self):
+        self._release_refholds()
 
     def _release_node_producers(self, node, path):
         if node.cell_root_producer is not None:
@@ -611,19 +692,10 @@ class Context:
         for pin, producer in node.transformer_pin_producers.items():
             self._release_producer(producer, path + (pin,))
 
-    def _release_all_producers(self):
-        holds = getattr(self, "_checksum_holds", None)
-        if not holds:
-            return
-        for checksum, count in list(holds.items()):
-            for _ in range(count):
-                if not checksum.decref():
-                    self._report_refcount_error(checksum, ("<garbage-collection>",), "buffer cache")
-        holds.clear()
-
     def _derive_all(self):
         # A source may sort after its target; converge the small durable graph
         # rather than making public state depend on lexical node names.
+        self._sync_module_refholds()
         for _ in range(max(1, len(self._graph.nodes))):
             before = tuple(
                 (path, self._graph.nodes[path].state, self._graph.nodes[path].current_checksum.hex() if self._graph.nodes[path].current_checksum else None)
@@ -639,6 +711,22 @@ class Context:
                 break
         for path in sorted(self._graph.nodes):
             self._update_runtime(path)
+        self._sync_superseded_refholds()
+
+    def _sync_superseded_refholds(self):
+        active = {}
+        for records in self._runtime.superseded_runs.values():
+            for record in records:
+                if record.phase != "cancelled" and record.result_checksum is not None:
+                    active[id(record)] = record.result_checksum
+        for record_id, checksum in list(self._superseded_refholds.items()):
+            if record_id not in active:
+                checksum.decref_refholder()
+                del self._superseded_refholds[record_id]
+        for record_id, checksum in active.items():
+            if record_id not in self._superseded_refholds:
+                checksum.incref_refholder()
+                self._superseded_refholds[record_id] = checksum
 
     def _derive_node(self, path):
         node = self._graph.nodes[path]
@@ -653,7 +741,7 @@ class Context:
             self._apply_upstream_state(node, self._source_state(incoming[()]))
             return
         if node.cell_root_producer is not None and not any(len(local) for local in incoming):
-            node.current_checksum = node.cell_root_producer.checksum
+            self._replace_current_checksum(path, node.cell_root_producer.checksum)
             node.state, node.block_reason, node.exception = "complete", None, None
             return
         base = None
@@ -662,7 +750,8 @@ class Context:
         elif incoming:
             base = {} if all(isinstance(local[0], str) for local in incoming if local) else None
         if not incoming and base is None:
-            node.current_checksum, node.state, node.block_reason = None, "unwired", None
+            self._replace_current_checksum(path, None)
+            node.state, node.block_reason = "unwired", None
             return
         if base is None:
             self._apply_pending(node, incoming.values())
@@ -676,13 +765,14 @@ class Context:
                 self._apply_pending(node, [edge])
                 return
             if len(local) != 1:
-                node.state = "failed"; node.exception = PathError("Cell target deeper than one component"); node.current_checksum = None; return
+                node.state = "failed"; node.exception = PathError("Cell target deeper than one component"); self._replace_current_checksum(path, None); return
             _assign_path(result, local, value_for_checksum(checksum, "mixed"))
         try:
-            node.current_checksum = checksum_for_value(result, node.cell_config.celltype)
+            self._replace_current_checksum(path, checksum_for_value(result, node.cell_config.celltype))
             node.state, node.block_reason, node.exception = "complete", None, None
         except Exception as exc:
-            node.state, node.exception, node.current_checksum = "failed", exc, None
+            node.state, node.exception = "failed", exc
+            self._replace_current_checksum(path, None)
 
     def _derive_transformer(self, path, node):
         cfg = node.transformer_config
@@ -693,7 +783,8 @@ class Context:
             if state != "complete":
                 self._apply_pending(node, [incoming[("code",)]]); return
         if code_checksum is None:
-            node.state, node.current_checksum = "unwired", None
+            node.state = "unwired"
+            self._replace_current_checksum(path, None)
             return
         try:
             kwargs = {}
@@ -709,27 +800,26 @@ class Context:
                 if checksum is None:
                     if pin in cfg.optional_pins:
                         continue
-                    node.state, node.current_checksum, node.block_reason = "unwired", None, None
+                    node.state, node.block_reason = "unwired", None
+                    self._replace_current_checksum(path, None)
                     return
                 kwargs[pin] = value_for_checksum(
                     checksum, cfg.celltypes.get(pin, "mixed")
                 )
             if cfg.callable is None:
-                node.state, node.current_checksum, node.block_reason = "complete", None, None
+                node.state, node.block_reason, node.exception = "complete", None, None
+                self._replace_current_checksum(path, None)
                 return
             if not self.eager and node.active_count == 0 and node.derived_active_count == 0:
-                node.state, node.current_checksum = "waiting", None
+                node.state = "waiting"
+                self._replace_current_checksum(path, None)
                 return
             result = cfg.callable(**kwargs)
-            node.current_checksum = checksum_for_value(result, cfg.celltypes.get("result", "mixed"))
+            self._replace_current_checksum(path, checksum_for_value(result, cfg.celltypes.get("result", "mixed")))
             node.state, node.block_reason, node.exception = "complete", None, None
         except BaseException as exc:
-            node.state, node.current_checksum, node.block_reason, node.exception = (
-                "failed",
-                None,
-                None,
-                exc,
-            )
+            node.state, node.block_reason, node.exception = "failed", None, exc
+            self._replace_current_checksum(path, None)
 
     def _source_state(self, edge):
         source_node, source_local = self._graph.resolve_existing(edge.source)
@@ -743,19 +833,28 @@ class Context:
         state = "failed" if "failed" in states or "blocked" in states else ("waiting" if "waiting" in states or "computing" in states else "blocked")
         node.state = "blocked" if state in {"failed", "blocked"} else state
         node.block_reason = "blocked-by-error" if state in {"failed", "blocked"} else None
-        node.current_checksum = None
+        self._replace_current_checksum(
+            next(path for path, candidate in self._graph.nodes.items() if candidate is node),
+            None,
+        )
 
     def _apply_upstream_state(self, node, upstream):
         state, checksum = upstream
         if state == "complete":
-            node.current_checksum = checksum
+            self._replace_current_checksum(
+                next(path for path, candidate in self._graph.nodes.items() if candidate is node),
+                checksum,
+            )
             node.state, node.block_reason, node.exception = "complete", None, None
         elif state == "failed":
-            node.current_checksum, node.state, node.block_reason = None, "blocked", "blocked-by-error"
+            self._replace_current_checksum(next(path for path, candidate in self._graph.nodes.items() if candidate is node), None)
+            node.state, node.block_reason = "blocked", "blocked-by-error"
         elif state in {"blocked", "unwired"}:
-            node.current_checksum, node.state, node.block_reason = None, "blocked", "blocked-by-unwired"
+            self._replace_current_checksum(next(path for path, candidate in self._graph.nodes.items() if candidate is node), None)
+            node.state, node.block_reason = "blocked", "blocked-by-unwired"
         else:
-            node.current_checksum, node.state, node.block_reason = None, "waiting", None
+            self._replace_current_checksum(next(path for path, candidate in self._graph.nodes.items() if candidate is node), None)
+            node.state, node.block_reason = "waiting", None
 
     def _get_checksum(self, node_path, local=()):
         node = self._graph.nodes[node_path]
@@ -873,7 +972,9 @@ class Context:
 
     def prune(self, node_path=None):
         paths = None if node_path is None else {node_path} | self._downstream_cone(node_path)
-        return {"cancelled": self._runtime.prune(paths)}
+        result = {"cancelled": self._runtime.prune(paths)}
+        self._sync_superseded_refholds()
+        return result
 
     def _downstream_cone(self, node_path):
         result, stack = set(), [node_path]
@@ -919,6 +1020,10 @@ class Context:
 
     def set_graph(self, graph):
         self._release_all_producers()
+        self._code_refholds.clear()
+        self._module_refholds.clear()
+        self._superseded_refholds.clear()
+        self._refholds_released = False
         self._graph, self._runtime = ContextGraph(), ContextRuntime()
         self.eager = graph.get("params", {}).get("eager", True)
         for entry in graph.get("nodes", []):
@@ -966,6 +1071,7 @@ class Context:
                     for p, q in entry.get("producers", {}).items()
                 }
                 self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg, transformer_pin_producers=producers)
+                self._retain_code_checksum(path, cfg.code_checksum)
         for edge in graph.get("connections", []):
             source, target = tuple(edge["source"]), tuple(edge["target"])
             source_node, source_local = self._graph.resolve_existing(source)
@@ -995,6 +1101,10 @@ class Context:
                 copied_node.transformer_pin_producers[pin] = self._retain_producer(
                     producer.checksum, producer.celltype
                 )
+            if copied_node.current_checksum is not None:
+                copied_node.current_checksum.incref_refholder()
+            if copied_node.kind == "transformer":
+                self._retain_code_checksum(copied_path, copied_node.transformer_config.code_checksum)
         for edge in list(self._graph.edges):
             if edge.source[:len(source_prefix)] == source_prefix and edge.target[:len(source_prefix)] == source_prefix:
                 self._graph.edges.append(Edge(target_prefix + edge.source[len(source_prefix):], target_prefix + edge.target[len(source_prefix):], edge.source_celltype, edge.target_celltype))

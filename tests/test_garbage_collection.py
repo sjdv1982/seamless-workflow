@@ -12,9 +12,8 @@ def identity(value):
     return value
 
 
-def _normal_refs(checksum):
-    entry = get_buffer_cache().strong_cache.get(checksum)
-    return 0 if entry is None else entry.normal_refs
+def _refholder_refs(checksum):
+    return get_buffer_cache().reference_snapshot().get(checksum, (0, 0, False))[0]
 
 
 def test_workflow_gc_releases_cell_and_transformer_pin_holds():
@@ -29,14 +28,14 @@ def test_workflow_gc_releases_cell_and_transformer_pin_holds():
         "value"
     ].checksum
     assert cell_checksum == pin_checksum
-    assert _normal_refs(cell_checksum) == 2
+    assert _refholder_refs(cell_checksum) == 4
 
     context_ref = weakref.ref(ctx)
     del ctx
     gc.collect()
 
     assert context_ref() is None
-    assert _normal_refs(cell_checksum) == 0
+    assert _refholder_refs(cell_checksum) == 0
 
 
 def test_replacement_and_deletion_release_producer_holds():
@@ -46,8 +45,8 @@ def test_replacement_and_deletion_release_producer_holds():
     ctx.value = {"second": uuid4().hex}
     second_cell = ctx._graph.nodes[("value",)].cell_root_producer.checksum
 
-    assert _normal_refs(first_cell) == 0
-    assert _normal_refs(second_cell) == 1
+    assert _refholder_refs(first_cell) == 1
+    assert _refholder_refs(second_cell) == 2
 
     ctx.identity = identity
     ctx.identity.pins.value = {"first-pin": uuid4().hex}
@@ -59,13 +58,15 @@ def test_replacement_and_deletion_release_producer_holds():
         "value"
     ].checksum
 
-    assert _normal_refs(first_pin) == 0
-    assert _normal_refs(second_pin) == 1
+    assert _refholder_refs(first_pin) == 1
+    assert _refholder_refs(second_pin) == 2
 
     del ctx.identity.pins.value
     del ctx.value
-    assert _normal_refs(second_pin) == 0
-    assert _normal_refs(second_cell) == 0
+    assert _refholder_refs(second_pin) == 1
+    ctx.identity.prune()
+    assert _refholder_refs(second_pin) == 0
+    assert _refholder_refs(second_cell) == 0
 
 
 def test_connections_release_replaced_literal_producers():
@@ -75,7 +76,7 @@ def test_connections_release_replaced_literal_producers():
     target_checksum = ctx._graph.nodes[("target",)].cell_root_producer.checksum
 
     ctx.target = ctx.source
-    assert _normal_refs(target_checksum) == 0
+    assert _refholder_refs(target_checksum) == 1
 
     ctx.identity = identity
     ctx.identity.pins.value = {"pin": uuid4().hex}
@@ -83,7 +84,7 @@ def test_connections_release_replaced_literal_producers():
         "value"
     ].checksum
     ctx.identity.pins.value = ctx.source
-    assert _normal_refs(pin_checksum) == 0
+    assert _refholder_refs(pin_checksum) == 1
 
 
 def test_graph_load_and_subcontext_copy_adopt_independent_holds():
@@ -91,37 +92,34 @@ def test_graph_load_and_subcontext_copy_adopt_independent_holds():
     ctx.sub = Context()
     ctx.sub.value = {"token": uuid4().hex}
     checksum = ctx._graph.nodes[("sub", "value")].cell_root_producer.checksum
-    assert _normal_refs(checksum) == 1
+    assert _refholder_refs(checksum) == 2
 
     ctx.copy = ctx.sub
-    assert _normal_refs(checksum) == 2
+    assert _refholder_refs(checksum) == 4
 
     clone = Context()
     clone.set_graph(ctx.get_graph())
-    assert _normal_refs(checksum) == 4
+    assert _refholder_refs(checksum) == 8
 
     del clone
     gc.collect()
-    assert _normal_refs(checksum) == 2
+    assert _refholder_refs(checksum) == 4
 
     del ctx
     gc.collect()
-    assert _normal_refs(checksum) == 0
+    assert _refholder_refs(checksum) == 0
 
 
-def test_workflow_gc_reports_cache_refcount_underflow(capsys):
+def test_workflow_gc_reports_cache_refcount_underflow(caplog):
     ctx = Context()
     ctx.value = {"token": uuid4().hex}
     checksum = ctx._graph.nodes[("value",)].cell_root_producer.checksum
-    assert checksum.decref() is True
-    capsys.readouterr()
+    assert checksum.decref_refholder() is True
+    caplog.clear()
 
     context_ref = weakref.ref(ctx)
     del ctx
     gc.collect()
 
     assert context_ref() is None
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "ERROR: buffer cache refcount already zero" in captured.err
-    assert checksum.hex() in captured.err
+    assert "Refholder decref ignored" in caplog.text
