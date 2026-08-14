@@ -93,3 +93,93 @@ def test_context_code_claim_is_derived_from_graph_state(caplog):
     assert "live claims" in caplog.text
     checksum.incref_refholder()
     ctx._release_refholds()
+
+
+def test_checksum_module_replacement_releases_old_role():
+    ctx = Context()
+    ctx.transformer = identity
+    first = Buffer(b"module-replacement-first").get_checksum()
+    second = Buffer(b"module-replacement-second").get_checksum()
+
+    ctx.transformer.modules.example = first
+    assert _count(first) == 1
+    ctx.transformer.modules.example = second
+
+    assert _count(first) == 0
+    assert _count(second) == 1
+    assert (second, "transformer:transformer:module:example") in tuple(
+        ctx._refheld_checksums()
+    )
+
+    ctx._release_refholds()
+    assert _count(second) == 0
+
+
+def test_failed_transformer_replacement_restores_graph_and_roles(monkeypatch, caplog):
+    from seamless.transformer import delayed
+
+    ctx = Context()
+    ctx.transformer = identity
+    ctx.transformer.pins.value = 31
+    path = ("transformer",)
+    node = ctx._graph.nodes[path]
+    old_config = node.transformer_config
+    old_producer = node.transformer_pin_producers["value"]
+    old_claims = tuple(ctx._refheld_checksums())
+
+    replacement_checksum = Buffer(32, "int").get_checksum()
+    replacement = delayed(identity)
+    replacement.args.value = replacement_checksum
+    assert _count(replacement_checksum) == 1
+
+    def fail_after_publication():
+        raise RuntimeError("forced late replacement failure")
+
+    monkeypatch.setattr(ctx, "_derive_all", fail_after_publication)
+    with pytest.raises(RuntimeError, match="forced late replacement failure"):
+        ctx._replace_transformer_from_builder(path, replacement)
+
+    node = ctx._graph.nodes[path]
+    assert node.transformer_config is old_config
+    assert node.transformer_pin_producers["value"] is old_producer
+    assert tuple(ctx._refheld_checksums()) == old_claims
+    assert replacement._workflow_backend is None
+    assert replacement._refholds_released is False
+    assert _count(replacement_checksum) == 1
+
+    with caplog.at_level("WARNING", logger="seamless.references"):
+        audit_reference_accounting(holders=[ctx, replacement])
+    assert caplog.text == ""
+
+    replacement._release_refholds()
+    ctx._release_refholds()
+
+
+def test_transformer_replacement_transfers_pin_and_module_roles():
+    from seamless.transformer import delayed
+
+    ctx = Context()
+    ctx.transformer = identity
+    old_pin = Buffer(41, "int").get_checksum()
+    old_module = Buffer(b"replacement-old-module").get_checksum()
+    ctx.transformer.pins.value = old_pin
+    ctx.transformer.modules.example = old_module
+
+    new_pin = Buffer(42, "int").get_checksum()
+    new_module = Buffer(b"replacement-new-module").get_checksum()
+    replacement = delayed(identity)
+    replacement.args.value = new_pin
+    replacement.modules.example = new_module
+
+    ctx.transformer = replacement
+
+    assert _count(old_pin) == 0
+    assert _count(old_module) == 0
+    assert _count(new_pin) == 1
+    assert _count(new_module) == 1
+    assert replacement._refholds_released is True
+    assert replacement._workflow_backend is not None
+
+    ctx._release_refholds()
+    assert _count(new_pin) == 0
+    assert _count(new_module) == 0

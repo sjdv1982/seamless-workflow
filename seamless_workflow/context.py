@@ -324,7 +324,38 @@ class Context:
         snapshot = transformer._snapshot_for_call()
         cfg, snapshot = self._transformer_config_from_snapshot(snapshot, direct=transformer.__class__.__name__ == "DirectTransformer")
         cfg.pins.update(node.transformer_config.pins)
+        old_claims = list(self._refheld_checksums())
+        old_config = node.transformer_config
+        old_producers = node.transformer_pin_producers
+        old_edges = list(self._graph.edges)
+        old_code_refholds = self._code_refholds.copy()
+        old_module_refholds = self._module_refholds.copy()
+        old_superseded_refholds = self._superseded_refholds.copy()
+        old_node_runtime = {
+            node_path: (
+                graph_node.state,
+                graph_node.block_reason,
+                graph_node.current_checksum,
+                graph_node.active_count,
+                graph_node.derived_active_count,
+                graph_node.exception,
+            )
+            for node_path, graph_node in self._graph.nodes.items()
+        }
+        old_runtime = copy.copy(self._runtime)
+        old_runtime.scheduler = copy.copy(self._runtime.scheduler)
+        old_runtime.current_runs = {
+            node_path: copy.copy(record)
+            for node_path, record in self._runtime.current_runs.items()
+        }
+        old_runtime.superseded_runs = {
+            node_path: type(records)(copy.copy(record) for record in records)
+            for node_path, records in self._runtime.superseded_runs.items()
+        }
+
         new_producers = {}
+        staged_checksums = []
+        published = False
         try:
             # Acquire all replacement state before touching the old semantic
             # fields.  This makes a failed conversion leave the old node live.
@@ -335,21 +366,80 @@ class Context:
                 new_producers[pin] = self._retain_producer(
                     checksum, cfg.celltypes.get(pin, "mixed")
                 )
-            self._replace_code_checksum(path, cfg.code_checksum)
-            old_producers = node.transformer_pin_producers
+                staged_checksums.append(checksum)
+
+            new_code_checksum = normalize_checksum(cfg.code_checksum)
+            new_code_checksum.incref_refholder()
+            staged_checksums.append(new_code_checksum)
+
+            new_module_refs = {}
+            for module_name, module in cfg.modules.items():
+                if not isinstance(module, Checksum):
+                    continue
+                checksum = normalize_checksum(module)
+                checksum.incref_refholder()
+                staged_checksums.append(checksum)
+                new_module_refs[(path, module_name)] = checksum
+
+            # Publish the fully acquired replacement as one semantic state.
             node.transformer_config = cfg
             node.transformer_pin_producers = new_producers
+            self._code_refholds[path] = new_code_checksum
+            self._module_refholds = {
+                role: checksum
+                for role, checksum in self._module_refholds.items()
+                if role[0] != path
+            }
+            self._module_refholds.update(new_module_refs)
+            published = True
+            staged_checksums.clear()
+
             for pin, producer in old_producers.items():
                 self._release_producer(producer, path + (pin,))
+            old_code_checksum = old_code_refholds.get(path)
+            if old_code_checksum is not None:
+                old_code_checksum.decref_refholder()
+            for role, checksum in old_module_refholds.items():
+                if role[0] == path:
+                    checksum.decref_refholder()
+
             for pin, value in snapshot.args.items():
                 if self._endpoint(value) is not None:
                     self._set_transformer_pin(path, pin, value)
             self._derive_all()
-            object.__setattr__(transformer, "_workflow_backend", BoundTransformerBackend(self, path))
             transformer._release_refholds()
+            object.__setattr__(transformer, "_workflow_backend", BoundTransformerBackend(self, path))
         except Exception:
-            for producer in new_producers.values():
-                self._release_producer(producer, path)
+            if published:
+                current_claims = list(self._refheld_checksums())
+                # Re-establish the old ownership before removing the failed
+                # replacement, including equal-checksum roles.
+                for checksum, _role in old_claims:
+                    checksum.incref_refholder()
+
+                node.transformer_config = old_config
+                node.transformer_pin_producers = old_producers
+                self._graph.edges = old_edges
+                for node_path, runtime_state in old_node_runtime.items():
+                    graph_node = self._graph.nodes[node_path]
+                    (
+                        graph_node.state,
+                        graph_node.block_reason,
+                        graph_node.current_checksum,
+                        graph_node.active_count,
+                        graph_node.derived_active_count,
+                        graph_node.exception,
+                    ) = runtime_state
+                self._runtime = old_runtime
+                self._code_refholds = old_code_refholds
+                self._module_refholds = old_module_refholds
+                self._superseded_refholds = old_superseded_refholds
+
+                for checksum, _role in current_claims:
+                    checksum.decref_refholder()
+            else:
+                for checksum in reversed(staged_checksums):
+                    checksum.decref_refholder()
             raise
 
     def _set_cell_config(self, path, **updates):
@@ -525,15 +615,26 @@ class Context:
             for module_name, module in node.transformer_config.modules.items():
                 if isinstance(module, Checksum):
                     active[(path, module_name)] = normalize_checksum(module)
-        for role, checksum in active.items():
-            old = self._module_refholds.get(role)
-            if old is None or old != checksum:
-                checksum.incref_refholder()
-                self._module_refholds[role] = checksum
-        for role, checksum in list(self._module_refholds.items()):
-            if role not in active or active[role] != checksum:
+        old_refholds = self._module_refholds
+        acquired = []
+        try:
+            for role, checksum in active.items():
+                old = old_refholds.get(role)
+                if old is None or old != checksum:
+                    checksum.incref_refholder()
+                    acquired.append(checksum)
+        except Exception:
+            for checksum in reversed(acquired):
                 checksum.decref_refholder()
-                del self._module_refholds[role]
+            raise
+
+        # Publish the new operational map only after every new role is held,
+        # then release roles that are absent or replaced.  Overwriting the map
+        # first loses the old checksum and strands its refholder reference.
+        self._module_refholds = active
+        for role, checksum in old_refholds.items():
+            if active.get(role) != checksum:
+                checksum.decref_refholder()
 
     def _delete_transformer_pin(self, node_path, pin):
         if not pin:
