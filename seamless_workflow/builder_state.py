@@ -14,16 +14,6 @@ from .endpoints import BoundEndpoint
 from .errors import ReadOnlyEndpointError, StaleWorkflowHandleError
 
 
-_PUBLIC_STATUS = {
-    "unwired": "Status: unconnected",
-    "blocked": "Status: upstream",
-    "waiting": "Status: pending",
-    "computing": "Status: pending",
-    "complete": "Status: OK",
-    "failed": "Status: error",
-}
-
-
 def _path_string(path: tuple[Any, ...]) -> str:
     result = ""
     for component in path:
@@ -132,8 +122,12 @@ class BoundCellBackend:
         )
 
     @property
-    def status(self):
-        return _PUBLIC_STATUS[self._node().state]
+    def state(self):
+        return self._node().state
+
+    @property
+    def block_reason(self):
+        return self._node().block_reason
 
     @property
     def exception(self):
@@ -387,8 +381,12 @@ class BoundTransformerBackend:
         return self._node().transformer_config
 
     @property
-    def status(self):
-        return _PUBLIC_STATUS[self._node().state]
+    def state(self):
+        return self._node().state
+
+    @property
+    def block_reason(self):
+        return self._node().block_reason
 
     @property
     def exception(self):

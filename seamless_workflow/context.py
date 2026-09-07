@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from seamless import Buffer, Cell, Checksum, Expression
+from seamless_transformer import observation
 from seamless_transformer.builder_snapshot import TransformerBuilderSnapshot
 
 from .adapters import buffer_for_checksum, checksum_for_value, normalize_checksum, value_for_checksum
@@ -29,6 +30,45 @@ from .scheduler import ContextRuntime, ExceptionInfo, RunRecord
 from .views import MissingView, SubContextView
 
 PIN_CELLTYPES = {"plain", "mixed", "deepcell", "deepfolder", "folder"}
+
+
+def _transformation_identity(cfg, pin_checksums) -> Checksum:
+    """The transformation checksum for a Context-bound transformer's inputs.
+
+    Built in the same shape ``seamless_transformer`` uses — the load-bearing
+    dunders plus one ``(celltype, subcelltype, checksum)`` triple per pin,
+    serialised by ``tf_get_buffer`` — so that the observation log records a real
+    transformation checksum rather than an ad-hoc digest.
+
+    It is **not yet guaranteed to equal** the checksum the standalone path
+    computes for the same computation: that agreement is exactly what
+    **[MOD-15]** requires and does not have ("the two must agree on identity").
+    Recording both sites with the same construction is what will make the
+    disagreement visible when they finally meet, which is the point of writing it
+    this way rather than hashing whatever is convenient.
+
+    Called only while a recording is running, so its cost is not on the hot path.
+    """
+
+    from seamless_transformer.transformation_utils import tf_get_buffer
+
+    code_celltype = "python" if cfg.language == "python" else "text"
+    transformation = {
+        "__language__": cfg.language,
+        "__output__": ("result", cfg.celltypes.get("result", "mixed"), None),
+        "code": (
+            code_celltype,
+            "transformer",
+            cfg.code_checksum.hex() if cfg.code_checksum is not None else None,
+        ),
+    }
+    for pin, checksum in sorted(pin_checksums.items()):
+        transformation[pin] = (
+            cfg.celltypes.get(pin, "mixed"),
+            None,
+            checksum.hex() if checksum is not None else None,
+        )
+    return tf_get_buffer(transformation).get_checksum()
 
 
 class Context:
@@ -950,6 +990,7 @@ class Context:
             return
         try:
             kwargs = {}
+            pin_checksums = {}
             for pin in sorted(cfg.pins):
                 edge = incoming.get((pin,))
                 if edge is not None:
@@ -965,6 +1006,7 @@ class Context:
                     node.state, node.block_reason = "unwired", None
                     self._replace_current_checksum(path, None)
                     return
+                pin_checksums[pin] = checksum
                 kwargs[pin] = value_for_checksum(
                     checksum, cfg.celltypes.get(pin, "mixed")
                 )
@@ -976,6 +1018,26 @@ class Context:
                 node.state = "waiting"
                 self._replace_current_checksum(path, None)
                 return
+            if observation.is_observing():
+                # Always a miss: this call reaches the Python callable directly and
+                # never consults the transformation cache.  That is the A0 defect
+                # (§15 A0), so a cache-side instrument alone would report nothing;
+                # A1 deletes this call and this recording with it.
+                #
+                # Swallowed on purpose, and it has to be here rather than inside
+                # `observation`: this block sits inside the enclosing
+                # `except BaseException` that marks a node `failed`, so an
+                # instrument that raised would not merely lose a line — it would
+                # report a *transformer failure* that never happened, and the suite
+                # would read it as a contract violation.
+                try:
+                    observation.observe(
+                        _transformation_identity(cfg, pin_checksums),
+                        observation.CACHE_MISS,
+                        label=_path_string(path),
+                    )
+                except Exception:
+                    pass
             result = cfg.callable(**kwargs)
             self._replace_current_checksum(path, checksum_for_value(result, cfg.celltypes.get("result", "mixed")))
             node.state, node.block_reason, node.exception = "complete", None, None

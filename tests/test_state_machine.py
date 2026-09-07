@@ -64,40 +64,50 @@ def test_clear_exception_noop_and_successful_rederive_after_edit():
     assert ctx.reciprocal.result.value == 0.5
 
 
-def test_public_status_reports_complete_and_unconnected_nodes():
+def test_node_state_reports_complete_and_unwired_nodes():
     ctx = Context()
     ctx.value = 10
     ctx.double = double
 
-    assert ctx.value.status == "Status: OK"
-    assert ctx.double.status == "Status: unconnected"
-    assert ctx.double.result.status == "Status: unconnected"
+    assert ctx.value.state == "complete"
+    assert ctx.double.state == "unwired"
+    assert ctx.double.result.state == "unwired"
 
     ctx.double.pins.x = ctx.value
-    assert ctx.double.status == "Status: OK"
-    assert ctx.double.result.status == "Status: OK"
+    assert ctx.double.state == "complete"
+    assert ctx.double.result.state == "complete"
 
 
-def test_public_status_and_exception_report_own_failure_only():
+def test_node_state_and_exception_report_own_failure_only():
     ctx = Context()
     ctx.fail = fail
     ctx.inc = inc
     ctx.fail.pins.x = 1
     ctx.inc.pins.x = ctx.fail
 
-    assert ctx.fail.status == "Status: error"
+    assert ctx.fail.state == "failed"
     assert isinstance(ctx.fail.exception, RuntimeError)
     assert str(ctx.fail.exception) == "boom"
-    assert ctx.fail.result.status == "Status: error"
+    assert ctx.fail.result.state == "failed"
     assert ctx.fail.result.exception is ctx.fail.exception
-    assert ctx.inc.status == "Status: upstream"
+    assert ctx.inc.state == "blocked"
+    assert ctx.inc.block_reason == "blocked-by-error"
     assert ctx.inc.exception is None
 
 
-def test_public_status_reports_pending_in_lazy_context():
+def test_node_state_reports_waiting_in_lazy_context():
+    """Under ``eager=False``, ``waiting`` means *nobody has demanded this yet*.
+
+    Not "computation is in flight" — the two readings shared one public word
+    while ``.status`` mapped ``waiting`` and ``computing`` both onto
+    ``"Status: pending"``.  Naming the state makes the overload visible, which
+    matters because [MOD-11] deletes ``eager`` and with it the only producer of
+    this ``waiting``.
+    """
+
     ctx = Context(eager=False)
     ctx.double = double
     ctx.double.pins.x = 3
 
-    assert ctx.double.status == "Status: pending"
-    assert ctx.double.result.status == "Status: pending"
+    assert ctx.double.state == "waiting"
+    assert ctx.double.result.state == "waiting"
