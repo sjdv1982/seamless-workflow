@@ -95,6 +95,7 @@ class Node:
     kind: NodeKind
     state: NodeState = "unwired"
     block_reason: BlockReason | None = None
+    block_pins: list[str] = field(default_factory=list)
     cell_config: CellConfig | None = None
     transformer_config: TransformerConfig | None = None
     cell_root_producer: ConstantProducer | None = None

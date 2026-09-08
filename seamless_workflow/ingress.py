@@ -232,7 +232,7 @@ def controller_method(method):
             from .serialization import prepare_graph
             args = (prepare_graph(copy.deepcopy(args[0])),)
         try:
-            reads = {'get_graph', '_node_snapshot', '_lookup', '_incoming_edge',
+            reads = {'get_graph', '_node_snapshot', '_lookup', '_child_names', '_incoming_edge',
                      '_public_source', '_snapshot_transformer', '_build_cell_expression',
                      '_build_source_expression', '_capture_endpoint', '_refheld_checksums'}
             klass = 4 if name in reads else (1 if name in {'prune', '_clear_exception'} else 2)

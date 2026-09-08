@@ -41,7 +41,7 @@ def test_a_missing_required_pin_leaves_the_transformer_unwired():
     ctx.tf.pins.x = 1
 
     assert ctx.tf.state == "unwired"
-    assert ctx.tf.block_reason is None
+    assert ctx.tf.block_reason == ["y"]
     assert ctx.tf.result.checksum is None
 
 
@@ -67,7 +67,7 @@ def test_a_transformer_downstream_of_an_unwired_transformer_is_blocked_by_unwire
     ctx.tail.pins.x = ctx.tf
 
     assert ctx.tail.state == "blocked", states(ctx)
-    assert ctx.tail.block_reason == "blocked-by-unwired"
+    assert ctx.tail.block_reason == ["x"]
     assert ctx.tail.exception is None
 
 
@@ -81,8 +81,8 @@ def test_the_unwired_reason_survives_a_second_hop():
     ctx.tail = double
     ctx.tail.pins.x = ctx.mid
 
-    assert ctx.mid.block_reason == "blocked-by-unwired", states(ctx)
-    assert ctx.tail.block_reason == "blocked-by-unwired", states(ctx)
+    assert ctx.mid.block_reason == ["x"], states(ctx)
+    assert ctx.tail.block_reason == ["x"], states(ctx)
 
 
 @pytest.mark.now

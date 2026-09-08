@@ -175,6 +175,19 @@ class Context(RuntimeAPI, Reactive):
     def _set_node_config(self, path, field, value, key=None, delete=False):
         raise RuntimeError("Configuration must be prepared before ingress")
 
+    def __dir__(self):
+        self._check_public_caller()
+        return sorted(set(super().__dir__()) | set(self._child_names(self._prefix)))
+
+    def _child_names(self, prefix):
+        """Snapshot immediate namespace members on the controller thread."""
+        size = len(prefix)
+        return sorted({
+            path[size]
+            for path in (*self._graph.nodes, *self._graph.namespaces)
+            if len(path) > size and path[:size] == prefix
+        })
+
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)

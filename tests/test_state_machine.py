@@ -102,7 +102,7 @@ def test_node_state_and_exception_report_own_failure_only():
     assert result_error.failure_id == error.failure_id
     assert str(result_error) == str(error)
     assert ctx.inc.state == "blocked"
-    assert ctx.inc.block_reason == "blocked-by-error"
+    assert ctx.inc.block_reason == ["x"]
     assert ctx.inc.exception is None
 
     ctx.fail.pins.x = 2

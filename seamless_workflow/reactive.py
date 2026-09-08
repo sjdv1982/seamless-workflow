@@ -15,37 +15,60 @@ class Reactive:
         cfg = node.transformer_config
         incoming = self._incoming_for(path)
         code = cfg.code_checksum
+        pending = []
+        node.block_pins = []
+
+        def unavailable(pin, state):
+            if state == 'failed':
+                reason = 'blocked-by-error'
+            elif state in {'blocked', 'unwired'}:
+                reason = 'blocked-by-unwired'
+            else:
+                reason = 'waiting'
+            pending.append((reason, pin))
+
         if ('code',) in incoming:
             state, code = self._source_state(incoming[('code',)])
             if state != 'complete':
-                self._suspend(path)
-                self._apply_pending(node, [incoming[('code',)]])
-                return
-        if code is None:
-            self._suspend(path)
-            node.state, node.block_reason, node.exception = 'unwired', None, None
-            self._replace_current_checksum(path, None)
-            return
+                unavailable('code', state)
+        elif code is None:
+            pending.append(('unwired', 'code'))
         pins = {}
         for pin in sorted(cfg.pins):
             edge = incoming.get((pin,))
             if edge is not None:
                 state, checksum = self._source_state(edge)
                 if state != 'complete':
-                    self._suspend(path)
-                    self._apply_pending(node, [edge])
-                    return
+                    unavailable(pin, state)
+                    continue
             else:
                 producer = node.transformer_pin_producers.get(pin)
                 checksum = producer.checksum if producer else None
             if checksum is None:
-                if pin in cfg.optional_pins:
-                    continue
-                self._suspend(path)
-                node.state, node.block_reason, node.exception = 'unwired', None, None
-                self._replace_current_checksum(path, None)
-                return
+                if pin not in cfg.optional_pins:
+                    pending.append(('unwired', pin))
+                continue
             pins[pin] = checksum
+        if pending:
+            # Missing inputs take precedence over blocked inputs, then waiting.
+            priority = {
+                'unwired': 0,
+                'blocked-by-error': 1,
+                'blocked-by-unwired': 2,
+                'waiting': 3,
+            }
+            reason = min((why for why, pin in pending), key=priority.__getitem__)
+            self._suspend(path)
+            node.state = 'blocked' if reason.startswith('blocked-by-') else reason
+            node.block_reason = reason if node.state == 'blocked' else None
+            node.block_pins = sorted(
+                pin for why, pin in pending
+                if why == reason or (node.state == 'blocked' and why.startswith('blocked-by-'))
+            )
+            if node.state == 'unwired':
+                node.exception = None
+            self._replace_current_checksum(path, None)
+            return
         key = (code.hex(), tuple((pin, cs.hex()) for pin, cs in sorted(pins.items())), cfg.config_token)
         current = self._runtime.current_runs.get(path)
         if current is not None and current.demand_key == key:

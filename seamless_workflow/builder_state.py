@@ -288,6 +288,9 @@ class WorkflowTransformerPins:
     def __init__(self, backend):
         object.__setattr__(self, "_backend", backend)
 
+    def __dir__(self):
+        return sorted(set(super().__dir__()) | self._backend.cfg.pins)
+
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
@@ -323,6 +326,9 @@ class WorkflowMapping:
     def _mapping(self):
         self._backend._node()
         return getattr(self._backend.cfg, self._field)
+
+    def __dir__(self):
+        return sorted(set(super().__dir__()) | set(self._mapping()))
 
     def __getattr__(self, name):
         if name.startswith("_"):
@@ -386,7 +392,10 @@ class BoundTransformerBackend:
 
     @property
     def block_reason(self):
-        return self._node().block_reason
+        node = self._node()
+        if node.state not in {'unwired', 'blocked', 'waiting'}:
+            return None
+        return list(node.block_pins)
 
     @property
     def exception(self):
