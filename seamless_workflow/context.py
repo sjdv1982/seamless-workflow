@@ -476,7 +476,9 @@ class Context(RuntimeAPI, Reactive):
     def _replace_transformer_from_builder(self, path, transformer):
         node = self._graph.nodes[path]
         cfg, snapshot = transformer.config, transformer.snapshot
-        cfg.pins.update(node.transformer_config.pins)
+        if cfg.signature_parameters() is None:
+            cfg.pins.update(node.transformer_config.pins)
+        removed_pins = node.transformer_config.pins - cfg.pins
         old_producers = node.transformer_pin_producers
         old_code_refholds = self._code_refholds.copy()
         old_module_refholds = self._module_refholds.copy()
@@ -490,7 +492,10 @@ class Context(RuntimeAPI, Reactive):
                     raise DependencyError("Dependency cycle")
                 self._check_authority(path, (pin,))
 
-        new_producers = {}
+        new_producers = {
+            pin: producer for pin, producer in old_producers.items()
+            if pin in cfg.pins and pin not in snapshot.args
+        }
         staged_checksums = []
         published = False
         try:
@@ -532,7 +537,12 @@ class Context(RuntimeAPI, Reactive):
             staged_checksums.clear()
 
             for pin, producer in old_producers.items():
-                self._release_producer(producer, path + (pin,))
+                if new_producers.get(pin) is not producer:
+                    self._release_producer(producer, path + (pin,))
+            for pin in removed_pins | set(snapshot.args):
+                self._remove_edges_targeting(path, (pin,), descendants=True)
+            self._remove_edges_targeting(path, ("code",), descendants=True)
+            self._revisions[path] = self._revisions.get(path, 0) + 1
             old_code_checksum = old_code_refholds.get(path)
             if old_code_checksum is not None:
                 old_code_checksum.decref_refholder()
@@ -634,7 +644,14 @@ class Context(RuntimeAPI, Reactive):
             self._derive_all()
             return
         node = self._graph.nodes[node_path]
+        removed_pins = node.transformer_config.pins - code.pins
         node.transformer_config = code
+        for pin in removed_pins:
+            producer = node.transformer_pin_producers.pop(pin, None)
+            if producer is not None:
+                self._release_producer(producer, node_path + (pin,))
+            self._remove_edges_targeting(node_path, (pin,), descendants=True)
+        self._remove_edges_targeting(node_path, ("code",), descendants=True)
         self._revisions[node_path] = self._revisions.get(node_path, 0) + 1
         self._replace_code_checksum(node_path, code.code_checksum)
         self._derive_all()
