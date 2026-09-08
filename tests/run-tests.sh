@@ -21,19 +21,18 @@
 #   ./run-tests.sh -m a1           # only what phase A1 must make green
 #   ./run-tests.sh -m now          # the regression net, which must always be green
 #
-# The top-level test_*.py files are the pre-existing suite and are green.  The
-# four contract directories are the phase-A0 suite and are RED on purpose: they
-# describe the contract of §14/§15, not the behaviour of the code.  See
-# README.md for the file-by-file expectation.
+# Both the original and A0 contract suites are required to pass after A5.
 
 cd "$(dirname "$0")" || exit 1
 
+status=0
 for i in test_*.py \
          node-transition/test_*.py \
          quiescence-barrier/test_*.py \
          latency/test_*.py \
          correctness/test_*.py; do
     echo "$i"
-    pytest -s "$i" "$@"
+    python -m pytest -s "$i" "$@" || status=1
     echo "DONE $i"
 done
+exit "$status"

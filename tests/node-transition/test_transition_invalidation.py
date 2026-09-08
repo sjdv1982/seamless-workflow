@@ -57,6 +57,8 @@ from seamless_workflow import Context
 
 
 def add(x, y):
+    import time
+    time.sleep(0.5)
     return x + y
 
 

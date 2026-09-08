@@ -50,6 +50,7 @@ def test_cell_literal_and_current_result_are_independent_roles(monkeypatch):
     assert {role for _, role in claims} == {"cell:value:literal", "node:value:current"}
     assert get_buffer_cache().reference_snapshot()[checksum][0] == 2
     force_expiry(checksum)
+    ctx.compute(timeout=10)
     assert ctx.value.value["token"].startswith("cell-literal-")
     ctx._release_refholds()
     force_expiry(checksum)
@@ -60,6 +61,7 @@ def test_transformer_pin_code_and_module_roles_survive_bound_api_expiry(monkeypa
     ctx = Context()
     ctx.transformer = identity
     ctx.transformer.pins.value = _unique("workflow-pin")
+    ctx.compute(timeout=10)
     pin_checksum = ctx._graph.nodes[("transformer",)].transformer_pin_producers[
         "value"
     ].checksum
@@ -76,6 +78,7 @@ def test_transformer_pin_code_and_module_roles_survive_bound_api_expiry(monkeypa
 
     for checksum in (pin_checksum, module_checksum, code_checksum):
         force_expiry(checksum)
+    ctx.compute(timeout=10)
     assert ctx.transformer.pins.value.startswith("workflow-pin-")
     assert module_checksum.resolve("text").startswith("workflow-module-")
     assert code_checksum.resolve() is not None
@@ -92,6 +95,7 @@ def test_transformer_current_result_is_independent_from_pin_role(monkeypatch):
     ctx = Context()
     ctx.transformer = identity
     ctx.transformer.pins.value = _unique("current-result")
+    ctx.compute(timeout=10)
     result_checksum = ctx._graph.nodes[("transformer",)].current_checksum
     pin_checksum = ctx._graph.nodes[("transformer",)].transformer_pin_producers[
         "value"
@@ -101,6 +105,7 @@ def test_transformer_current_result_is_independent_from_pin_role(monkeypatch):
     assert get_buffer_cache().reference_snapshot()[result_checksum][0] >= 2
     assert any(role == "node:transformer:current" for _, role in collect_refholder_claims([ctx])[result_checksum])
     force_expiry(result_checksum)
+    ctx.compute(timeout=10)
     assert ctx.transformer.result.value.startswith("current-result-")
     ctx._release_refholds()
     force_expiry(result_checksum)
@@ -114,6 +119,7 @@ def test_same_checksum_replacement_acquires_new_state_before_release():
     original = ctx._graph.nodes[("value",)].cell_root_producer.checksum
     assert original == checksum
     ctx.value = Cell(checksum, celltype="int")
+    ctx.compute(timeout=10)
     assert ctx._graph.nodes[("value",)].cell_root_producer.checksum == checksum
     assert get_buffer_cache().reference_snapshot()[checksum][0] == 2
     ctx._release_refholds()
@@ -148,20 +154,21 @@ def test_superseded_result_is_held_until_deterministic_cap_and_prune(monkeypatch
     assert records[0].hold_deadline == 115.0
     assert get_buffer_cache().reference_snapshot()[records[0].result_checksum][0] >= 1
     now[0] = 116.0
+    ctx.compute(timeout=10)
     assert ctx.prune() == {"cancelled": 1}
     assert get_buffer_cache().reference_snapshot().get(records[0].result_checksum, (0, 0, False))[0] == 0
     ctx._release_refholds()
     assert get_buffer_cache().reference_snapshot().get(records[0].result_checksum, (0, 0, False))[0] == 0
 
 
-def test_eager_and_non_eager_contexts_have_distinct_current_claim_policy():
-    eager = Context(eager=True)
+def test_independent_contexts_hold_literal_and_current_claims():
+    eager = Context()
     eager.value = _unique("eager")
     eager_checksum = eager._graph.nodes[("value",)].current_checksum
     assert eager_checksum is not None
     assert any(role == "node:value:current" for _, role in collect_refholder_claims([eager])[eager_checksum])
 
-    lazy = Context(eager=False)
+    lazy = Context()
     lazy.value = _unique("lazy")
     lazy_node = lazy._graph.nodes[("value",)]
     assert lazy_node.cell_root_producer is not None
@@ -182,6 +189,7 @@ def test_namespace_deletion_and_graph_copy_keep_independent_claims(monkeypatch):
     clone.set_graph(ctx.get_graph())
     assert get_buffer_cache().reference_snapshot()[checksum][0] == 4
     force_expiry(checksum)
+    clone.compute(timeout=10)
     assert clone.sub.value.value["token"].startswith("namespace-")
     del ctx.sub
     assert get_buffer_cache().reference_snapshot()[checksum][0] == 2

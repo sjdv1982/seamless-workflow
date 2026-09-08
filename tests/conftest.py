@@ -99,11 +99,22 @@ def _reset_process_caches() -> None:
 
 
 @pytest.fixture(autouse=True)
-def reset_caches_and_refholders():
+def reset_caches_and_refholders(monkeypatch):
     """Reset before and after every test, so neither direction leaks."""
 
+    import weakref
+    from seamless_workflow import Context
+    contexts = []
+    initialize = Context.__init__
+    def tracked(context, *args, **kwargs):
+        initialize(context, *args, **kwargs)
+        contexts.append(weakref.ref(context))
+    monkeypatch.setattr(Context, "__init__", tracked)
     _reset_process_caches()
     yield
+    for reference in contexts:
+        context = reference()
+        if context is not None: context.close()
     _reset_process_caches()
 
 

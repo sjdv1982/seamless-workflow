@@ -127,6 +127,7 @@ def test_a_compiled_transformer_produces_its_result():
 
     compute_or_settle(ctx)
 
+    assert ctx.tf.exception is None, str(ctx.tf.exception)
     assert ctx.tf.result.value == 5
 
 

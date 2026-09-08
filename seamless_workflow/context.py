@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import asyncio
+from concurrent.futures import Future
 import inspect
 import operator
 import textwrap
@@ -10,7 +12,6 @@ from typing import Any
 from uuid import uuid4
 
 from seamless import Buffer, Cell, Checksum, Expression
-from seamless_transformer import observation
 from seamless_transformer.builder_snapshot import TransformerBuilderSnapshot
 
 from .adapters import buffer_for_checksum, checksum_for_value, normalize_checksum, value_for_checksum
@@ -29,50 +30,27 @@ from .graph import CellConfig, ConstantProducer, ContextGraph, Edge, Node, NodeP
 from .scheduler import ContextRuntime, ExceptionInfo, RunRecord
 from .views import MissingView, SubContextView
 
+from .sidework import Lease, PreparedCell, PreparedTransformer, SideLoop, evaluate_cell, evaluate_projection
+
 PIN_CELLTYPES = {"plain", "mixed", "deepcell", "deepfolder", "folder"}
 
 
-def _transformation_identity(cfg, pin_checksums) -> Checksum:
-    """The transformation checksum for a Context-bound transformer's inputs.
 
-    Built in the same shape ``seamless_transformer`` uses — the load-bearing
-    dunders plus one ``(celltype, subcelltype, checksum)`` triple per pin,
-    serialised by ``tf_get_buffer`` — so that the observation log records a real
-    transformation checksum rather than an ad-hoc digest.
-
-    It is **not yet guaranteed to equal** the checksum the standalone path
-    computes for the same computation: that agreement is exactly what
-    **[MOD-15]** requires and does not have ("the two must agree on identity").
-    Recording both sites with the same construction is what will make the
-    disagreement visible when they finally meet, which is the point of writing it
-    this way rather than hashing whatever is convenient.
-
-    Called only while a recording is running, so its cost is not on the hot path.
-    """
-
-    from seamless_transformer.transformation_utils import tf_get_buffer
-
-    code_celltype = "python" if cfg.language == "python" else "text"
-    transformation = {
-        "__language__": cfg.language,
-        "__output__": ("result", cfg.celltypes.get("result", "mixed"), None),
-        "code": (
-            code_celltype,
-            "transformer",
-            cfg.code_checksum.hex() if cfg.code_checksum is not None else None,
-        ),
-    }
-    for pin, checksum in sorted(pin_checksums.items()):
-        transformation[pin] = (
-            cfg.celltypes.get(pin, "mixed"),
-            None,
-            checksum.hex() if checksum is not None else None,
-        )
-    return tf_get_buffer(transformation).get_checksum()
+from .runtime_api import RuntimeAPI
+from .reactive import Reactive
 
 
-class Context:
-    def __init__(self, eager: bool = True) -> None:
+class Context(RuntimeAPI, Reactive):
+    def __init__(self, *, expression_execution="auto") -> None:
+        if expression_execution not in {"auto", "local", "remote"}:
+            raise ValueError(expression_execution)
+        from seamless import ensure_open
+        from threading import RLock, Event
+        ensure_open("Context construction")
+        object.__setattr__(self, "_close_lock", RLock())
+        object.__setattr__(self, "_closed_event", Event())
+        object.__setattr__(self, "_closing", False)
+        object.__setattr__(self, "_expression_execution", expression_execution)
         object.__setattr__(self, "top_id", uuid4().hex)
         object.__setattr__(self, "_graph", ContextGraph())
         object.__setattr__(self, "_runtime", ContextRuntime())
@@ -80,45 +58,159 @@ class Context:
         object.__setattr__(self, "_code_refholds", {})
         object.__setattr__(self, "_module_refholds", {})
         object.__setattr__(self, "_superseded_refholds", {})
-        object.__setattr__(self, "eager", bool(eager))
         object.__setattr__(self, "_prefix", ())
         from seamless.reference_lifecycle import register_refholder
 
+        from .controller import Controller
+        object.__setattr__(self, "_controller", Controller(self))
+        object.__setattr__(self, "_side", SideLoop(f"Context-side-{self.top_id[:8]}"))
+        object.__setattr__(self, "_jobs", {})
+        object.__setattr__(self, "_facts", {})
+        object.__setattr__(self, "_barriers", {})
+        object.__setattr__(self, "_effects", [])
+        object.__setattr__(self, "_revisions", {})
         register_refholder(self)
+        from .lifecycle import register
+        register(self)
 
     def __del__(self):
         try:
-            from seamless.reference_lifecycle import safe_release_refholder
-
-            safe_release_refholder(self)
+            controller = object.__getattribute__(self, "_controller")
+            if controller.is_owner() and not controller.stopped:
+                # Last-reference release may occur at the end of a controller
+                # callback. Release graph roles here; joining is not a turn.
+                self._closing = True
+                controller.accepting = False
+                self._begin_close()
+                self._finish_close()
+                from threading import Thread
+                side = self._side
+                def join():
+                    side.close()
+                    controller.stop()
+                Thread(target=join, name="Context-finalizer", daemon=True).start()
+            else:
+                # Cyclic GC clears weakrefs before __del__. Retain this object
+                # only for the duration of the ordered cleanup request.
+                controller.context = lambda: self
+                try: self.close()
+                finally: controller.context = lambda: None
         except Exception:
             pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def _after_turn(self):
+        self._controller.assert_owner()
+        if self._closing: return
+        effects, self._effects = self._effects, []
+        for effect in effects:
+            effect()
+        self._check_barriers()
+
+    def _node_snapshot(self, path):
+        from .errors import StaleWorkflowHandleError
+        if path not in self._graph.nodes:
+            raise StaleWorkflowHandleError(f"Endpoint {path!r} is stale")
+        return copy.deepcopy(self._graph.nodes[path])
+
+    def close(self):
+        controller = getattr(self, "_controller", None)
+        if controller is None: return
+        if controller.is_owner():
+            from .errors import ReentrantContextError
+            raise ReentrantContextError("Cannot close Context from a controller turn")
+        with self._close_lock:
+            if self._closed_event.is_set(): return
+            self._closing = True
+            controller.begin_close().result()
+            self._side.close()
+            controller.enqueue("_finish_close", klass=1, internal=True).result()
+            controller.stop()
+            self._closed_event.set()
+
+    def _begin_close(self):
+        self._closing = True
+        self._effects.clear()
+        from .errors import ClosedContextError
+        for future in self._barriers:
+            if not future.done(): future.set_exception(ClosedContextError("Context closed"))
+        self._barriers.clear()
+        for task in self._jobs.values():
+            if task is not None: task.cancel()
+        for record in list(self._runtime.current_runs.values()) + [r for q in self._runtime.superseded_runs.values() for r in q]:
+            if record.et is not None: record.et.cancel()
+
+    def _finish_close(self):
+        self._release_refholds()
+        for lease, _ in self._facts.values():
+            if lease is not None: lease._release_refholds()
+        self._facts.clear()
+        self._jobs.clear()
+        self._runtime.current_runs.clear()
+        self._runtime.superseded_runs.clear()
+        self._runtime.evicted.clear()
+        self._graph = ContextGraph()
+        self._code_refholds.clear()
+        self._module_refholds.clear()
+        self._superseded_refholds.clear()
+
+    def _publish_config(self, path, revision, cfg):
+        if self._revisions.get(path, 0) != revision: return False
+        node = self._graph.nodes[path]
+        if node.kind == "cell": node.cell_config = cfg
+        else: node.transformer_config = cfg
+        self._revisions[path] = revision + 1
+        self._derive_all()
+        return True
+
+    def _config_snapshot(self, path):
+        node = self._graph.nodes[path]
+        return copy.deepcopy(node.cell_config if node.kind == "cell" else node.transformer_config), self._revisions.get(path, 0)
+
+    def _set_node_config(self, path, field, value, key=None, delete=False):
+        raise RuntimeError("Configuration must be prepared before ingress")
 
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
+        self._check_public_caller()
         return self._lookup(self._prefix + (name,))
 
     def __setattr__(self, name, value):
-        if name.startswith("_") or name in {"top_id", "eager"}:
+        if name.startswith("_") or name == "top_id":
             object.__setattr__(self, name, value)
         else:
+            self._check_public_caller()
             self._assign(self._prefix + (name,), value)
 
     def __delattr__(self, name):
         if name.startswith("_"):
             object.__delattr__(self, name)
         else:
+            self._check_public_caller()
             self._delete(self._prefix + (name,))
 
     def __getitem__(self, key):
+        self._check_public_caller()
         return self._lookup(self._prefix + (str(key),))
 
     def __setitem__(self, key, value):
+        self._check_public_caller()
         self._assign(self._prefix + (str(key),), value)
 
     def __delitem__(self, key):
+        self._check_public_caller()
         self._delete(self._prefix + (str(key),))
+
+    def _check_public_caller(self):
+        if self._controller.is_owner():
+            from .errors import ReentrantContextError
+            raise ReentrantContextError('Public API called from the controller')
 
     def _lookup(self, path):
         path = tuple(path)
@@ -148,22 +240,21 @@ class Context:
             node = self._graph.nodes[path]
             if node.kind == "cell":
                 if self._is_bound_source(value):
-                    self._replace_edges_to(path)
-                    self._add_endpoint_edge(value, self._cell_endpoint(path))
-                elif isinstance(value, Cell):
+                    self._add_endpoint_edge(value, self._cell_endpoint(path), detach=True)
+                elif isinstance(value, (Cell, PreparedCell)):
                     self._replace_cell_from_builder(path, value)
                 elif callable(value):
                     raise NodeError("Cannot replace a cell node with transformer code")
                 else:
-                    self._cell_operation(path, (), value)
+                    self._cell_operation(path, (), value, detach=True)
             else:
                 if self._is_bound_source(value):
                     self._replace_edges_to(path)
                     self._create_cell(path)
                     self._add_endpoint_edge(value, self._cell_endpoint(path))
-                elif isinstance(value, Transformer):
+                elif isinstance(value, (Transformer, PreparedTransformer)):
                     self._replace_transformer_from_builder(path, value)
-                elif callable(value) or isinstance(value, str):
+                elif callable(value) or isinstance(value, (str, TransformerConfig)):
                     self._set_transformer_code(path, value)
                 else:
                     raise NodeError("Cannot replace a transformer node with a non-transformer value")
@@ -177,15 +268,15 @@ class Context:
         elif self._is_bound_source(value):
             self._create_cell(path)
             self._add_endpoint_edge(value, self._cell_endpoint(path))
-        elif isinstance(value, Cell):
+        elif isinstance(value, (Cell, PreparedCell)):
             self._create_cell_from_builder(path, value)
-        elif isinstance(value, Transformer):
+        elif isinstance(value, (Transformer, PreparedTransformer)):
             self._create_transformer_from_builder(path, value)
-        elif callable(value):
+        elif callable(value) or isinstance(value, TransformerConfig):
             self._create_transformer(path, value)
         else:
             self._create_cell(path)
-            self._cell_operation(path, (), value)
+            self._cell_operation(path, (), value, detach=True)
         self._derive_all()
 
     def _delete(self, path):
@@ -218,8 +309,11 @@ class Context:
                 node.current_checksum = None
             self._release_node_producers(node, node_path)
             self._release_code_checksum(node_path)
-            self._runtime.current_runs.pop(node_path, None)
-            self._runtime.superseded_runs.pop(node_path, None)
+            records = list(self._runtime.superseded_runs.pop(node_path, ()))
+            current = self._runtime.current_runs.pop(node_path, None)
+            if current is not None: records.append(current)
+            for record in records:
+                if record.et is not None: self._effects.append(record.et.cancel)
         self._graph.namespaces = {
             namespace
             for namespace in self._graph.namespaces
@@ -258,8 +352,8 @@ class Context:
             cell.validator,
             cell.validator_language,
         )
-        if isinstance(input_ref, Cell):
-            if input_ref._workflow_backend is not None:
+        if isinstance(input_ref, (Cell, PreparedCell)):
+            if isinstance(input_ref, Cell) and input_ref._workflow_backend is not None:
                 self._add_endpoint_edge(input_ref, self._cell_endpoint(path))
             else:
                 upstream = self._graph.first_free("cell")
@@ -275,6 +369,7 @@ class Context:
             old_producer = node.cell_root_producer
             node.cell_config = new_config
             node.cell_root_producer = producer
+            self._revisions[path] = self._revisions.get(path, 0) + 1
             if old_producer is not None:
                 self._release_producer(old_producer, path)
             self._remove_edges_targeting(path, (), descendants=True)
@@ -287,8 +382,9 @@ class Context:
             self._remove_edges_targeting(path, (), descendants=True)
         if node.cell_config is not new_config and input_ref is not None:
             node.cell_config = new_config
-        object.__setattr__(cell, "_workflow_backend", BoundCellBackend(self, path))
-        cell._release_refholds()
+        if not isinstance(cell, PreparedCell):
+            object.__setattr__(cell, "_workflow_backend", BoundCellBackend(self, path))
+            cell._release_refholds()
 
     def _transformer_config_from_snapshot(self, snapshot, *, direct=False):
         codebuf = snapshot.codebuf
@@ -311,11 +407,20 @@ class Context:
             local=snapshot.local,
             direct_print=snapshot.direct_print,
             call_mode="direct" if direct else snapshot.call_mode,
+            schema=snapshot.schema, compilation=copy.deepcopy(snapshot.compilation),
+            objects=copy.deepcopy(snapshot.objects), header=snapshot.header,
         )
         cfg.pins.update(snapshot.args)
+        cfg.celltypes.setdefault("result", "mixed")
+        from .configuration import fingerprint
+        fingerprint(cfg)
         return cfg, snapshot
 
     def _transformer_config_from_code(self, code):
+        if isinstance(code, TransformerConfig):
+            return code
+        if code is None:
+            return TransformerConfig()
         if callable(code):
             try:
                 source = inspect.getsource(code)
@@ -339,59 +444,38 @@ class Context:
         return TransformerConfig(code=buf, code_checksum=buf.get_checksum(), language="text", meta={"local": False})
 
     def _create_transformer(self, path, code):
-        cfg = self._transformer_config_from_code(code)
+        cfg = code if isinstance(code, TransformerConfig) else self._transformer_config_from_code(code)
         self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg)
         self._retain_code_checksum(path, cfg.code_checksum)
 
     def _create_transformer_from_builder(self, path, transformer):
         try:
-            snapshot = transformer._snapshot_for_call()
-            cfg, snapshot = self._transformer_config_from_snapshot(
-                snapshot, direct=transformer.__class__.__name__ == "DirectTransformer"
-            )
+            cfg, snapshot = transformer.config, transformer.snapshot
             self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg)
             self._retain_code_checksum(path, cfg.code_checksum)
             for pin, value in snapshot.args.items():
                 self._set_transformer_pin(path, pin, value)
-            object.__setattr__(transformer, "_workflow_backend", BoundTransformerBackend(self, path))
-            transformer._release_refholds()
+
         except Exception:
             self._delete_subtree(path)
             raise
 
     def _replace_transformer_from_builder(self, path, transformer):
         node = self._graph.nodes[path]
-        snapshot = transformer._snapshot_for_call()
-        cfg, snapshot = self._transformer_config_from_snapshot(snapshot, direct=transformer.__class__.__name__ == "DirectTransformer")
+        cfg, snapshot = transformer.config, transformer.snapshot
         cfg.pins.update(node.transformer_config.pins)
-        old_claims = list(self._refheld_checksums())
-        old_config = node.transformer_config
         old_producers = node.transformer_pin_producers
-        old_edges = list(self._graph.edges)
         old_code_refholds = self._code_refholds.copy()
         old_module_refholds = self._module_refholds.copy()
-        old_superseded_refholds = self._superseded_refholds.copy()
-        old_node_runtime = {
-            node_path: (
-                graph_node.state,
-                graph_node.block_reason,
-                graph_node.current_checksum,
-                graph_node.active_count,
-                graph_node.derived_active_count,
-                graph_node.exception,
-            )
-            for node_path, graph_node in self._graph.nodes.items()
-        }
-        old_runtime = copy.copy(self._runtime)
-        old_runtime.scheduler = copy.copy(self._runtime.scheduler)
-        old_runtime.current_runs = {
-            node_path: copy.copy(record)
-            for node_path, record in self._runtime.current_runs.items()
-        }
-        old_runtime.superseded_runs = {
-            node_path: type(records)(copy.copy(record) for record in records)
-            for node_path, records in self._runtime.superseded_runs.items()
-        }
+        # Validate every replacement edge before acquiring/publishing configuration.
+        for pin, value in snapshot.args.items():
+            ep = self._endpoint(value)
+            if ep is not None:
+                source = self._source_path(value)
+                source_node, _ = self._graph.resolve_existing(source)
+                if source_node == path or self._would_cycle(source_node, path):
+                    raise DependencyError("Dependency cycle")
+                self._check_authority(path, (pin,))
 
         new_producers = {}
         staged_checksums = []
@@ -447,48 +531,13 @@ class Context:
                 if self._endpoint(value) is not None:
                     self._set_transformer_pin(path, pin, value)
             self._derive_all()
-            transformer._release_refholds()
-            object.__setattr__(transformer, "_workflow_backend", BoundTransformerBackend(self, path))
+
         except Exception:
-            if published:
-                current_claims = list(self._refheld_checksums())
-                # Re-establish the old ownership before removing the failed
-                # replacement, including equal-checksum roles.
-                for checksum, _role in old_claims:
-                    checksum.incref_refholder()
-
-                node.transformer_config = old_config
-                node.transformer_pin_producers = old_producers
-                self._graph.edges = old_edges
-                for node_path, runtime_state in old_node_runtime.items():
-                    graph_node = self._graph.nodes[node_path]
-                    (
-                        graph_node.state,
-                        graph_node.block_reason,
-                        graph_node.current_checksum,
-                        graph_node.active_count,
-                        graph_node.derived_active_count,
-                        graph_node.exception,
-                    ) = runtime_state
-                self._runtime = old_runtime
-                self._code_refholds = old_code_refholds
-                self._module_refholds = old_module_refholds
-                self._superseded_refholds = old_superseded_refholds
-
-                for checksum, _role in current_claims:
-                    checksum.decref_refholder()
-            else:
-                for checksum in reversed(staged_checksums):
-                    checksum.decref_refholder()
+            # Failed staging never touched live state. Published state is never
+            # rolled back: runtime repairs proceed forward through derivation.
+            for checksum in reversed(staged_checksums):
+                checksum.decref_refholder()
             raise
-
-    def _set_cell_config(self, path, **updates):
-        cfg = self._graph.nodes[path].cell_config
-        for key, value in updates.items():
-            if key == "target_celltype" and value is None:
-                value = cfg.celltype
-            setattr(cfg, key, value)
-        self._derive_all()
 
     def _set_cell_root(self, path, checksum, celltype):
         self._set_cell_root_with_edges(path, checksum, celltype, clear_edges=True)
@@ -498,6 +547,7 @@ class Context:
         producer = self._retain_producer(checksum, celltype)
         old_producer = node.cell_root_producer
         node.cell_root_producer = producer
+        self._revisions[path] = self._revisions.get(path, 0) + 1
         if old_producer is not None:
             self._release_producer(old_producer, path)
         if clear_edges:
@@ -509,55 +559,45 @@ class Context:
     def _set_cell_checksum(self, path, local, checksum, *, celltype=None):
         self._cell_operation(path, local, Checksum(checksum), checksum_rhs=True)
 
-    def _cell_operation(self, node_path, local, value, *, checksum_rhs=False):
+    def _cell_operation(self, node_path, local, value, *, checksum_rhs=False, detach=False):
         node = self._graph.nodes[node_path]
-        if node.kind != "cell":
-            raise NodeError(node_path)
         local = tuple(local)
         endpoint = self._endpoint(value)
         if endpoint is not None:
-            if len(local) > 1:
-                raise PathError("Cell source connections are limited to root and one level")
-            self._add_endpoint_edge(value, self._cell_endpoint(node_path, local))
-            self._derive_all()
-            return
-        if checksum_rhs:
-            try:
-                value = value_for_checksum(value, node.cell_config.celltype)
-            except Exception as exc:
-                raise ValueUnavailableError(f"Cannot materialize {node_path!r}{local!r}") from exc
-        if not local:
-            if self._incoming_edge(node_path, ()) is not None:
-                raise AuthorityError(f"Cell {node_path!r} root is controlled by an incoming edge")
-            self._set_cell_root(node_path, checksum_for_value(value, node.cell_config.celltype), node.cell_config.celltype)
-            self._derive_all()
-            return
-        self._check_cell_update_authority(node_path, local)
-        root = self._materialize_cell_for_update(node_path, local)
-        updated = copy.deepcopy(root)
-        _assign_path(updated, local, value)
-        self._set_cell_root_with_edges(node_path, checksum_for_value(updated, node.cell_config.celltype), node.cell_config.celltype, clear_edges=False)
-        self._remove_edges_targeting(node_path, local, descendants=True)
+            self._add_endpoint_edge(value, self._cell_endpoint(node_path, local), detach=detach)
+        else:
+            self._validate_write(node_path, local, detach)
+            if local:
+                raise RuntimeError("Sub-path values must be prepared outside the controller")
+            from seamless.checksum.hash_type_validation import validate_deserializable_as
+            validate_deserializable_as(value, node.cell_config.celltype)
+            self._set_cell_root_with_edges(node_path, value, node.cell_config.celltype, clear_edges=detach)
         self._derive_all()
 
-    def _materialize_cell_for_update(self, node_path, local):
-        node = self._graph.nodes[node_path]
-        if node.state == "unwired" and node.cell_root_producer is None and not self._incoming_for(node_path):
-            if isinstance(local[0], str):
-                return {}
-            raise TypeError(f"Cannot create sequence path {local!r} on an unwired Cell")
-        if node.state != "complete" or node.current_checksum is None:
-            raise ValueUnavailableError(f"Value for Cell {node_path!r} is unavailable")
-        try:
-            value = value_for_checksum(node.current_checksum, node.cell_config.celltype)
-        except Exception as exc:
-            raise ValueUnavailableError(f"Value for Cell {node_path!r} is unavailable") from exc
-        return value
+    def _validate_write(self, node_path, local, detach):
+        for target in self._incoming_for(node_path):
+            ancestor = len(target) < len(local) and local[:len(target)] == target
+            covered = target[:len(local)] == local
+            if ancestor or (covered and not detach):
+                raise AuthorityError(f"Cell {node_path!r}{local!r} is controlled by an incoming edge")
 
-    def _check_cell_update_authority(self, node_path, local):
-        incoming = self._incoming_for(node_path)
-        if () in incoming or (len(local) > 1 and (local[0],) in incoming):
-            raise AuthorityError(f"Cell {node_path!r}{local!r} is controlled by an incoming edge")
+    def _update_base(self, node_path, local, detach):
+        self._validate_write(node_path, local, detach)
+        node = self._graph.nodes[node_path]
+        return (Lease(node.current_checksum, node.cell_config.celltype),
+                self._revisions.get(node_path, 0), node.state,
+                tuple(self._incoming_for(node_path)))
+
+    def _commit_update(self, node_path, local, checksum, base, revision, detach):
+        self._validate_write(node_path, local, detach)
+        node = self._graph.nodes[node_path]
+        current = node.current_checksum.hex() if node.current_checksum is not None else None
+        if current != base or self._revisions.get(node_path, 0) != revision:
+            return False
+        self._set_cell_root_with_edges(node_path, checksum, node.cell_config.celltype, clear_edges=False)
+        if detach: self._remove_edges_targeting(node_path, local, descendants=True)
+        self._derive_all()
+        return True
 
     def _cell_delete_path(self, node_path, local):
         local = tuple(local)
@@ -570,18 +610,7 @@ class Context:
             self._remove_edges_targeting(node_path, (), descendants=True)
             self._derive_all()
             return
-        edge = self._incoming_edge(node_path, local)
-        if len(local) == 1 and edge is not None:
-            self._graph.edges.remove(edge)
-            self._derive_all()
-            return
-        self._check_cell_update_authority(node_path, local)
-        root = self._materialize_cell_for_update(node_path, local)
-        updated = copy.deepcopy(root)
-        _delete_path(updated, local)
-        self._set_cell_root_with_edges(node_path, checksum_for_value(updated, self._graph.nodes[node_path].cell_config.celltype), self._graph.nodes[node_path].cell_config.celltype, clear_edges=False)
-        self._remove_edges_targeting(node_path, local, descendants=True)
-        self._derive_all()
+        raise RuntimeError("Sub-path deletes must be prepared outside the controller")
 
     def _set_transformer_code(self, node_path, code):
         endpoint = self._endpoint(code)
@@ -591,13 +620,10 @@ class Context:
             self._graph.nodes[node_path].transformer_config.code_checksum = None
             self._derive_all()
             return
-        cfg = self._transformer_config_from_code(code)
         node = self._graph.nodes[node_path]
-        old = node.transformer_config
-        cfg.pins.update(old.pins)
-        cfg.optional_pins = old.optional_pins & cfg.pins
-        node.transformer_config = cfg
-        self._replace_code_checksum(node_path, cfg.code_checksum)
+        node.transformer_config = code
+        self._revisions[node_path] = self._revisions.get(node_path, 0) + 1
+        self._replace_code_checksum(node_path, code.code_checksum)
         self._derive_all()
 
     def _set_transformer_pin(self, node_path, pin, value):
@@ -688,6 +714,8 @@ class Context:
         self._derive_all()
 
     def _endpoint(self, value):
+        if isinstance(value, BoundEndpoint):
+            return value
         method = getattr(value, "_workflow_endpoint", None)
         if not callable(method):
             return None
@@ -713,7 +741,7 @@ class Context:
     def _transformer_endpoint(self, node_path, pin=None):
         return BoundEndpoint(self.top_id, tuple(node_path), "transformer-code" if pin == "code" else "transformer-input", () if pin is None else (pin,), True, True, True)
 
-    def _add_endpoint_edge(self, source, target):
+    def _add_endpoint_edge(self, source, target, *, detach=False):
         source_ep = self._endpoint(source)
         if source_ep is None:
             raise DependencyError("Source is not a bound workflow endpoint")
@@ -726,17 +754,10 @@ class Context:
                 raise PathError("Cell connection targets are limited to one point component")
             if self._graph.nodes[target.node_path].cell_config.celltype not in PIN_CELLTYPES:
                 raise PathError("Cell subvalue connections require a container-capable Cell")
-            component = target.local_path[0]
-            if isinstance(component, int):
-                current = self._get_value(target.node_path, ())
-                if not isinstance(current, (list, tuple)):
-                    raise TypeError("Integer Cell connection targets require an existing sequence")
-                if component >= len(current) or component < -len(current):
-                    raise IndexError(component)
         elif target.endpoint_kind == "transformer-input":
             if len(target.local_path) != 1:
                 raise PathError("Transformer targets must address a whole pin")
-        self._add_edge(source_ep.node_path + source_ep.local_path, target.node_path + target.local_path)
+        self._add_edge(source_ep.node_path + source_ep.local_path, target.node_path + target.local_path, detach=detach)
         target_node = self._graph.nodes[target.node_path]
         if target_node.kind == "cell" and not target.local_path:
             producer = target_node.cell_root_producer
@@ -749,24 +770,27 @@ class Context:
             if producer is not None:
                 self._release_producer(producer, target.node_path + (pin,))
 
-    def _add_edge(self, source, target):
+    def _add_edge(self, source, target, *, detach=False):
         source_node, _ = self._graph.resolve_existing(tuple(source))
         target_node, target_local = self._graph.resolve_existing(tuple(target))
         if source_node == target_node:
             raise DependencyError("Self-dependencies are not supported")
         if self._would_cycle(source_node, target_node):
             raise DependencyError("Dependency cycle")
-        self._check_authority(target_node, target_local)
+        if detach:
+            self._validate_write(target_node, target_local, True)
+        else:
+            self._check_authority(target_node, target_local)
         self._remove_edges_targeting(target_node, target_local, descendants=True)
         self._graph.edges.append(Edge(tuple(source), tuple(target)))
         self._derive_all()
 
     def _would_cycle(self, source, target):
         seen = set()
-        stack = [source]
+        stack = [target]
         while stack:
             current = stack.pop()
-            if current == target:
+            if current == source:
                 return True
             if current in seen:
                 continue
@@ -829,7 +853,7 @@ class Context:
         return result
 
     def _value_from_producer(self, producer):
-        return value_for_checksum(producer.checksum, producer.celltype)
+        return producer.checksum
 
     def _retain_producer(self, checksum, celltype):
         checksum = normalize_checksum(checksum)
@@ -898,19 +922,23 @@ class Context:
         # A source may sort after its target; converge the small durable graph
         # rather than making public state depend on lexical node names.
         self._sync_module_refholds()
-        for _ in range(max(1, len(self._graph.nodes))):
-            before = tuple(
-                (path, self._graph.nodes[path].state, self._graph.nodes[path].current_checksum.hex() if self._graph.nodes[path].current_checksum else None)
-                for path in sorted(self._graph.nodes)
-            )
-            for path in sorted(self._graph.nodes):
-                self._derive_node(path)
-            after = tuple(
-                (path, self._graph.nodes[path].state, self._graph.nodes[path].current_checksum.hex() if self._graph.nodes[path].current_checksum else None)
-                for path in sorted(self._graph.nodes)
-            )
-            if before == after:
-                break
+        self._used_facts = set()
+        visited, order = set(), []
+        def visit(path):
+            if path in visited: return
+            visited.add(path)
+            for edge in self._incoming_for(path).values():
+                source, _ = self._graph.resolve_existing(edge.source)
+                visit(source)
+            order.append(path)
+        for path in sorted(self._graph.nodes): visit(path)
+        for path in order: self._derive_node(path)
+        for key in set(self._jobs) - self._used_facts:
+            task = self._jobs.pop(key)
+            if task is not None: self._effects.append(task.cancel)
+        for key in set(self._facts) - self._used_facts:
+            lease, _ = self._facts.pop(key)
+            if lease is not None: lease._release_refholds()
         for path in sorted(self._graph.nodes):
             self._update_runtime(path)
         self._sync_superseded_refholds()
@@ -939,124 +967,132 @@ class Context:
 
     def _derive_cell(self, path, node):
         incoming = self._incoming_for(path)
+        cfg = node.cell_config
         if () in incoming:
-            self._apply_upstream_state(node, self._source_state(incoming[()]))
+            edge = incoming[()]
+            state, checksum = self._source_state(edge)
+            if state != "complete":
+                self._apply_upstream_state(node, (state, checksum))
+                return
+            source_path, _ = self._graph.resolve_existing(edge.source)
+            source_type = self._node_celltype(source_path)
+            if source_type != cfg.celltype or cfg.target_celltype != cfg.celltype or cfg.validator is not None:
+                state, checksum = self._projection(checksum, (), source_type, cfg.target_celltype, cfg.validator, cfg.validator_language)
+            self._apply_upstream_state(node, (state, checksum))
             return
-        if node.cell_root_producer is not None and not any(len(local) for local in incoming):
-            self._replace_current_checksum(path, node.cell_root_producer.checksum)
-            node.state, node.block_reason, node.exception = "complete", None, None
+        producer = node.cell_root_producer
+        if not incoming:
+            checksum = producer.checksum if producer else None
+            self._replace_current_checksum(path, checksum)
+            node.state, node.block_reason, node.exception = ("complete" if checksum is not None else "unwired"), None, None
             return
-        base = None
-        if node.cell_root_producer is not None:
-            base = self._value_from_producer(node.cell_root_producer)
-        elif incoming:
-            base = {} if all(isinstance(local[0], str) for local in incoming if local) else None
-        if not incoming and base is None:
-            self._replace_current_checksum(path, None)
-            node.state, node.block_reason = "unwired", None
-            return
-        if base is None:
-            self._apply_pending(node, incoming.values())
-            return
-        result = copy.deepcopy(base)
+        inputs = []
         for local, edge in incoming.items():
-            if not local:
-                continue
             state, checksum = self._source_state(edge)
             if state != "complete":
                 self._apply_pending(node, [edge])
                 return
-            if len(local) != 1:
-                node.state = "failed"; node.exception = PathError("Cell target deeper than one component"); self._replace_current_checksum(path, None); return
-            _assign_path(result, local, value_for_checksum(checksum, "mixed"))
-        try:
-            self._replace_current_checksum(path, checksum_for_value(result, node.cell_config.celltype))
-            node.state, node.block_reason, node.exception = "complete", None, None
-        except Exception as exc:
-            node.state, node.exception = "failed", exc
-            self._replace_current_checksum(path, None)
+            source, _ = self._graph.resolve_existing(edge.source)
+            inputs.append((local, checksum, self._node_celltype(source)))
+        root = producer.checksum if producer else None
+        root_type = producer.celltype if producer else cfg.celltype
+        key = ("merge", root.hex() if root is not None else None, root_type,
+               tuple((local, cs.hex(), ct) for local, cs, ct in inputs), cfg.celltype)
+        state, checksum, error = self._demand(key, evaluate_cell, (root, root_type, tuple(inputs), cfg.celltype),
+                                            [cs for _, cs, _ in inputs] + ([root] if root is not None else []))
+        self._replace_current_checksum(path, checksum)
+        node.state, node.block_reason, node.exception = state, None, error
 
-    def _derive_transformer(self, path, node):
-        cfg = node.transformer_config
-        incoming = self._incoming_for(path)
-        code_checksum = cfg.code_checksum
-        if ("code",) in incoming:
-            state, code_checksum = self._source_state(incoming[("code",)])
-            if state != "complete":
-                self._apply_pending(node, [incoming[("code",)]]); return
-        if code_checksum is None:
-            node.state = "unwired"
-            self._replace_current_checksum(path, None)
-            return
-        try:
-            kwargs = {}
-            pin_checksums = {}
-            for pin in sorted(cfg.pins):
-                edge = incoming.get((pin,))
-                if edge is not None:
-                    state, checksum = self._source_state(edge)
-                    if state != "complete":
-                        self._apply_pending(node, [edge]); return
-                else:
-                    producer = node.transformer_pin_producers.get(pin)
-                    checksum = producer.checksum if producer is not None else None
-                if checksum is None:
-                    if pin in cfg.optional_pins:
-                        continue
-                    node.state, node.block_reason = "unwired", None
-                    self._replace_current_checksum(path, None)
-                    return
-                pin_checksums[pin] = checksum
-                kwargs[pin] = value_for_checksum(
-                    checksum, cfg.celltypes.get(pin, "mixed")
-                )
-            if cfg.callable is None:
-                node.state, node.block_reason, node.exception = "complete", None, None
-                self._replace_current_checksum(path, None)
-                return
-            if not self.eager and node.active_count == 0 and node.derived_active_count == 0:
-                node.state = "waiting"
-                self._replace_current_checksum(path, None)
-                return
-            if observation.is_observing():
-                # Always a miss: this call reaches the Python callable directly and
-                # never consults the transformation cache.  That is the A0 defect
-                # (§15 A0), so a cache-side instrument alone would report nothing;
-                # A1 deletes this call and this recording with it.
-                #
-                # Swallowed on purpose, and it has to be here rather than inside
-                # `observation`: this block sits inside the enclosing
-                # `except BaseException` that marks a node `failed`, so an
-                # instrument that raised would not merely lose a line — it would
-                # report a *transformer failure* that never happened, and the suite
-                # would read it as a contract violation.
+    def _node_celltype(self, path):
+        node = self._graph.nodes[path]
+        return node.cell_config.celltype if node.kind == "cell" else node.transformer_config.celltypes.get("result", "mixed")
+
+    def _projection(self, checksum, local, celltype, target_type=None, validator=None, validator_language=None):
+        target_type = target_type or celltype
+        # Python slices are represented as strings in the content key.
+        key = ("expression", checksum.hex(), _path_string(local), celltype, target_type,
+               validator.hex() if isinstance(validator, Checksum) else validator, validator_language)
+        state, result, error = self._demand(key, evaluate_projection,
+            (checksum, tuple(local), celltype, target_type, validator, validator_language), [checksum])
+        return state, result
+
+    def _demand(self, key, function, args, checksums):
+        self._used_facts.add(key)
+        fact = self._facts.get(key)
+        if fact is not None:
+            lease, error = fact
+            return ("failed" if error else "complete"), lease.checksum if lease else None, error
+        if key not in self._jobs:
+            leases = tuple(Lease(cs) for cs in checksums)
+            self._jobs[key] = None
+            import weakref
+            owner = weakref.ref(self)
+            execution = self._expression_execution
+            async def work(leases=leases):
                 try:
-                    observation.observe(
-                        _transformation_identity(cfg, pin_checksums),
-                        observation.CACHE_MISS,
-                        label=_path_string(path),
-                    )
-                except Exception:
-                    pass
-            result = cfg.callable(**kwargs)
-            self._replace_current_checksum(path, checksum_for_value(result, cfg.celltypes.get("result", "mixed")))
-            node.state, node.block_reason, node.exception = "complete", None, None
-        except BaseException as exc:
-            node.state, node.block_reason, node.exception = "failed", None, exc
-            self._replace_current_checksum(path, None)
+                    if function is evaluate_projection:
+                        from seamless.checksum.expression import evaluate_expression_remote, cancel_expression
+                        cs, local, ct, target, validator, validator_language = args
+                        try:
+                            checksum = await evaluate_expression_remote(cs, _path_string(local), ct, target,
+                                validator=validator, validator_language=validator_language,
+                                execution=execution, member_id=key)
+                            if checksum is None: raise KeyError(_path_string(local))
+                        except asyncio.CancelledError:
+                            cancel_expression(cs, _path_string(local), ct, target, member_id=key)
+                            raise
+                    else:
+                        worker_leases = tuple(Lease(lease.checksum) for lease in leases)
+                        def evaluate(worker_leases=worker_leases):
+                            try:
+                                return function(*args)
+                            finally:
+                                for lease in worker_leases: lease._release_refholds()
+                        checksum = await asyncio.to_thread(evaluate)
+                    payload, error = Lease(checksum), None
+                except Exception as exc:
+                    from .errors import WorkflowExecutionError
+                    payload, error = None, WorkflowExecutionError(str(exc))
+                finally:
+                    for lease in leases: lease._release_refholds()
+                context = owner()
+                if context is not None and context._controller.accepting:
+                    try:
+                        context._controller.submit("_accept_fact", (key, payload, error), klass=5)
+                    except Exception:
+                        if payload is not None: payload._release_refholds()
+                elif payload is not None:
+                    payload._release_refholds()
+            def launch():
+                self._jobs[key] = self._side.submit(work())
+            self._effects.append(launch)
+        return "waiting", None, None
+
+    def _accept_fact(self, key, lease, error):
+        if self._closing or key not in self._jobs:
+            if lease is not None: lease._release_refholds()
+            return
+        self._facts[key] = (lease, error)
+        self._jobs.pop(key, None)
+        self._derive_all()
 
     def _source_state(self, edge):
         source_node, source_local = self._graph.resolve_existing(edge.source)
         node = self._graph.nodes[source_node]
         if node.state != "complete":
-            return node.state, None
-        return "complete", self._get_checksum(source_node, source_local)
+            return ("failed" if node.block_reason == "blocked-by-error" else node.state), None
+        if source_local:
+            return self._projection(node.current_checksum, source_local, self._node_celltype(source_node))
+        return "complete", node.current_checksum
 
     def _apply_pending(self, node, edges):
         states = [self._source_state(edge)[0] for edge in edges]
-        state = "failed" if "failed" in states or "blocked" in states else ("waiting" if "waiting" in states or "computing" in states else "blocked")
-        node.state = "blocked" if state in {"failed", "blocked"} else state
-        node.block_reason = "blocked-by-error" if state in {"failed", "blocked"} else None
+        if "failed" in states:
+            node.state, node.block_reason = "blocked", "blocked-by-error"
+        elif any(state in {"blocked", "unwired"} for state in states):
+            node.state, node.block_reason = "blocked", "blocked-by-unwired"
+        else:
+            node.state, node.block_reason = "waiting", None
         self._replace_current_checksum(
             next(path for path, candidate in self._graph.nodes.items() if candidate is node),
             None,
@@ -1095,12 +1131,7 @@ class Context:
             return node.current_checksum
         if node.current_checksum is None:
             return None
-        try:
-            value = value_for_checksum(node.current_checksum, node.cell_config.celltype)
-            value = _read_path(value, local)
-            return checksum_for_value(value, node.cell_config.celltype)
-        except (KeyError, IndexError, TypeError):
-            return None
+        return self._projection(node.current_checksum, local, node.cell_config.celltype)[1]
 
     def _get_value(self, node_path, local=(), *, celltype=None):
         checksum = self._get_checksum(node_path, local)
@@ -1117,22 +1148,10 @@ class Context:
 
     def _compute_node(self, node_path, *, reactive=True, checksum=False):
         node = self._graph.nodes[node_path]
-        upstream = self._upstream_cone(node_path)
-        if not self.eager:
-            node.active_count += 1
-            for p in upstream: self._graph.nodes[p].derived_active_count += 1
-        try:
-            self._derive_all()
-            node = self._graph.nodes[node_path]
-            if node.state == "unwired": raise NodeError("Node is unwired")
-            if node.state == "blocked": raise NodeError(f"Node is blocked: {node.block_reason}")
-            if node.state == "failed": raise node.exception
-            return node.current_checksum if checksum else self._get_value(node_path, ())
-        finally:
-            if not self.eager:
-                node.active_count -= 1
-                for p in upstream: self._graph.nodes[p].derived_active_count -= 1
-                self._derive_all()
+        if node.state == "unwired": raise NodeError("Node is unwired")
+        if node.state == "blocked": raise NodeError(f"Node is blocked: {node.block_reason}")
+        if node.state == "failed": raise node.exception
+        return node.current_checksum if checksum else self._get_value(node_path, ())
 
     def _compute_cell_endpoint(self, node_path, local):
         self._compute_node(node_path)
@@ -1178,10 +1197,12 @@ class Context:
             raise StaleWorkflowHandleError(f"Endpoint {endpoint.node_path!r} is stale")
         if node.state == "waiting": raise NotImplementedError("Capturing waiting workflow sources requires future-wired E/T")
         if node.state in {"unwired", "blocked"}: raise ValueError(f"Cannot capture workflow source in state {node.state!r}")
-        checksum = self._get_checksum(endpoint.node_path, endpoint.local_path)
+        checksum = self._get_checksum(endpoint.node_path, ())
         if checksum is None:
             raise ValueError("Workflow source has no concrete checksum")
-        return checksum
+        return Expression(checksum, path=_path_string(endpoint.local_path),
+                          celltype=self._node_celltype(endpoint.node_path),
+                          target_celltype=self._node_celltype(endpoint.node_path))
 
     def _public_source(self, source):
         node_path, local = self._graph.resolve_existing(source)
@@ -1191,11 +1212,19 @@ class Context:
         return Cell._from_backend(BoundCellBackend(self, node_path, local, readonly=True))
 
     def _clear_exception(self, node_path):
-        self._graph.nodes[node_path].exception = None
+        node = self._graph.nodes[node_path]
+        if node.exception is None: return
+        current = self._runtime.current_runs.pop(node_path, None)
+        if current is not None and current.et is not None: self._effects.append(current.et.cancel)
+        node.exception = None
         self._derive_all()
 
     def prune(self, node_path=None):
         paths = None if node_path is None else {node_path} | self._downstream_cone(node_path)
+        for path, records in self._runtime.superseded_runs.items():
+            if paths is None or path in paths:
+                for record in records:
+                    if record.et is not None: self._effects.append(record.et.cancel)
         result = {"cancelled": self._runtime.prune(paths)}
         self._sync_superseded_refholds()
         return result
@@ -1212,9 +1241,13 @@ class Context:
 
     def _update_runtime(self, path):
         node = self._graph.nodes[path]
+        if node.kind == "transformer": return
         identity = (path, node.current_checksum.hex() if node.current_checksum else None, node.state)
         current = self._runtime.current_runs.get(path)
-        identity_checksum = checksum_for_value(identity, "plain")
+        identity_checksum = node.current_checksum
+        if identity_checksum is None:
+            if current is not None: self._runtime.supersede(path)
+            return
         if current and current.identity_checksum == identity_checksum:
             current.result_checksum = node.current_checksum
             return
@@ -1233,81 +1266,47 @@ class Context:
         nodes = []
         for path, node in sorted(self._graph.nodes.items()):
             if node.kind == "cell":
-                entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "target_celltype": node.cell_config.target_celltype, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
+                entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "target_celltype": node.cell_config.target_celltype, "validator": node.cell_config.validator, "validator_language": node.cell_config.validator_language, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
             else:
                 cfg = node.transformer_config
-                entry = {"type": "transformer", "path": list(path), "language": cfg.language, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code.decode() if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
+                entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
             if runtime:
                 entry["runtime"] = {"state": node.state, "block_reason": node.block_reason, "checksum": node.current_checksum.hex() if node.current_checksum else None, "exception": type(node.exception).__name__ if node.exception else None, "run": self._runtime_graph_entry(path)}
             nodes.append(entry)
-        return {"__seamless_workflow__": "0.2", "nodes": nodes, "connections": [{"type": "connection", "source": list(e.source), "target": list(e.target)} for e in sorted(self._graph.edges, key=lambda e: (e.source, e.target))], "params": {"eager": self.eager}}
+        return {"__seamless_workflow__": "0.2", "nodes": nodes, "connections": [{"type": "connection", "source": list(e.source), "target": list(e.target)} for e in sorted(self._graph.edges, key=lambda e: (e.source, e.target))], "params": {}}
 
     def set_graph(self, graph):
-        self._release_all_producers()
-        self._code_refholds.clear()
-        self._module_refholds.clear()
-        self._superseded_refholds.clear()
+        # Acquire the staged durable graph before releasing any live roles.
+        claims = []
+        for path, node in graph.nodes.items():
+            if node.cell_root_producer is not None: claims.append(node.cell_root_producer.checksum)
+            claims.extend(p.checksum for p in node.transformer_pin_producers.values())
+            if node.kind == "transformer":
+                cfg = node.transformer_config
+                if cfg.code_checksum is not None: claims.append(cfg.code_checksum)
+                claims.extend(v for v in cfg.modules.values() if isinstance(v, Checksum))
+        acquired = []
+        try:
+            for cs in claims:
+                cs.incref_refholder()
+                acquired.append(cs)
+        except Exception:
+            for cs in acquired: cs.decref_refholder()
+            raise
+        for record in list(self._runtime.current_runs.values()) + [r for q in self._runtime.superseded_runs.values() for r in q]:
+            if record.et is not None: self._effects.append(record.et.cancel)
+        self._release_refholds()
+        self._graph = graph
+        # Do not reuse generations across graph replacement: late completions
+        # from the old graph must never match a new run at the same path.
+        self._runtime = ContextRuntime(generation=self._runtime.generation)
         self._refholds_released = False
-        self._graph, self._runtime = ContextGraph(), ContextRuntime()
-        self.eager = graph.get("params", {}).get("eager", True)
-        for entry in graph.get("nodes", []):
-            path = tuple(entry["path"])
-            if entry["type"] == "cell":
-                node = self._create_cell(path, celltype=entry.get("celltype", "mixed"))
-                node.cell_config.target_celltype = entry.get("target_celltype", node.cell_config.celltype)
-                if "overlay" in entry or "overlays" in entry:
-                    raise PathError("Alpha overlay graph data is not supported")
-                value = entry.get("value")
-                if value is not None:
-                    node.cell_root_producer = self._retain_producer(
-                        Checksum(value["checksum"]),
-                        value.get("celltype", node.cell_config.celltype),
-                    )
-            elif entry["type"] == "transformer":
-                if "overlays" in entry:
-                    raise PathError("Alpha transformer overlays are not supported")
-                if "call_mode" not in entry:
-                    raise PathError("Transformer graph entry is missing required call_mode")
-                code_text = entry.get("code")
-                code = Buffer(code_text, entry.get("language", "python")) if code_text is not None else None
-                callable_code = None
-                if code_text is not None and entry.get("language", "python") == "python":
-                    namespace = {}
-                    try:
-                        exec(textwrap.dedent(code_text), namespace)
-                    except Exception:
-                        namespace = {}
-                    candidates = [value for value in namespace.values() if callable(value) and not getattr(value, "__name__", "").startswith("__")]
-                    for candidate in candidates:
-                        try:
-                            if set(inspect.signature(candidate).parameters) <= set(entry.get("pins", {})):
-                                callable_code = candidate
-                                break
-                        except (TypeError, ValueError):
-                            continue
-                cfg = TransformerConfig(code=code, code_checksum=Checksum(entry["checksum"]["code"]) if entry.get("checksum", {}).get("code") else (code.get_checksum() if code is not None else None), language=entry.get("language", "python"), callable=callable_code, pins=set(entry.get("pins", {})), celltypes={p: m.get("celltype", "mixed") for p, m in entry.get("pins", {}).items()}, optional_pins=set(entry.get("optional_pins", [])), modules=copy.deepcopy(entry.get("modules", {})), globals=copy.deepcopy(entry.get("globals", {})), meta=copy.deepcopy(entry.get("meta", {})), environment=copy.deepcopy(entry.get("environment")), scratch=bool(entry.get("scratch", False)), local=entry.get("local"), direct_print=bool(entry.get("direct_print", False)), call_mode=entry["call_mode"])
-                cfg.celltypes.setdefault("result", "mixed")
-                producers = {
-                    p: self._retain_producer(
-                        Checksum(q["checksum"]),
-                        q.get("celltype", cfg.celltypes.get(p, "mixed")),
-                    )
-                    for p, q in entry.get("producers", {}).items()
-                }
-                self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg, transformer_pin_producers=producers)
-                self._retain_code_checksum(path, cfg.code_checksum)
-        for edge in graph.get("connections", []):
-            source, target = tuple(edge["source"]), tuple(edge["target"])
-            source_node, source_local = self._graph.resolve_existing(source)
-            target_node, target_local = self._graph.resolve_existing(target)
-            target_kind = self._graph.nodes[target_node].kind
-            if target_kind == "cell":
-                if len(target_local) > 1 or any(isinstance(component, slice) for component in target_local):
-                    raise PathError("Cell graph targets are limited to root or one point component")
-            elif target_kind == "transformer":
-                if len(target_local) != 1:
-                    raise PathError("Transformer graph targets must address one whole pin")
-            self._graph.edges.append(Edge(source, target))
+        self._code_refholds = {p:n.transformer_config.code_checksum for p,n in graph.nodes.items()
+                              if n.kind == "transformer" and n.transformer_config.code_checksum is not None}
+        self._module_refholds = {(p,k):v for p,n in graph.nodes.items() if n.kind == "transformer"
+                                for k,v in n.transformer_config.modules.items() if isinstance(v, Checksum)}
+        self._superseded_refholds = {}
+        self._revisions = {p:self._revisions.get(p,0)+1 for p in graph.nodes}
         self._derive_all()
 
     def _copy_subcontext(self, source_prefix, target_prefix):
@@ -1371,3 +1370,24 @@ def _delete_path(root, path):
 
 
 __all__ = ["Context"]
+
+
+
+from .ingress import controller_method, _wait, _wait_async
+
+
+def _compute(self, timeout=None):
+    return _wait(self, barrier=True, timeout=timeout)
+
+
+async def _computation(self, timeout=None):
+    return await _wait_async(self, barrier=True, timeout=timeout)
+
+
+for _name, _method in {**vars(Reactive), **vars(RuntimeAPI), **vars(Context)}.items():
+    if callable(_method) and not _name.startswith("__") and _name not in {
+        "close", "_after_turn", "_check_public_caller", "_transformer_config_from_code", "_transformer_config_from_snapshot"
+    }:
+        setattr(Context, _name, controller_method(_method))
+Context.compute = _compute
+Context.computation = _computation

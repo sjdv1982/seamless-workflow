@@ -49,8 +49,10 @@ from contract_helpers import (
     settle,
     states,
     timed,
+    last_write_states,
 )
 from seamless_workflow import Context
+from seamless_workflow.diagnostics import record_turns
 
 
 def slow_add(x, y, delay):
@@ -87,10 +89,13 @@ def test_a_cached_result_still_leaves_the_node_pending_for_one_turn(
 
     second = _graph(SHORT_BODY_SECONDS)
 
-    second.tf.pins.y = 1  # identical transformation: the result is cached
+    with record_turns(second) as turns:
+        second.tf.pins.y = 1  # identical transformation: the result is cached
 
-    assert second.tf.state in PENDING, states(second)
-    assert second.tf.result.checksum is None
+    # Inspect the writing turn, not a later read that can follow class-5 delivery.
+    snapshot = last_write_states(turns)
+    assert snapshot[("tf",)][0] in PENDING
+    assert snapshot[("tf",)][1] is None
 
 
 @pytest.mark.a4

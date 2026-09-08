@@ -47,6 +47,7 @@ def test_checksum_backed_transformer_binding_releases_standalone_builder():
     ctx.transformer = builder
     node = ctx._graph.nodes[("transformer",)]
     assert builder._refholds_released is True
+    ctx.compute(timeout=10)
     assert _count(checksum) == standalone_count + 1
     assert any(
         role == "transformer:transformer:pin:value"
@@ -115,12 +116,13 @@ def test_checksum_module_replacement_releases_old_role():
     assert _count(second) == 0
 
 
-def test_failed_transformer_replacement_restores_graph_and_roles(monkeypatch, caplog):
+def test_failed_transformer_staging_preserves_graph_and_roles(monkeypatch, caplog):
     from seamless.transformer import delayed
 
     ctx = Context()
     ctx.transformer = identity
     ctx.transformer.pins.value = 31
+    ctx.compute(timeout=10)
     path = ("transformer",)
     node = ctx._graph.nodes[path]
     old_config = node.transformer_config
@@ -132,11 +134,11 @@ def test_failed_transformer_replacement_restores_graph_and_roles(monkeypatch, ca
     replacement.args.value = replacement_checksum
     assert _count(replacement_checksum) == 1
 
-    def fail_after_publication():
-        raise RuntimeError("forced late replacement failure")
+    def fail_staging(*args):
+        raise RuntimeError("forced replacement staging failure")
 
-    monkeypatch.setattr(ctx, "_derive_all", fail_after_publication)
-    with pytest.raises(RuntimeError, match="forced late replacement failure"):
+    monkeypatch.setattr(ctx, "_retain_producer", fail_staging)
+    with pytest.raises(RuntimeError, match="forced replacement staging failure"):
         ctx._replace_transformer_from_builder(path, replacement)
 
     node = ctx._graph.nodes[path]
@@ -163,6 +165,7 @@ def test_transformer_replacement_transfers_pin_and_module_roles():
     old_pin = Buffer(41, "int").get_checksum()
     old_module = Buffer(b"replacement-old-module").get_checksum()
     ctx.transformer.pins.value = old_pin
+    ctx.compute(timeout=10)
     ctx.transformer.modules.example = old_module
 
     new_pin = Buffer(42, "int").get_checksum()
@@ -173,6 +176,7 @@ def test_transformer_replacement_transfers_pin_and_module_roles():
 
     ctx.transformer = replacement
 
+    ctx.compute(timeout=10)
     assert _count(old_pin) == 0
     assert _count(old_module) == 0
     assert _count(new_pin) == 1

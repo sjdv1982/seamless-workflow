@@ -274,3 +274,10 @@ __all__ = [
     "try_settle",
     "timed",
 ]
+
+
+def last_write_states(turn_log):
+    """State/checksum pairs from the last topology or value write turn."""
+    writes = [turn for turn in turn_log.entries() if turn.message_class in {2, 3}]
+    assert writes, 'No write turn was recorded'
+    return {node.path: (node.state, node.checksum) for node in writes[-1].nodes}

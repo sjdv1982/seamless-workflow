@@ -35,6 +35,8 @@ class RunRecord:
     generation: int = 0
     hold_deadline: float | None = None
     hold_kind: str | None = None
+    demand_key: Any = None
+    error: BaseException | None = None
 
 
 @dataclass
@@ -54,6 +56,7 @@ class ContextRuntime:
     current_runs: dict[NodePath, RunRecord] = field(default_factory=dict)
     superseded_runs: dict[NodePath, Deque[RunRecord]] = field(default_factory=dict)
     generation: int = 0
+    evicted: list = field(default_factory=list)
 
     def next_generation(self) -> int:
         self.generation += 1
@@ -71,6 +74,7 @@ class ContextRuntime:
         while len(queue) > self.scheduler.superseded_cap:
             evicted = queue.popleft()
             evicted.phase = "cancelled"
+            self.evicted.append(evicted)
 
     def prune(self, paths: set[NodePath] | None = None) -> int:
         pruned = 0

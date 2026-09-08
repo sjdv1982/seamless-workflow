@@ -43,6 +43,8 @@ from seamless_workflow.graph import NodeState
 
 
 def add(x, y):
+    import time
+    time.sleep(0.5)
     return x + y
 
 

@@ -34,6 +34,7 @@ def test_transformer_literal_survives_tempref_expiry():
     gc.collect()
 
     ctx.add_length.pins.a = 20
+    ctx.compute(timeout=10)
     assert ctx.add_length.state == "complete"
     assert ctx.add_length.exception is None
     assert ctx.add_length.result.value == 20 + len(payload)
@@ -53,8 +54,10 @@ def test_unavailable_literal_is_captured_as_transformer_exception(capsys):
     restored = Context()
     restored.set_graph(graph)
 
+    restored.compute(timeout=10)
     assert restored.add_length.state == "failed"
-    assert isinstance(restored.add_length.exception, CacheMissError)
+    assert isinstance(restored.add_length.exception, RuntimeError)
+    assert "CacheMissError" in str(restored.add_length.exception)
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""

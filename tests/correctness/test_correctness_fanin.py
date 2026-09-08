@@ -56,6 +56,7 @@ def test_two_sub_paths_of_one_cell_feed_one_target_cell():
     ctx.p.left = ctx.a.x
     ctx.p.right = ctx.a.y
 
+    ctx.compute(timeout=10)
     assert ctx.p.value == {"left": 1, "right": 2}
 
 
@@ -104,6 +105,7 @@ def test_a_diamond_through_two_intermediate_cells_is_accepted():
     ctx.join.left = ctx.left
     ctx.join.right = ctx.right
 
+    ctx.compute(timeout=10)
     assert ctx.join.value == {"left": 1, "right": 2}
 
 
@@ -118,6 +120,7 @@ def test_a_repeated_edge_between_the_same_pair_is_not_a_cycle():
 
     ctx.b.second = ctx.a.y  # same source node, same target node, second edge
 
+    ctx.compute(timeout=10)
     assert ctx.b.value == {"first": 1, "second": 2}
 
 

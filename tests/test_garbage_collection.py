@@ -22,6 +22,7 @@ def test_workflow_gc_releases_cell_and_transformer_pin_holds():
     ctx.value = payload
     ctx.identity = identity
     ctx.identity.pins.value = payload
+    ctx.compute(timeout=10)
 
     cell_checksum = ctx._graph.nodes[("value",)].cell_root_producer.checksum
     pin_checksum = ctx._graph.nodes[("identity",)].transformer_pin_producers[
@@ -50,10 +51,12 @@ def test_replacement_and_deletion_release_producer_holds():
 
     ctx.identity = identity
     ctx.identity.pins.value = {"first-pin": uuid4().hex}
+    ctx.compute(timeout=10)
     first_pin = ctx._graph.nodes[("identity",)].transformer_pin_producers[
         "value"
     ].checksum
     ctx.identity.pins.value = {"second-pin": uuid4().hex}
+    ctx.compute(timeout=10)
     second_pin = ctx._graph.nodes[("identity",)].transformer_pin_producers[
         "value"
     ].checksum
@@ -80,10 +83,12 @@ def test_connections_release_replaced_literal_producers():
 
     ctx.identity = identity
     ctx.identity.pins.value = {"pin": uuid4().hex}
+    ctx.compute(timeout=10)
     pin_checksum = ctx._graph.nodes[("identity",)].transformer_pin_producers[
         "value"
     ].checksum
     ctx.identity.pins.value = ctx.source
+    ctx.compute(timeout=10)
     assert _refholder_refs(pin_checksum) == 1
 
 

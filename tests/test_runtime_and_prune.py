@@ -20,7 +20,9 @@ def test_runtime_records_current_and_superseded_runs_with_prune():
     assert runtime["current"]["result"] != first["result"]
     assert len(runtime["superseded"]) == 1
     assert runtime["superseded"][0]["phase"] == "superseded"
+    ctx.compute(timeout=10)
     assert ctx.prune() == {"cancelled": 1}
+    ctx.compute(timeout=10)
     assert ctx.get_graph(runtime=True)["nodes"][0]["runtime"]["run"]["superseded"] == []
 
 
@@ -42,6 +44,7 @@ def test_node_level_prune_scopes_to_downstream_cone():
     ctx.a = 2
     ctx.c = 11
 
+    ctx.compute(timeout=10)
     assert ctx.a.prune() == {"cancelled": 2}
     runtime = {tuple(node["path"]): node["runtime"]["run"] for node in ctx.get_graph(runtime=True)["nodes"]}
     assert runtime[("a",)]["superseded"] == []
@@ -55,8 +58,10 @@ def test_connected_optional_pin_participates_but_absent_optional_is_skipped():
     ctx.add.optional_pins = {"y"}
     ctx.add.pins.x = 5
 
+    ctx.compute(timeout=10)
     assert ctx.add.result.value == 15
     ctx.add.pins.y = 3
+    ctx.compute(timeout=10)
     assert ctx.add.result.value == 8
 
 

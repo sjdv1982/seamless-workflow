@@ -10,6 +10,11 @@ from .errors import (
     ReadOnlyEndpointError,
     StaleWorkflowHandleError,
     ValueUnavailableError,
+    ClosedContextError,
+    ConcurrentUpdateError,
+    ControllerFailedError,
+    ReentrantContextError,
+    WorkflowExecutionError,
 )
 
 __all__ = [
@@ -21,4 +26,9 @@ __all__ = [
     "ReadOnlyEndpointError",
     "StaleWorkflowHandleError",
     "ValueUnavailableError",
+    "ClosedContextError",
+    "ConcurrentUpdateError",
+    "ControllerFailedError",
+    "ReentrantContextError",
+    "WorkflowExecutionError",
 ]

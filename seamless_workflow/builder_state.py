@@ -32,8 +32,9 @@ class BoundCellBackend:
         self.readonly = bool(readonly)
 
     def _node(self):
+        self.context._check_public_caller()
         try:
-            node = self.context._graph.nodes[self.node_path]
+            node = self.context._node_snapshot(self.node_path)
         except KeyError as exc:
             raise StaleWorkflowHandleError(
                 f"Cell endpoint {self.node_path!r} is stale"
@@ -66,7 +67,7 @@ class BoundCellBackend:
         self._node()
         if self.readonly:
             raise ReadOnlyEndpointError("Transformer result is read-only")
-        self.context._set_cell_config(self.node_path, celltype=value)
+        self.context._set_node_config(self.node_path, "celltype", value)
 
     @property
     def target_celltype(self):
@@ -80,7 +81,7 @@ class BoundCellBackend:
         self._node()
         if self.readonly:
             raise ReadOnlyEndpointError("Transformer result is read-only")
-        self.context._set_cell_config(self.node_path, target_celltype=value)
+        self.context._set_node_config(self.node_path, "target_celltype", value)
 
     @property
     def validator(self):
@@ -90,7 +91,7 @@ class BoundCellBackend:
     def validator(self, value):
         if self.readonly:
             raise ReadOnlyEndpointError("Transformer result is read-only")
-        self.context._set_cell_config(self.node_path, validator=value)
+        self.context._set_node_config(self.node_path, "validator", value)
 
     @property
     def validator_language(self):
@@ -100,7 +101,7 @@ class BoundCellBackend:
     def validator_language(self, value):
         if self.readonly:
             raise ReadOnlyEndpointError("Transformer result is read-only")
-        self.context._set_cell_config(self.node_path, validator_language=value)
+        self.context._set_node_config(self.node_path, "validator_language", value)
 
     @property
     def checksum(self):
@@ -142,15 +143,14 @@ class BoundCellBackend:
         }
         if "celltype" in updates:
             kwargs["celltype"] = updates["celltype"]
-        result = type(self)(self.context, self.node_path, local, readonly=self.readonly)
-        # Configuration derives are kept on a canonical Cell object by the
-        # Context backend; path derivation is handled by derive_item/slice.
-        for key, value in updates.items():
-            if key in {"celltype", "target_celltype", "validator", "validator_language"}:
-                setattr(result, key, value)
-            elif key == "input_ref":
-                raise AttributeError("input_ref is standalone-only for bound Cells")
-        return result
+        from seamless import Cell
+        expression = self.build(_UNSET)
+        result = Cell(expression, celltype=updates.get("celltype", self.celltype),
+                      target_celltype=updates.get("target_celltype", self.target_celltype),
+                      validator=updates.get("validator", self.validator),
+                      validator_language=updates.get("validator_language", self.validator_language))
+        return result._workflow_backend if result._workflow_backend is not None else result
+
 
     def derive_item(self, key):
         self._node()
@@ -187,14 +187,14 @@ class BoundCellBackend:
         path = self.local_path if isinstance(owner_path, str) else tuple(owner_path)
         if _same_endpoint(value, self._endpoint_for_local(path + (name,))):
             return
-        self.context._cell_operation(self.node_path, path + (name,), value)
+        self.context._cell_operation(self.node_path, path + (name,), value, detach=True)
 
     def assign_item(self, owner_path, key, value):
         self._ensure_writable()
         path = self.local_path if isinstance(owner_path, str) else tuple(owner_path)
         if _same_endpoint(value, self._endpoint_for_local(path + (key,))):
             return
-        self.context._cell_operation(self.node_path, path + (key,), value)
+        self.context._cell_operation(self.node_path, path + (key,), value, detach=True)
 
     def delete(self, owner_path, name):
         self._ensure_writable()
@@ -209,21 +209,18 @@ class BoundCellBackend:
     def augmented(self, path, operation, value):
         self._ensure_writable()
         local = self.local_path if isinstance(path, str) else tuple(path)
-        current = self.context._get_value(self.node_path, local, celltype=self.celltype)
-        if current is None:
-            raise TypeError(f"Cannot apply {operation} to an empty Cell endpoint")
-        result = getattr(operator, operation)(current, value)
-        self.context._cell_operation(self.node_path, local, result)
+        from .ingress import _edit
+        _edit(self.context, self.node_path, local, value, operation=operation)
 
     def build(self, input_ref):
         self._node()
         return self.context._build_cell_expression(self.node_path, self.local_path, input_ref)
 
-    def compute(self, input_ref):
+    def compute(self, input_ref, *, timeout=None):
         self._node()
         if input_ref is not _UNSET:
             return self.build(input_ref).compute()
-        return self.context._compute_cell_endpoint(self.node_path, self.local_path)
+        return self.context._compute_cell_endpoint(self.node_path, self.local_path, timeout=timeout)
 
     def run(self, input_ref):
         self._node()
@@ -231,10 +228,20 @@ class BoundCellBackend:
             return self.build(input_ref).run()
         return self.context._compute_cell_value(self.node_path, self.local_path)
 
-    async def compute_async(self, input_ref):
+    async def compute_async(self, input_ref, *, timeout=None):
         if input_ref is not _UNSET:
             return await self.build(input_ref).compute_async()
-        return self.context._compute_cell_endpoint(self.node_path, self.local_path)
+        from .ingress import _wait_async
+        lease = await _wait_async(self.context, self.node_path, self.local_path, read=True, barrier=True, timeout=timeout)
+        try:
+            checksum = lease.checksum
+            if checksum is not None and self.local_path:
+                from .sidework import evaluate_projection
+                import asyncio
+                checksum = await asyncio.to_thread(evaluate_projection, checksum, self.local_path, lease.celltype, lease.celltype)
+            if checksum is not None: checksum.tempref()
+            return checksum
+        finally: lease._release_refholds()
 
     def prune(self):
         self._node()
@@ -335,12 +342,10 @@ class WorkflowMapping:
             self[name] = value
 
     def __setitem__(self, key, value):
-        self._mapping()[str(key)] = copy.deepcopy(value)
-        self._backend.context._derive_all()
+        self._backend.context._set_node_config(self._backend.node_path, self._field, value, key=str(key))
 
     def __delitem__(self, key):
-        self._mapping().pop(str(key), None)
-        self._backend.context._derive_all()
+        self._backend.context._set_node_config(self._backend.node_path, self._field, None, key=str(key), delete=True)
 
     def __delattr__(self, name):
         self.__delitem__(name)
@@ -351,13 +356,7 @@ class WorkflowMapping:
 
 class WorkflowCelltypes(WorkflowMapping):
     def __setitem__(self, key, value):
-        cfg = self._backend.cfg
-        key = str(key)
-        cfg.check_pin_name(key, allow_result=True)
-        cfg.celltypes[key] = str(value)
-        if key != "result":
-            cfg.pins.add(key)
-        self._backend.context._derive_all()
+        self._backend.context._set_node_config(self._backend.node_path, "celltypes", value, key=str(key))
 
 
 class BoundTransformerBackend:
@@ -366,8 +365,9 @@ class BoundTransformerBackend:
         self.node_path = tuple(node_path)
 
     def _node(self):
+        self.context._check_public_caller()
         try:
-            node = self.context._graph.nodes[self.node_path]
+            node = self.context._node_snapshot(self.node_path)
         except KeyError as exc:
             raise StaleWorkflowHandleError(
                 f"Transformer endpoint {self.node_path!r} is stale"
@@ -396,7 +396,7 @@ class BoundTransformerBackend:
     @property
     def language(self): return self.cfg.language
     @language.setter
-    def language(self, value): self.cfg.language = "python" if value is None else value; self.context._derive_all()
+    def language(self, value): self.context._set_node_config(self.node_path, "language", value)
     @property
     def code(self): return self.cfg.code
     @code.setter
@@ -410,7 +410,7 @@ class BoundTransformerBackend:
     @property
     def optional_pins(self): return set(self.cfg.optional_pins)
     @optional_pins.setter
-    def optional_pins(self, value): self.cfg.optional_pins = set(value or ()); self.context._derive_all()
+    def optional_pins(self, value): self.context._set_node_config(self.node_path, "optional_pins", value)
     @property
     def modules(self): return WorkflowMapping(self, "modules")
     @property
@@ -420,29 +420,28 @@ class BoundTransformerBackend:
     @property
     def meta(self): return copy.deepcopy(self.cfg.meta)
     @meta.setter
-    def meta(self, value): self.cfg.meta.update(copy.deepcopy(value)); self.context._derive_all()
+    def meta(self, value): self.context._set_node_config(self.node_path, "meta", value)
     @property
     def scratch(self): return self.cfg.scratch
     @scratch.setter
-    def scratch(self, value): self.cfg.scratch = bool(value); self.context._derive_all()
+    def scratch(self, value): self.context._set_node_config(self.node_path, "scratch", value)
     @property
     def direct_print(self): return self.cfg.direct_print
     @direct_print.setter
-    def direct_print(self, value): self.cfg.direct_print = bool(value); self.context._derive_all()
+    def direct_print(self, value): self.context._set_node_config(self.node_path, "direct_print", value)
     @property
     def local(self): return self.cfg.local
     @local.setter
-    def local(self, value): self.cfg.local = value; self.cfg.meta["local"] = value; self.context._derive_all()
+    def local(self, value): self.context._set_node_config(self.node_path, "local", value)
     @property
     def allow_input_fingertip(self): return bool(self.cfg.meta.get("allow_input_fingertip", False))
     @allow_input_fingertip.setter
     def allow_input_fingertip(self, value):
-        if value: self.cfg.meta["allow_input_fingertip"] = True
-        else: self.cfg.meta.pop("allow_input_fingertip", None)
+        self.context._set_node_config(self.node_path, "allow_input_fingertip", value)
     @property
     def driver(self): return bool(self.cfg.meta.get("driver", False))
     @driver.setter
-    def driver(self, value): self.cfg.meta["driver"] = bool(value)
+    def driver(self, value): self.context._set_node_config(self.node_path, "driver", value)
     @property
     def result(self): return Cell._from_backend(BoundCellBackend(self.context, self.node_path, (), readonly=True))
     @property
@@ -458,7 +457,7 @@ class BoundTransformerBackend:
         producer = self.cfg and self._node().transformer_pin_producers.get(pin)
         if producer is None:
             return None
-        return self.context._value_from_producer(producer)
+        return producer.checksum.resolve(producer.celltype)
 
     def _set_pin(self, pin, value):
         self._node()
@@ -469,33 +468,7 @@ class BoundTransformerBackend:
         self.context._delete_transformer_pin(self.node_path, pin)
 
     def snapshot_for_call(self):
-        node = self._node()
-        cfg = node.transformer_config
-        args = {}
-        for pin in cfg.pins:
-            edge = self.context._incoming_edge(self.node_path, (pin,))
-            if edge is not None:
-                args[pin] = self.context._build_source_expression(edge.source)
-            elif pin in node.transformer_pin_producers:
-                args[pin] = self.context._value_from_producer(node.transformer_pin_producers[pin])
-        import inspect
-        return TransformerBuilderSnapshot(
-            codebuf=cfg.code,
-            language=cfg.language,
-            celltypes=copy.deepcopy(cfg.celltypes),
-            optional_pins=frozenset(cfg.optional_pins),
-            args=args,
-            modules=copy.deepcopy(cfg.modules),
-            globals=copy.deepcopy(cfg.globals),
-            meta=copy.deepcopy(cfg.meta),
-            environment=copy.deepcopy(cfg.environment),
-            scratch=cfg.scratch,
-            direct_print=cfg.direct_print,
-            local=cfg.local,
-            call_mode=cfg.call_mode,
-            callable=cfg.callable,
-            signature=inspect.signature(cfg.callable) if callable(cfg.callable) else None,
-        )
+        return self.context._snapshot_transformer(self.node_path)
 
     def _workflow_endpoint(self):
         self._node()
@@ -504,7 +477,12 @@ class BoundTransformerBackend:
     def capture_source(self):
         return self.context._capture_endpoint(self._workflow_endpoint())
 
-    def compute(self): return self.context._compute_node(self.node_path, reactive=True, checksum=True)
+    def compute(self, timeout=None): return self.context._compute_node(self.node_path, reactive=True, checksum=True, timeout=timeout)
+    async def computation(self, timeout=None):
+        from .ingress import _wait_async
+        lease = await _wait_async(self.context, self.node_path, read=True, barrier=True, timeout=timeout)
+        try: return lease.checksum
+        finally: lease._release_refholds()
     def run(self): return self.context._compute_node(self.node_path, reactive=True, checksum=False)
     async def task(self): return self.run()
     def prune(self): self._node(); return self.context.prune(self.node_path)

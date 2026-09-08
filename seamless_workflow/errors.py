@@ -43,3 +43,34 @@ __all__ = [
     "StaleWorkflowHandleError",
     "ValueUnavailableError",
 ]
+
+class ClosedContextError(RuntimeError):
+    """Operation on a closed Context."""
+
+
+class ReentrantContextError(RuntimeError):
+    """Public ingress was called from a controller turn."""
+
+
+class ConcurrentUpdateError(RuntimeError):
+    """An optimistic value edit exhausted its retry budget."""
+
+
+class ControllerFailedError(RuntimeError):
+    """An internal continuation failed; this Context must be closed."""
+
+
+class WorkflowExecutionError(RuntimeError):
+    """Worker diagnostic text with a stable identity across detached snapshots.
+
+    The message is the substrate's formatted diagnostic, not the original
+    exception's args. No arbitrary worker exception class is reconstructed.
+    """
+
+    def __init__(self, message, *, failure_id=None):
+        from uuid import uuid4
+        super().__init__(message)
+        self.failure_id = failure_id or uuid4().hex
+
+    def __deepcopy__(self, memo):
+        return type(self)(str(self), failure_id=self.failure_id)

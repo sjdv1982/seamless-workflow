@@ -21,11 +21,13 @@ def test_bound_edges_into_cell_pins_and_transformer_pins():
     ctx.box = {}
     ctx.box["value"] = ctx.src
 
+    ctx.compute(timeout=10)
     assert ctx.box.value == {"value": 4}
 
     ctx.pick = pick
     ctx.pick.pins.left = ctx.src
     ctx.pick.pins.right = 6
+    ctx.compute(timeout=10)
     assert ctx.pick.result.value == 10
 
 
@@ -62,6 +64,7 @@ def test_transformer_pin_named_scratch_never_collides_with_the_setting():
     ctx.tf.scratch = True
     assert ctx.tf.scratch is True
     assert ctx.tf.pins.scratch == "pin-value"
+    ctx.compute(timeout=10)
     assert ctx.tf.result.value == "pin-value"
 
 

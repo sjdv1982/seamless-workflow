@@ -33,6 +33,7 @@ def test_a_sub_path_source_projects_one_key():
     ctx.a = {"x": 1, "y": 2}
     ctx.b = ctx.a.x
 
+    ctx.compute(timeout=10)
     assert ctx.b.value == 1
     assert ctx.b.state == "complete"
 
@@ -43,6 +44,7 @@ def test_a_deep_sub_path_source_projects_through_levels():
     ctx.a = {"y": {"z": {"deep": 7}}}
     ctx.b = ctx.a.y.z.deep
 
+    ctx.compute(timeout=10)
     assert ctx.b.value == 7
 
 
@@ -53,6 +55,7 @@ def test_a_sub_path_target_merges_into_a_container():
     ctx.target = {}
     ctx.target.k = ctx.src
 
+    ctx.compute(timeout=10)
     assert ctx.target.value == {"k": 5}
 
 
@@ -64,7 +67,9 @@ def test_a_chained_projection_reads_through_an_intermediate_node():
     ctx.mid.inner = ctx.a.y
     ctx.leaf = ctx.mid.inner.z
 
+    ctx.compute(timeout=10)
     assert ctx.mid.value == {"inner": {"z": 2}}
+    ctx.compute(timeout=10)
     assert ctx.leaf.value == 2
 
 
@@ -77,7 +82,9 @@ def test_projections_follow_an_edit_of_the_root():
 
     ctx.a = {"x": 10, "y": {"z": 20}}
 
+    ctx.compute(timeout=10)
     assert ctx.x.value == 10
+    ctx.compute(timeout=10)
     assert ctx.z.value == 20
 
 
@@ -89,6 +96,7 @@ def test_projections_follow_a_sub_path_edit_of_the_root():
 
     ctx.a.y = {"z": 99}
 
+    ctx.compute(timeout=10)
     assert ctx.z.value == 99
 
 
@@ -102,14 +110,20 @@ def test_a_deep_tree_of_projections_stays_consistent():
     ctx.level_c = ctx.a.b.c
     ctx.level_d = ctx.a.b.c.d
 
+    ctx.compute(timeout=10)
     assert ctx.level_b.value == {"c": {"d": 10}}
+    ctx.compute(timeout=10)
     assert ctx.level_c.value == {"d": 10}
+    ctx.compute(timeout=10)
     assert ctx.level_d.value == 10
 
     ctx.a.b.c.d = 999
 
+    ctx.compute(timeout=10)
     assert ctx.level_b.value == {"c": {"d": 999}}
+    ctx.compute(timeout=10)
     assert ctx.level_c.value == {"d": 999}
+    ctx.compute(timeout=10)
     assert ctx.level_d.value == 999
 
 
@@ -123,6 +137,7 @@ def test_a_wide_tree_of_projections_stays_independent():
 
     ctx.a.two = 22
 
+    ctx.compute(timeout=10)
     assert (ctx.one.value, ctx.two.value, ctx.three.value) == (1, 22, 3)
 
 
@@ -135,7 +150,9 @@ def test_a_projection_of_a_container_is_a_copy_not_an_alias():
     projected = ctx.y.value
     projected["z"] = 3
 
+    ctx.compute(timeout=10)
     assert ctx.y.value == {"z": 2}
+    ctx.compute(timeout=10)
     assert ctx.a.value == {"y": {"z": 2}}
 
 
@@ -170,15 +187,16 @@ def test_a_missing_key_is_distinguishable_from_a_key_holding_null():
         checksum = cell.checksum
         return cell.state, cell.value, checksum.hex() if checksum is not None else None
 
+    ctx.compute(timeout=10)
     present = fields(ctx.present)
     missing = fields(ctx.missing)
 
     assert present != missing, (present, states(ctx))
-    assert present[:2] == missing[:2], (
-        "the state and value are expected to be identical; if they stop being so, "
-        "this test has become weaker than it looks and the assertion above no "
-        "longer proves what it says"
-    )
+    assert present[2] is not None
+    assert missing[2] is None
+    assert present[0] == "complete"
+    assert missing[0] != "complete"
+
 
 
 @pytest.mark.a3
@@ -205,6 +223,7 @@ def test_a_missing_key_is_reported_as_something_other_than_complete():
 
     ctx = _missing_key_graph()
 
+    ctx.compute(timeout=10)
     assert not (
         ctx.missing.state == "complete" and ctx.missing.checksum is None
     ), (

@@ -26,6 +26,7 @@ def test_binding_transformer_moves_prebound_pins_to_context():
     assert tf.pins.x == 10
 
     tf.pins.y = 7
+    ctx.compute(timeout=10)
     assert ctx.tf.result.value == 17
 
     ctx.tf.pins.x = 3
@@ -43,13 +44,15 @@ def test_bound_transformer_call_arguments_override_pins_for_call_only():
 
     assert tf(y=5).run() == 15
     assert tf.pins.y == 1
+    ctx.compute(timeout=10)
     assert ctx.tf.result.value == 11
 
 
-def test_function_assignment_creates_eager_transformer():
+def test_function_assignment_creates_reactive_transformer():
     ctx = Context()
     ctx.add = add
     ctx.add.pins.x = 2
     ctx.add.pins.y = 4
+    ctx.compute(timeout=10)
 
     assert ctx.add.result.value == 6

@@ -32,6 +32,11 @@ class CellConfig:
 
 @dataclass
 class TransformerConfig:
+    config_token: str = ""
+    schema: str | None = None
+    compilation: Any = None
+    objects: Any = None
+    header: str | None = None
     code: Any = None
     code_checksum: Checksum | None = None
     language: str = "python"
@@ -95,8 +100,6 @@ class Node:
     cell_root_producer: ConstantProducer | None = None
     transformer_pin_producers: dict[str, ConstantProducer] = field(default_factory=dict)
     current_checksum: Checksum | None = None
-    active_count: int = 0
-    derived_active_count: int = 0
     exception: BaseException | None = None
 
 

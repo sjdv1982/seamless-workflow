@@ -1,5 +1,7 @@
 # `seamless-workflow` tests
 
+Current status: Part I A1–A5 is implemented. All contract tests are required to pass; no migration xfails remain. See [the phase implementation record](../../seamless/attachments-and-mount-partI-implementation.md) for validation and changed test assumptions. The A0 inventory and investigation below are retained as historical context.
+
 Two things live here, in one directory and under one `conftest.py`:
 
 * the **pre-existing suite** — the top-level `test_*.py` files, 74 tests, green;

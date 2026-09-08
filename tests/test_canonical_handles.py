@@ -37,6 +37,7 @@ def test_bound_projection_value_update_and_deep_source_connection():
     assert ctx.data.value == {"nested": {"n": 3}}
 
     ctx.out = ctx.data.nested.n
+    ctx.compute(timeout=10)
     assert ctx.out.value == 3
     assert ctx.get_graph()["connections"][0]["source"] == ["data", "nested", "n"]
     with pytest.raises(PathError):
@@ -48,6 +49,7 @@ def test_transformer_result_is_read_only_and_delayed_calls_are_snapshots():
     ctx.add = add
     ctx.add.pins.x = 2
     ctx.add.pins.y = 5
+    ctx.compute(timeout=10)
     assert isinstance(ctx.add.result, Cell)
     assert ctx.add.result.value == 7
     with pytest.raises(ReadOnlyEndpointError):
@@ -78,6 +80,7 @@ def test_bound_transformer_assignment_wires_result_instead_of_rebinding():
     ctx.add.pins.x = 2
     ctx.add.pins.y = 5
     ctx.out = ctx.add
+    ctx.compute(timeout=10)
 
     assert isinstance(ctx.out, Cell)
     assert ctx.out.value == 7
@@ -108,6 +111,7 @@ def test_rmw_preserves_unrelated_one_level_edges_and_augmented_writes_once():
     ctx.data.left = ctx.left
     ctx.data.right = ctx.right
     ctx.data.nested.n += 1
+    ctx.compute(timeout=10)
 
     assert ctx.data.value == {"left": 10, "right": 20, "nested": {"n": 2}}
     targets = {tuple(edge["target"]) for edge in ctx.get_graph()["connections"]}
@@ -120,6 +124,7 @@ def test_connection_target_depth_and_sequence_validation():
     ctx.src = 3
     ctx.data = [0]
     ctx.data[0] = ctx.src
+    ctx.compute(timeout=10)
     assert ctx.data.value == [3]
 
     with pytest.raises(PathError):
@@ -127,11 +132,13 @@ def test_connection_target_depth_and_sequence_validation():
 
     ctx.mapping = {}
     ctx.mapping["x"] = ctx.src
+    ctx.compute(timeout=10)
     assert ctx.mapping.value == {"x": 3}
 
     ctx.sequence = {}
-    with pytest.raises(TypeError):
-        ctx.sequence[0] = ctx.src
+    ctx.sequence[0] = ctx.src
+    ctx.compute(timeout=10)
+    assert ctx.sequence.state == "failed"
 
     with pytest.raises(PathError):
         ctx.mapping[0:1] = ctx.src
@@ -154,15 +161,21 @@ def test_bound_cell_demand_has_snapshot_and_reactive_return_types():
     assert asyncio.run(ctx.add.task()) == 13
 
 
-def test_non_eager_demand_releases_activation_leases():
-    ctx = Context(eager=False)
+def test_repeated_node_barriers_release_result_leases():
+    from seamless.caching.buffer_cache import get_buffer_cache
+    ctx = Context()
     ctx.add = add
     ctx.add.pins.x = 2
     ctx.add.pins.y = 3
-    assert ctx._graph.nodes[("add",)].state == "waiting"
-    assert isinstance(ctx.add.compute(), Checksum)
-    assert ctx._graph.nodes[("add",)].active_count == 0
-    assert ctx._graph.nodes[("add",)].derived_active_count == 0
+    checksum = ctx.add.compute(timeout=10)
+    cache = get_buffer_cache()
+    baseline = cache.reference_snapshot()[checksum][0]
+    for _ in range(5):
+        assert ctx.add.compute(timeout=10) == checksum
+        assert ctx.add.run() == 5
+        assert cache.reference_snapshot()[checksum][0] == baseline
+    ctx.close()
+    assert cache.reference_snapshot().get(checksum, (0,))[0] == 0
 
 
 def test_pins_is_the_only_transformer_input_namespace():
@@ -274,6 +287,7 @@ def test_graph_roundtrip_preserves_call_mode_and_source_paths():
     clone.set_graph(graph)
     assert type(clone.add).__name__ == "Transformer"
     assert clone.add.run() == 7
+    clone.compute(timeout=10)
     assert clone.out.value == 2
 
     direct_ctx = Context()

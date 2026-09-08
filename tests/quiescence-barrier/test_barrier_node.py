@@ -142,3 +142,34 @@ def test_a_cell_node_barrier_waits_for_the_transformer_that_feeds_it():
     assert checksum == ctx.out.checksum
     assert ctx.out.value == 3
     assert ctx.out.state == "complete"
+
+
+def fails(x):
+    raise RuntimeError('upstream failure')
+
+
+@pytest.mark.a4
+@pytest.mark.slow
+def test_failed_target_barrier_still_waits_for_pending_upstream_sibling():
+    """A terminal target does not imply its whole upstream cone is quiescent."""
+    ctx = Context()
+    ctx.failed = fails
+    ctx.failed.pins.x = 1
+    with pytest.raises(RuntimeError):
+        ctx.failed.compute(timeout=10)
+    ctx.slow = slow_add
+    ctx.slow.pins.x = 10
+    ctx.slow.pins.y = 20
+    ctx.slow.pins.delay = SHORT_BODY_SECONDS
+    ctx.join = slow_add
+    ctx.join.pins.x = ctx.failed
+    ctx.join.pins.y = ctx.slow
+    ctx.join.pins.delay = 0
+    assert ctx.join.state == 'blocked'
+    assert ctx.slow.state == 'computing'
+    with pytest.raises(TimeoutError):
+        ctx.join.compute(timeout=.01)
+    # Once the remaining upstream work settles, the node error is delivered.
+    ctx.slow.compute(timeout=10)
+    with pytest.raises(NodeError):
+        ctx.join.compute(timeout=10)

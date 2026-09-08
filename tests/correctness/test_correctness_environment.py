@@ -65,6 +65,7 @@ def test_a_satisfiable_environment_does_not_change_the_result():
     ctx = _context(["head"])
 
     settle(ctx, timeout=120)
+    assert ctx.tf.exception is None, str(ctx.tf.exception)
     assert ctx.tf.result.value == 4
 
 
