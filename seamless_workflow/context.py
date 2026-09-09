@@ -567,7 +567,7 @@ class Context(RuntimeAPI, Reactive):
 
     def _set_cell_root_with_edges(self, path, checksum, celltype, *, clear_edges):
         node = self._graph.nodes[path]
-        producer = self._retain_producer(checksum, celltype)
+        producer = None if checksum is None else self._retain_producer(checksum, celltype)
         old_producer = node.cell_root_producer
         node.cell_root_producer = producer
         self._revisions[path] = self._revisions.get(path, 0) + 1
@@ -593,7 +593,8 @@ class Context(RuntimeAPI, Reactive):
             if local:
                 raise RuntimeError("Sub-path values must be prepared outside the controller")
             from seamless.checksum.hash_type_validation import validate_deserializable_as
-            validate_deserializable_as(value, node.cell_config.celltype)
+            if value is not None:
+                validate_deserializable_as(value, node.cell_config.celltype)
             self._set_cell_root_with_edges(node_path, value, node.cell_config.celltype, clear_edges=detach)
         self._derive_all()
 

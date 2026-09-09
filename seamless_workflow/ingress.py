@@ -54,7 +54,7 @@ def _prepare_assignment(ctx, path, value):
         if node.kind == 'transformer':
             return _prepare_transformer(ctx, value).config
         celltype = node.cell_config.celltype
-    return checksum_for_value(value, celltype)
+    return None if value is None else checksum_for_value(value, celltype)
 
 
 def _wait(ctx, path=None, local=(), *, read=False, barrier=False, timeout=None):
@@ -190,8 +190,9 @@ def controller_method(method):
                 return _edit(self, path, tuple(local), copy.deepcopy(value), **kwargs)
             if ep is None:
                 cfg = self._node_snapshot(path).cell_config
-                value = Checksum(value) if kwargs.get('checksum_rhs') else checksum_for_value(value, cfg.celltype)
-                leases.append(Lease(value))
+                if value is not None:
+                    value = Checksum(value) if kwargs.get('checksum_rhs') else checksum_for_value(value, cfg.celltype)
+                    leases.append(Lease(value))
             else: value = ep
             args = (path, local, value)
         elif name == '_cell_delete_path' and args[1]:
