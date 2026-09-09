@@ -666,7 +666,7 @@ class Context(RuntimeAPI, Reactive):
         cfg.celltypes.setdefault(pin, "mixed")
         endpoint = self._endpoint(value)
         if endpoint is not None:
-            self._add_endpoint_edge(value, self._transformer_endpoint(node_path, pin))
+            self._add_endpoint_edge(value, self._transformer_endpoint(node_path, pin), detach=True)
         else:
             self._check_authority(node_path, (pin,))
             checksum = checksum_for_value(value, cfg.celltypes.get(pin, "mixed"))

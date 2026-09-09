@@ -165,3 +165,76 @@ def test_clearing_cell_releases_its_checksum_references(make_context):
     # Superseded runtime results may retain their own leases until close.
     ctx.close()
     assert get_buffer_cache().reference_snapshot().get(checksum, (0,))[0] == 0
+
+
+@pytest.mark.parametrize("access", ["pins", "args", "item"])
+@pytest.mark.parametrize("source_kind", ["unwired", "cell", "projection", "transformer"])
+def test_transformer_pin_connection_can_be_reassigned(make_context, access, source_kind):
+    ctx = make_context()
+    if source_kind == "unwired":
+        ctx.a = Cell()
+        ctx.b = Cell()
+    elif source_kind == "projection":
+        ctx.a = {"v": 1}
+        ctx.b = {"v": 2}
+    elif source_kind == "transformer":
+        ctx.a = echo
+        ctx.a.pins.x = 1
+        ctx.b = echo
+        ctx.b.pins.x = 2
+    else:
+        ctx.a = 1
+        ctx.b = 2
+    ctx.tf = echo
+    ctx.out = ctx.tf
+
+    def connect(source):
+        if access == "item":
+            ctx.tf.pins["x"] = source
+        else:
+            getattr(ctx.tf, access).x = source
+
+    a = ctx.a.v if source_kind == "projection" else ctx.a
+    b = ctx.b.v if source_kind == "projection" else ctx.b
+    connect(a)
+    connect(b)
+    connect(b)  # Repeating the same connection is valid, without duplicates.
+    edges = [edge for edge in ctx.get_graph()["connections"]
+             if edge["target"] == ["tf", "x"]]
+    assert len(edges) == 1
+    assert edges[0]["source"] == (["b", "v"] if source_kind == "projection" else ["b"])
+    if source_kind == "unwired":
+        assert ctx.tf.state == "blocked"
+        ctx.a = 10
+        assert ctx.tf.state == "blocked"
+        ctx.b = 2
+    elif source_kind == "projection":
+        ctx.a.v = 10
+    elif source_kind == "transformer":
+        ctx.a.pins.x = 10
+    else:
+        ctx.a = 10
+    ctx.compute(timeout=10)
+    expected = {"x": 2} if source_kind == "transformer" else 2
+    assert ctx.out.value == {"x": expected}
+
+
+@pytest.mark.parametrize("invalid_source", ["self", "downstream", "foreign"])
+def test_invalid_pin_reconnection_preserves_previous_connection(make_context, invalid_source):
+    from seamless_workflow import DependencyError
+
+    ctx = make_context()
+    ctx.a = 1
+    ctx.tf = echo
+    ctx.tf.pins.x = ctx.a
+    ctx.out = ctx.tf
+    foreign = make_context()
+    foreign.a = 2
+    source = {"self": ctx.tf, "downstream": ctx.out, "foreign": foreign.a}[invalid_source]
+    before = ctx.get_graph()
+    with pytest.raises(DependencyError):
+        ctx.tf.pins.x = source
+    assert ctx.get_graph() == before
+    ctx.a = 3
+    ctx.compute(timeout=10)
+    assert ctx.out.value == {"x": 3}
