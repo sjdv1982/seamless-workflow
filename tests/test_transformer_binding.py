@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from seamless_transformer.transformer_class import delayed
 
 from seamless_workflow import Context
@@ -7,6 +9,26 @@ from seamless_workflow import Context
 
 def add(x, y):
     return x + y
+
+
+def default_argument(a=100):
+    return a
+
+
+@pytest.mark.parametrize("binding", ["callable", "builder"])
+def test_default_argument_completes_without_wiring(make_context, binding):
+    ctx = make_context()
+    ctx.func = default_argument if binding == "callable" else delayed(default_argument)
+    ctx.compute(timeout=10)
+
+    assert ctx.func.state == "complete"
+    assert ctx.func.result.value == 100
+
+    ctx.func.pins.a = 200
+    ctx.compute(timeout=10)
+
+    assert ctx.func.state == "complete"
+    assert ctx.func.result.value == 200
 
 
 def test_standalone_transformer_pins_let_call_omit_prebound_arguments():

@@ -451,6 +451,11 @@ class Context(RuntimeAPI, Reactive):
                 callable=code,
                 pins=set(signature.parameters),
                 celltypes={**{p: "mixed" for p in signature.parameters}, "result": "mixed"},
+                optional_pins={
+                    name
+                    for name, parameter in signature.parameters.items()
+                    if parameter.default is not inspect.Parameter.empty
+                },
                 meta={"local": False},
             )
         buf = Buffer(str(code), "text")
