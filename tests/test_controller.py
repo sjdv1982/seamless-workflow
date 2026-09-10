@@ -86,7 +86,7 @@ def test_optimistic_subpath_edit_retries_after_interleaved_write(monkeypatch):
         ctx.close()
 
 
-def test_timeout_withdraws_predicate_without_cancelling_work():
+def test_timeout_withdraws_predicate_without_cancelling_work(transformation_observations):
     ctx = Context()
     try:
         def identity(x):
@@ -99,6 +99,10 @@ def test_timeout_withdraws_predicate_without_cancelling_work():
             with pytest.raises(TimeoutError):
                 ctx.compute(timeout=0.001)
         assert not ctx._barriers
+        assert ctx.tf.state == 'computing'
+        ctx.compute(timeout=10)
+        assert ctx.tf.result.value == 1
+        assert len(transformation_observations.misses('tf')) == 1, transformation_observations.entries()
     finally:
         ctx.close()
 
@@ -107,6 +111,7 @@ def test_public_api_reentry_raises_without_mutating_graph(monkeypatch):
     ctx = Context()
     ctx.a = 1
     handle = ctx.a
+    before = ctx.get_graph()
     observed = []
     after_turn = Context._after_turn
     def check(self):
@@ -120,12 +125,21 @@ def test_public_api_reentry_raises_without_mutating_graph(monkeypatch):
     monkeypatch.setattr(Context, '_after_turn', check)
     assert ctx.a.value == 1
     assert observed
+    assert ctx.get_graph() == before
+    assert ctx.a.value == 1
     ctx.close()
 
 
 def test_async_cancellation_during_registration_withdraws_predicate(monkeypatch):
     import asyncio
+    import time
     ctx = Context()
+    def slow(x):
+        import time
+        time.sleep(3)
+        return x
+    ctx.tf = slow
+    ctx.tf.pins.x = 1  # an empty graph would satisfy the predicate at installation
     original = ctx._controller.submit
     async def exercise():
         task = asyncio.current_task()
@@ -139,7 +153,11 @@ def test_async_cancellation_during_registration_withdraws_predicate(monkeypatch)
             await ctx.computation()
         await asyncio.sleep(.05)
     asyncio.run(exercise())
+    deadline = time.monotonic() + 1
+    while ctx._barriers and time.monotonic() < deadline:
+        time.sleep(.01)
     assert not ctx._barriers
+    assert ctx.tf.state == 'computing'  # still unsatisfied: only withdrawal removed it
     ctx.close()
 
 

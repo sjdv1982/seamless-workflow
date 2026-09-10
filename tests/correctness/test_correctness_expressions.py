@@ -146,13 +146,12 @@ def test_a_projection_of_a_container_is_a_copy_not_an_alias():
     ctx = Context()
     ctx.a = {"y": {"z": 2}}
     ctx.y = ctx.a.y
+    ctx.compute(timeout=10)
 
     projected = ctx.y.value
     projected["z"] = 3
 
-    ctx.compute(timeout=10)
     assert ctx.y.value == {"z": 2}
-    ctx.compute(timeout=10)
     assert ctx.a.value == {"y": {"z": 2}}
 
 

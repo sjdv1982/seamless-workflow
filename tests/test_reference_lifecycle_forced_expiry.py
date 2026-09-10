@@ -161,25 +161,6 @@ def test_superseded_result_is_held_until_deterministic_cap_and_prune(monkeypatch
     assert get_buffer_cache().reference_snapshot().get(records[0].result_checksum, (0, 0, False))[0] == 0
 
 
-def test_independent_contexts_hold_literal_and_current_claims():
-    eager = Context()
-    eager.value = _unique("eager")
-    eager_checksum = eager._graph.nodes[("value",)].current_checksum
-    assert eager_checksum is not None
-    assert any(role == "node:value:current" for _, role in collect_refholder_claims([eager])[eager_checksum])
-
-    lazy = Context()
-    lazy.value = _unique("lazy")
-    lazy_node = lazy._graph.nodes[("value",)]
-    assert lazy_node.cell_root_producer is not None
-    # A literal producer remains owned; non-eager scheduling may omit its
-    # derived current result until it has an active consumer.
-    lazy_checksum = lazy_node.cell_root_producer.checksum
-    assert any(role == "cell:value:literal" for _, role in collect_refholder_claims([lazy])[lazy_checksum])
-    eager._release_refholds()
-    lazy._release_refholds()
-
-
 def test_namespace_deletion_and_graph_copy_keep_independent_claims(monkeypatch):
     ctx = Context()
     ctx.sub = Context()

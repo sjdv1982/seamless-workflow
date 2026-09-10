@@ -116,7 +116,16 @@ def test_checksum_module_replacement_releases_old_role():
     assert _count(second) == 0
 
 
-def test_failed_transformer_staging_preserves_graph_and_roles(monkeypatch, caplog):
+@pytest.mark.parametrize("failing_step", ["pin", "code", "module"])
+def test_failed_transformer_staging_preserves_graph_and_roles(monkeypatch, caplog, failing_step):
+    """A replacement that fails before publication is a rejected request (§12.3).
+
+    Staging acquires the pin producer, then the code checksum, then module
+    checksums.  Failing at each step checks that whatever was staged before it
+    is released, that the live node is untouched, and that the Context stays
+    usable.
+    """
+    import seamless_workflow.context as context_module
     from seamless.transformer import delayed
 
     ctx = Context()
@@ -130,31 +139,98 @@ def test_failed_transformer_staging_preserves_graph_and_roles(monkeypatch, caplo
     old_claims = tuple(ctx._refheld_checksums())
 
     replacement_checksum = Buffer(32, "int").get_checksum()
+    module_checksum = Buffer(b"staging-failure-module").get_checksum()
     replacement = delayed(identity)
     replacement.args.value = replacement_checksum
-    assert _count(replacement_checksum) == 1
+    replacement.modules.example = module_checksum
+    staged = {
+        "pin": replacement_checksum,
+        "code": old_config.code_checksum,  # same code: staged as a second hold
+        "module": module_checksum,
+    }
+    counts = {step: _count(checksum) for step, checksum in staged.items()}
 
-    def fail_staging(*args):
-        raise RuntimeError("forced replacement staging failure")
+    normalize_checksum = context_module.normalize_checksum
 
-    monkeypatch.setattr(ctx, "_retain_producer", fail_staging)
-    with pytest.raises(RuntimeError, match="forced replacement staging failure"):
-        ctx._replace_transformer_from_builder(path, replacement)
+    def fail_at_step(checksum):
+        if checksum == staged[failing_step]:
+            raise RuntimeError("forced replacement staging failure")
+        return normalize_checksum(checksum)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(context_module, "normalize_checksum", fail_at_step)
+        with pytest.raises(RuntimeError, match="forced replacement staging failure"):
+            ctx.transformer = replacement
 
     node = ctx._graph.nodes[path]
     assert node.transformer_config is old_config
     assert node.transformer_pin_producers["value"] is old_producer
     assert tuple(ctx._refheld_checksums()) == old_claims
+    assert {step: _count(checksum) for step, checksum in staged.items()} == counts
     assert replacement._workflow_backend is None
     assert replacement._refholds_released is False
-    assert _count(replacement_checksum) == 1
 
     with caplog.at_level("WARNING", logger="seamless.references"):
         audit_reference_accounting(holders=[ctx, replacement])
     assert caplog.text == ""
 
+    # A rejected request neither poisons the Context nor fails the live node.
+    assert ctx.transformer.state == "complete"
+    assert ctx.transformer.result.value == 31
+
     replacement._release_refholds()
     ctx._release_refholds()
+
+
+def test_failure_after_transformer_publication_poisons_the_context(monkeypatch, caplog):
+    """An internal failure after publication must poison or stop the Context (§12.3).
+
+    Publication is the commit point and MOD-5 forbids rolling it back, so a
+    Context that stays live after this failure reports the old node's result
+    under the new configuration.
+    """
+    from seamless.transformer import delayed
+    from seamless_workflow.errors import ClosedContextError, ControllerFailedError
+
+    ctx = Context()
+    ctx.transformer = identity
+    ctx.transformer.pins.value = 31
+    ctx.compute(timeout=10)
+    handle = ctx.transformer
+
+    replacement_buffer = Buffer(32, "int")  # keeps the new pin resolvable
+    replacement = delayed(identity)
+    replacement.args.value = replacement_buffer.get_checksum()
+
+    def fail_after_publication():
+        raise RuntimeError("forced failure after publication")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ctx, "_derive_all", fail_after_publication)
+        with pytest.raises(RuntimeError, match="forced failure after publication"):
+            ctx.transformer = replacement
+
+    operations = {
+        "state": lambda: ctx.transformer.state,
+        "result": lambda: ctx.transformer.result.value,
+        "held handle": lambda: handle.result.value,
+        "barrier": lambda: ctx.compute(timeout=10),
+        "write": lambda: setattr(ctx, "other", 1),
+    }
+    still_live = {}
+    for name, operation in operations.items():
+        try:
+            still_live[name] = operation()
+        except (ControllerFailedError, ClosedContextError):
+            pass
+    assert still_live == {}, f"the Context stayed live after an internal failure: {still_live}"
+
+    ctx.close()
+    assert ctx._refheld_checksums() == ()
+    with caplog.at_level("WARNING", logger="seamless.references"):
+        audit_reference_accounting(holders=[ctx, replacement])
+    assert caplog.text == ""
+    replacement._release_refholds()
 
 
 def test_transformer_replacement_transfers_pin_and_module_roles():
