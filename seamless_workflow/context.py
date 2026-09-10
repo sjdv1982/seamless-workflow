@@ -560,11 +560,14 @@ class Context(RuntimeAPI, Reactive):
                     self._set_transformer_pin(path, pin, value)
             self._derive_all()
 
-        except Exception:
-            # Failed staging never touched live state. Published state is never
-            # rolled back: runtime repairs proceed forward through derivation.
+        except Exception as exc:
+            # Failed staging never touched live state: the request is rejected.
+            # Published state is never rolled back (MOD-5); a failure after
+            # publication is controller-internal and poisons the Context (§12.3).
             for checksum in reversed(staged_checksums):
                 checksum.decref_refholder()
+            if published:
+                self._controller.poison(self, "_replace_transformer_from_builder", exc)
             raise
 
     def _set_cell_root(self, path, checksum, celltype):
@@ -955,6 +958,15 @@ class Context(RuntimeAPI, Reactive):
             self._release_producer(producer, path + (pin,))
 
     def _derive_all(self):
+        # Derivation runs after a turn has published its graph change, so a
+        # failure here leaves derived state inconsistent with the graph (§12.3).
+        try:
+            self._derive_graph()
+        except Exception as exc:
+            self._controller.poison(self, "_derive_all", exc)
+            raise
+
+    def _derive_graph(self):
         # A source may sort after its target; converge the small durable graph
         # rather than making public state depend on lexical node names.
         self._sync_module_refholds()

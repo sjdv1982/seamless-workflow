@@ -111,15 +111,8 @@ class Controller:
                     for path, node in sorted(context._graph.nodes.items())))
                 for log in self.turn_logs: log._append(snapshot)
         except BaseException as exc:
-            if message.klass == 5 and self.failure is None:
-                from .errors import ControllerFailedError
-                self.failure = ControllerFailedError(f'Controller {message.operation} failed: {type(exc).__name__}: {exc}')
-                with self.lock:
-                    self.accepting = False
-                for future in context._barriers:
-                    if not future.done(): future.set_exception(self.failure)
-                context._barriers.clear()
-                context._begin_close()
+            if message.klass == 5:
+                self.poison(context, message.operation, exc)
             try: context._after_turn()
             except BaseException: pass
             if not message.reply.done():
@@ -127,6 +120,24 @@ class Controller:
         else:
             if not message.reply.done():
                 message.reply.set_result(result)
+
+    def poison(self, context, operation, exc):
+        """Refuse all further ingress after a controller-internal failure (§12.3).
+
+        Called on the controller thread, either by ``_drain`` for a failed
+        class-5 turn or by a turn that fails after publishing graph state.
+        The failing request still receives its original exception.
+        """
+        self.assert_owner()
+        if self.failure is not None:
+            return
+        self.failure = ControllerFailedError(f'Controller {operation} failed: {type(exc).__name__}: {exc}')
+        with self.lock:
+            self.accepting = False
+        for future in context._barriers:
+            if not future.done(): future.set_exception(self.failure)
+        context._barriers.clear()
+        context._begin_close()
 
     def stop(self):
         with self.lock:
