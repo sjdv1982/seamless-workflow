@@ -22,7 +22,8 @@ def test_literal_assignment_stores_checksum_and_value_copy():
 
 def test_bound_alias_survives_assignment():
     ctx = Context()
-    cell = Cell({"a": 1}, celltype="mixed")
+    cell = Cell(celltype="mixed")
+    cell.set({"a": 1})
 
     ctx.a = cell
     assert cell.value == {"a": 1}

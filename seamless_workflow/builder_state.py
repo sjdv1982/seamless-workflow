@@ -144,8 +144,13 @@ class BoundCellBackend:
         if "celltype" in updates:
             kwargs["celltype"] = updates["celltype"]
         from seamless import Cell
-        expression = self.build(_UNSET)
-        result = Cell(expression, celltype=updates.get("celltype", self.celltype),
+        if "input_ref" in updates:
+            # The same structure on another input, as build(input_ref) does:
+            # the projection path moves into the derived builder.
+            input_ref, path = updates["input_ref"], _path_string(local)
+        else:
+            input_ref, path = self.build(_UNSET), None
+        result = Cell(input_ref, path=path, celltype=updates.get("celltype", self.celltype),
                       target_celltype=updates.get("target_celltype", self.target_celltype),
                       validator=updates.get("validator", self.validator),
                       validator_language=updates.get("validator_language", self.validator_language))

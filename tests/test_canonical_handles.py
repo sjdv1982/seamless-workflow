@@ -88,7 +88,8 @@ def test_bound_transformer_assignment_wires_result_instead_of_rebinding():
 
 
 def test_original_bound_alias_and_fresh_lookup_share_state():
-    source = Cell({"value": 1})
+    source = Cell()
+    source.set({"value": 1})
     ctx = Context()
     ctx.source = source
     assert source.value == ctx.source.value == {"value": 1}
@@ -159,6 +160,22 @@ def test_bound_cell_demand_has_snapshot_and_reactive_return_types():
     assert ctx.add.run() == 13
     assert isinstance(ctx.add.compute(), Checksum)
     assert asyncio.run(ctx.add.task()) == 13
+
+
+def test_bound_cell_input_override_keeps_structure_and_rejects_values():
+    ctx = Context()
+    ctx.a = {"x": {"y": 1}}
+    buffer = Buffer({"x": {"y": 42}}, "mixed")
+    other = buffer.get_checksum()
+    derived = ctx.a.x.with_input(other)
+    assert derived._workflow_backend is None
+    assert derived.input_ref == other
+    assert derived.path == "x"
+    assert derived.run() == ctx.a.x.run(other) == {"y": 42}
+    assert ctx.a.x.value == {"y": 1}
+    for override in (ctx.a.with_input, ctx.a.build, ctx.a.compute, ctx.a.run):
+        with pytest.raises(TypeError):
+            override({"x": 2})
 
 
 def test_repeated_node_barriers_release_result_leases():

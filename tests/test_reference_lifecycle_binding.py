@@ -61,9 +61,14 @@ def test_checksum_backed_transformer_binding_releases_standalone_builder():
 
 
 def test_failed_builder_binding_rolls_back_and_keeps_builder_standalone():
-    cell = Cell("value", celltype="not-a-celltype")
+    from seamless_workflow.errors import DependencyError
+
+    other = Context()
+    other.source = 1
+    # Fails inside _create_cell_from_builder, after the node was created.
+    cell = Cell(other.source)
     ctx = Context()
-    with pytest.raises(TypeError):
+    with pytest.raises(DependencyError):
         ctx.value = cell
     assert ("value",) not in ctx._graph.nodes
     assert cell._workflow_backend is None

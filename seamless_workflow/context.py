@@ -419,10 +419,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 self._add_edge(upstream, path)
         elif self._is_bound_source(input_ref):
             self._add_endpoint_edge(input_ref, self._cell_endpoint(path))
-        elif input_ref is not None:
-            # Serialize and acquire the replacement before mutating the
-            # graph's semantic configuration or releasing the old producer.
-            checksum = checksum_for_value(input_ref, cell.celltype)
+        elif isinstance(input_ref, Checksum):
+            # Acquire the replacement before mutating the graph's semantic
+            # configuration or releasing the old producer.
+            checksum = input_ref
             producer = self._retain_producer(checksum, cell.celltype)
             old_producer = node.cell_root_producer
             node.cell_config = new_config
@@ -431,6 +431,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if old_producer is not None:
                 self._release_producer(old_producer, path)
             self._remove_edges_targeting(path, (), descendants=True)
+        elif input_ref is not None:
+            raise TypeError(
+                f"Cannot bind a Cell whose input_ref is {type(input_ref).__name__}"
+            )
         else:
             node.cell_config = new_config
             producer = node.cell_root_producer

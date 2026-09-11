@@ -32,7 +32,8 @@ def test_bound_edges_into_cell_pins_and_transformer_pins():
 
 
 def test_recursive_cell_builder_binding_uses_pseudo_anonymous_node():
-    upstream = Cell(12)
+    upstream = Cell()
+    upstream.set(12)
     downstream = Cell(upstream)
 
     ctx = Context()

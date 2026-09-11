@@ -16,7 +16,8 @@ from seamless_workflow import Context
 with Context() as ctx:
     ctx.config = Cell(celltype="plain")
     ctx.config.mount("config.json")
-    ctx.output = Cell("ready", celltype="text")
+    ctx.output = Cell(celltype="text")
+    ctx.output.set("ready")
     ctx.output.mount("output.txt", mode="w")
     report = ctx.mounts.sync(timeout=10)
 ```

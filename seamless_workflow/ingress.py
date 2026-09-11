@@ -37,9 +37,12 @@ def _prepare_assignment(ctx, path, value):
     if ep is not None: return ep
     if isinstance(value, Cell):
         ref = value.input_ref
-        if ref is not None:
-            ref = (_prepare_assignment(ctx, path, ref) if isinstance(ref, Cell) else
-                   (_endpoint(ref) or checksum_for_value(ref, value.celltype)))
+        if isinstance(ref, Cell):
+            ref = _prepare_assignment(ctx, path, ref)
+        elif ref is not None and not isinstance(ref, Checksum):
+            ref = _endpoint(ref)
+            if ref is None:
+                raise TypeError(f'Cannot bind a Cell whose input_ref is {type(value.input_ref).__name__}')
         return PreparedCell(value.celltype, value.target_celltype, value.validator, value.validator_language, ref)
     if isinstance(value, TransformerCore) or callable(value):
         return _prepare_transformer(ctx, value)
