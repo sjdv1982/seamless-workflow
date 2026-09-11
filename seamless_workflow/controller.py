@@ -73,8 +73,8 @@ class Controller:
             self.loop.call_soon_threadsafe(self._drain)
         return reply
 
-    def notify(self, operation, args=(), *, klass=5):
-        try: self.enqueue(operation, args, klass=klass)
+    def notify(self, operation, args=(), *, klass=5, internal=False):
+        try: self.enqueue(operation, args, klass=klass, internal=internal)
         except (ClosedContextError, ControllerFailedError): pass
 
     def begin_close(self):
@@ -97,7 +97,7 @@ class Controller:
             return
         self.trace.append((message.sequence, message.klass, message.operation, get_ident()))
         try:
-            if self.failure is not None and message.operation not in {'_begin_close', '_finish_close'}:
+            if self.failure is not None and message.operation not in {'_begin_close', '_finish_close', '_mount_close_busy', '_mount_close_wait', '_mount_close_finish', '_mount_delivered', '_mount_cut'}:
                 raise self.failure
             method = getattr(context, message.operation)
             original = getattr(method, '__wrapped__', None)

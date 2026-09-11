@@ -238,8 +238,8 @@ def controller_method(method):
                 if controller.call('_publish_config', path, revision, cfg, klass=2): return
             raise ConcurrentUpdateError('Concurrent configuration updates exceeded retry budget')
         elif name == 'set_graph':
-            from .serialization import prepare_graph
-            args = (prepare_graph(copy.deepcopy(args[0])),)
+            from .attachments.api import load_graph
+            return load_graph(self, args[0], **kwargs)
         try:
             reads = {'get_graph', '_node_snapshot', '_lookup', '_child_names', '_incoming_edge',
                      '_public_source', '_snapshot_transformer', '_build_cell_expression',

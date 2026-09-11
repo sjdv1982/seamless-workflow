@@ -53,3 +53,17 @@ def record_turns(context, *, limit=1024):
             context._controller.call('_unregister_turn_log', log, klass=1)
         except (ClosedContextError, ControllerFailedError):
             pass
+
+
+@contextmanager
+def record_attachments(context, *, limit=1024):
+    """Record immutable classification, delivery and detector events."""
+    from .errors import ClosedContextError, ControllerFailedError
+    if not isinstance(limit, int) or limit < 1:
+        raise ValueError('limit must be a positive integer')
+    log = TurnLog(limit)
+    context._controller.call('_mount_register_log', log, klass=1)
+    try: yield log
+    finally:
+        try: context._controller.call('_mount_unregister_log', log, klass=1)
+        except (ClosedContextError, ControllerFailedError): pass

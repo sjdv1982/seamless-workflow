@@ -38,9 +38,10 @@ PIN_CELLTYPES = {"plain", "mixed", "deepcell", "deepfolder", "folder"}
 
 from .runtime_api import RuntimeAPI
 from .reactive import Reactive
+from .attachments.runtime import AttachmentRuntime
 
 
-class Context(RuntimeAPI, Reactive):
+class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def __init__(self, *, expression_execution="auto") -> None:
         if expression_execution not in {"auto", "local", "remote"}:
             raise ValueError(expression_execution)
@@ -68,6 +69,14 @@ class Context(RuntimeAPI, Reactive):
         object.__setattr__(self, "_facts", {})
         object.__setattr__(self, "_barriers", {})
         object.__setattr__(self, "_effects", [])
+        object.__setattr__(self, "_mount_sessions", {})
+        object.__setattr__(self, "_mount_node_leaves", {})
+        object.__setattr__(self, "_mount_activity", 0)
+        object.__setattr__(self, "_mount_cut_seq", 0)
+        object.__setattr__(self, "_mount_close_future", None)
+        from collections import deque
+        object.__setattr__(self, "_mount_events", deque(maxlen=1024))
+        object.__setattr__(self, "_mount_logs", set())
         object.__setattr__(self, "_revisions", {})
         register_refholder(self)
         from .lifecycle import register
@@ -107,10 +116,14 @@ class Context(RuntimeAPI, Reactive):
     def _after_turn(self):
         self._controller.assert_owner()
         if self._closing: return
+        self._mount_after_turn()
+        self._check_barriers()
         effects, self._effects = self._effects, []
         for effect in effects:
             effect()
         self._check_barriers()
+        effects, self._effects = self._effects, []
+        for effect in effects: effect()
 
     def _node_snapshot(self, path):
         from .errors import StaleWorkflowHandleError
@@ -118,7 +131,12 @@ class Context(RuntimeAPI, Reactive):
             raise StaleWorkflowHandleError(f"Endpoint {path!r} is stale")
         return copy.deepcopy(self._graph.nodes[path])
 
-    def close(self):
+    @property
+    def mounts(self):
+        from .attachments.api import ContextMounts
+        return ContextMounts(self)
+
+    def close(self, timeout=None):
         controller = getattr(self, "_controller", None)
         if controller is None: return
         if controller.is_owner():
@@ -128,6 +146,19 @@ class Context(RuntimeAPI, Reactive):
             if self._closed_event.is_set(): return
             self._closing = True
             controller.begin_close().result()
+            import time
+            bound = 60 if timeout is None else timeout
+            deadline = time.monotonic() + bound
+            flush = controller.enqueue('_mount_close_wait', klass=1, internal=True).result()
+            try: flush.result(max(0, deadline - time.monotonic()))
+            except TimeoutError:
+                import logging
+                logging.getLogger(__name__).warning('Context mount close flush timed out')
+            cleanups = controller.enqueue('_mount_close_finish', klass=1, internal=True).result()
+            for cleanup in cleanups:
+                if cleanup is not None:
+                    try: cleanup.result(max(0, deadline - time.monotonic()))
+                    except TimeoutError: pass
             self._side.close()
             controller.enqueue("_finish_close", klass=1, internal=True).result()
             controller.stop()
@@ -140,12 +171,17 @@ class Context(RuntimeAPI, Reactive):
         for future in self._barriers:
             if not future.done(): future.set_exception(ClosedContextError("Context closed"))
         self._barriers.clear()
+        self._mount_close_prepare()
         for task in self._jobs.values():
             if task is not None: task.cancel()
         for record in list(self._runtime.current_runs.values()) + [r for q in self._runtime.superseded_runs.values() for r in q]:
             if record.et is not None: record.et.cancel()
 
     def _finish_close(self):
+        self._mount_close_finish()
+        for leases in self._mount_node_leaves.values():
+            for lease in leases: lease._release_refholds()
+        self._mount_node_leaves.clear()
         self._release_refholds()
         for lease, _ in self._facts.values():
             if lease is not None: lease._release_refholds()
@@ -162,7 +198,10 @@ class Context(RuntimeAPI, Reactive):
     def _publish_config(self, path, revision, cfg):
         if self._revisions.get(path, 0) != revision: return False
         node = self._graph.nodes[path]
-        if node.kind == "cell": node.cell_config = cfg
+        if node.kind == "cell":
+            if node.mount and (cfg.celltype, cfg.target_celltype) != (node.cell_config.celltype, node.cell_config.target_celltype):
+                raise ValueError("Mounted celltype cannot change; unmount first")
+            node.cell_config = cfg
         else: node.transformer_config = cfg
         self._revisions[path] = revision + 1
         self._derive_all()
@@ -249,6 +288,7 @@ class Context(RuntimeAPI, Reactive):
         from seamless_transformer.transformer_class import Transformer
 
         path = tuple(path)
+        if path == ("mounts",): raise AttributeError("mounts is reserved for the Context mount API")
         if path in self._graph.nodes:
             node = self._graph.nodes[path]
             if node.kind == "cell":
@@ -314,6 +354,8 @@ class Context(RuntimeAPI, Reactive):
 
         path = tuple(path)
         for node_path in self._graph.descendants(path):
+            self._mount_detach(node_path, derive=False)
+            for lease in self._mount_node_leaves.pop(node_path, ()): lease._release_refholds()
             node = self._graph.nodes.pop(node_path, None)
             if node is None:
                 continue
@@ -358,6 +400,9 @@ class Context(RuntimeAPI, Reactive):
 
     def _replace_cell_from_builder(self, path, cell):
         node = self._graph.nodes[path]
+        if node.mount and (cell.celltype, cell.target_celltype) != (node.cell_config.celltype, node.cell_config.target_celltype):
+            raise ValueError("Mounted celltype cannot change; unmount first")
+        session = self._mount_sessions.get(path)
         input_ref = cell.input_ref
         new_config = CellConfig(
             cell.celltype,
@@ -395,6 +440,7 @@ class Context(RuntimeAPI, Reactive):
             self._remove_edges_targeting(path, (), descendants=True)
         if node.cell_config is not new_config and input_ref is not None:
             node.cell_config = new_config
+        if session: session.sense_error = None
         if not isinstance(cell, PreparedCell):
             object.__setattr__(cell, "_workflow_backend", BoundCellBackend(self, path))
             cell._release_refholds()
@@ -574,6 +620,10 @@ class Context(RuntimeAPI, Reactive):
         self._set_cell_root_with_edges(path, checksum, celltype, clear_edges=True)
 
     def _set_cell_root_with_edges(self, path, checksum, celltype, *, clear_edges):
+        session = self._mount_sessions.get(path)
+        if session: session.sense_error = None
+        if checksum is None:
+            for lease in self._mount_node_leaves.pop(path, ()): lease._release_refholds()
         node = self._graph.nodes[path]
         producer = None if checksum is None else self._retain_producer(checksum, celltype)
         old_producer = node.cell_root_producer
@@ -602,7 +652,7 @@ class Context(RuntimeAPI, Reactive):
                 raise RuntimeError("Sub-path values must be prepared outside the controller")
             from seamless.checksum.hash_type_validation import validate_deserializable_as
             if value is not None:
-                validate_deserializable_as(value, node.cell_config.celltype)
+                validate_deserializable_as(value, Buffer._map_celltype(node.cell_config.celltype))
             self._set_cell_root_with_edges(node_path, value, node.cell_config.celltype, clear_edges=detach)
         self._derive_all()
 
@@ -812,6 +862,9 @@ class Context(RuntimeAPI, Reactive):
     def _add_edge(self, source, target, *, detach=False):
         source_node, _ = self._graph.resolve_existing(tuple(source))
         target_node, target_local = self._graph.resolve_existing(tuple(target))
+        mount = self._graph.nodes[target_node].mount
+        if mount and "r" in mount.mode:
+            raise AuthorityError("Sensing mount is the producer; unmount first")
         if source_node == target_node:
             raise DependencyError("Self-dependencies are not supported")
         if self._would_cycle(source_node, target_node):
@@ -1014,6 +1067,11 @@ class Context(RuntimeAPI, Reactive):
             self._derive_transformer(path, node)
 
     def _derive_cell(self, path, node):
+        session = self._mount_sessions.get(path)
+        if session and session.sense_error:
+            self._replace_current_checksum(path, None)
+            node.state, node.block_reason, node.exception = "failed", None, session.sense_error
+            return
         incoming = self._incoming_for(path)
         cfg = node.cell_config
         if () in incoming:
@@ -1260,6 +1318,10 @@ class Context(RuntimeAPI, Reactive):
         return Cell._from_backend(BoundCellBackend(self, node_path, local, readonly=True))
 
     def _clear_exception(self, node_path):
+        session = self._mount_sessions.get(node_path)
+        if session and session.sense_error:
+            self._effects.append(lambda: session.registration.service.poll(session.registration, force=True))
+            return
         node = self._graph.nodes[node_path]
         if node.exception is None: return
         current = self._runtime.current_runs.pop(node_path, None)
@@ -1318,12 +1380,13 @@ class Context(RuntimeAPI, Reactive):
             else:
                 cfg = node.transformer_config
                 entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
+            if node.mount is not None and node.mount.driver == "file": entry["mount"] = node.mount.to_graph()
             if runtime:
                 entry["runtime"] = {"state": node.state, "block_reason": node.block_reason, "checksum": node.current_checksum.hex() if node.current_checksum else None, "exception": type(node.exception).__name__ if node.exception else None, "run": self._runtime_graph_entry(path)}
             nodes.append(entry)
-        return {"__seamless_workflow__": "0.2", "nodes": nodes, "connections": [{"type": "connection", "source": list(e.source), "target": list(e.target)} for e in sorted(self._graph.edges, key=lambda e: (e.source, e.target))], "params": {}}
+        return {"__seamless_workflow__": "0.3", "nodes": nodes, "connections": [{"type": "connection", "source": list(e.source), "target": list(e.target)} for e in sorted(self._graph.edges, key=lambda e: (e.source, e.target))], "params": {}}
 
-    def set_graph(self, graph):
+    def set_graph(self, graph, *, mount_prepared=()):
         # Acquire the staged durable graph before releasing any live roles.
         claims = []
         for path, node in graph.nodes.items():
@@ -1343,6 +1406,13 @@ class Context(RuntimeAPI, Reactive):
             raise
         for record in list(self._runtime.current_runs.values()) + [r for q in self._runtime.superseded_runs.values() for r in q]:
             if record.et is not None: self._effects.append(record.et.cancel)
+        for path in tuple(self._mount_sessions): self._mount_detach(path, delete=False, derive=False)
+        for path, leases in tuple(self._mount_node_leaves.items()):
+            old, new = self._graph.nodes.get(path), graph.nodes.get(path)
+            if (old is None or new is None or old.cell_root_producer is None or new.cell_root_producer is None
+                    or old.cell_root_producer.checksum != new.cell_root_producer.checksum):
+                for lease in leases: lease._release_refholds()
+                self._mount_node_leaves.pop(path)
         self._release_refholds()
         self._graph = graph
         # Do not reuse generations across graph replacement: late completions
@@ -1356,6 +1426,7 @@ class Context(RuntimeAPI, Reactive):
         self._superseded_refholds = {}
         self._revisions = {p:self._revisions.get(p,0)+1 for p in graph.nodes}
         self._derive_all()
+        return [self._mount_attach(*prepared) for prepared in mount_prepared]
 
     def _copy_subcontext(self, source_prefix, target_prefix):
         self._graph.namespaces.add(target_prefix)
@@ -1432,7 +1503,7 @@ async def _computation(self, timeout=None):
     return await _wait_async(self, barrier=True, timeout=timeout)
 
 
-for _name, _method in {**vars(Reactive), **vars(RuntimeAPI), **vars(Context)}.items():
+for _name, _method in {**vars(AttachmentRuntime), **vars(Reactive), **vars(RuntimeAPI), **vars(Context)}.items():
     if callable(_method) and not _name.startswith("__") and _name not in {
         "close", "_after_turn", "_check_public_caller", "_transformer_config_from_code", "_transformer_config_from_snapshot"
     }:

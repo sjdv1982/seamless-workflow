@@ -7,6 +7,9 @@ from .errors import PathError, DependencyError
 
 
 def prepare_graph(data):
+    version = data.get('__seamless_workflow__', '0.2')
+    if version not in {'0.2', '0.3'}:
+        raise PathError(f'Unsupported workflow graph version: {version!r}')
     graph = ContextGraph()
     for entry in data.get('nodes', []):
         path = tuple(entry['path'])
@@ -45,6 +48,17 @@ def prepare_graph(data):
             node = Node('transformer', transformer_config=cfg, transformer_pin_producers=producers)
         else:
             raise PathError(f'Unknown node type: {entry["type"]!r}')
+        if path == ('mounts',): raise PathError('mounts is a reserved Context API name')
+        if 'mount' in entry:
+            if node.kind != 'cell': raise PathError('Only cells may have mount specs')
+            try:
+                from .attachments.spec import AttachmentSpec, validate_celltype
+                if set(entry['mount']) - {'path', 'mode', 'authority', 'persistent'}:
+                    raise ValueError('Unknown mount spec fields')
+                node.mount = AttachmentSpec(**entry['mount'])
+                validate_celltype(cfg.celltype)
+                validate_celltype(cfg.target_celltype)
+            except (TypeError, ValueError) as exc: raise PathError(f'Invalid mount spec: {exc}') from exc
         graph.nodes[path] = node
     for entry in data.get('connections',[]):
         source,target = tuple(entry['source']),tuple(entry['target'])
@@ -52,6 +66,8 @@ def prepare_graph(data):
             sn,sl = graph.resolve_existing(source); tn,tl = graph.resolve_existing(target)
         except KeyError as exc:
             raise PathError(f'Connection endpoint does not exist: {exc}') from exc
+        if graph.nodes[tn].mount and 'r' in graph.nodes[tn].mount.mode:
+            raise PathError('Sensing mounts cannot have incoming connections')
         if graph.nodes[tn].kind == 'cell':
             if len(tl)>1 or any(isinstance(p,slice) for p in tl):
                 raise PathError('Cell graph targets are limited to root or one point component')

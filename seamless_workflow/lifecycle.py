@@ -17,6 +17,8 @@ def close_contexts():
         contexts = tuple(_contexts)
     for context in contexts:
         context.close()
+    from .attachments.fs.service import close_service
+    close_service()
 
 
 register_close_hook(close_contexts)

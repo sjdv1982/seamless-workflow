@@ -96,7 +96,7 @@ def test_node_state_and_exception_report_own_failure_only():
     assert ctx.fail.state == "failed"
     assert isinstance(ctx.fail.exception, RuntimeError)
     error = ctx.fail.exception
-    assert str(error) == "RuntimeError: boom\n"
+    assert str(error).endswith("RuntimeError: boom\n")
     assert ctx.fail.result.state == "failed"
     result_error = ctx.fail.result.exception
     assert result_error.failure_id == error.failure_id

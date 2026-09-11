@@ -102,6 +102,7 @@ class Node:
     transformer_pin_producers: dict[str, ConstantProducer] = field(default_factory=dict)
     current_checksum: Checksum | None = None
     exception: BaseException | None = None
+    mount: object = None
 
 
 @dataclass(frozen=True)

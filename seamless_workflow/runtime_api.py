@@ -31,7 +31,17 @@ class RuntimeAPI:
         self._barriers.pop(future, None)
 
     def _check_barriers(self):
-        for future, (path, local, read, barrier) in list(self._barriers.items()):
+        for future, predicate in list(self._barriers.items()):
+            if hasattr(predicate, 'check'):
+                if future.done():
+                    self._barriers.pop(future, None)
+                    continue
+                ready, result = predicate.check(self)
+                if ready:
+                    future.set_result(result)
+                    self._barriers.pop(future, None)
+                continue
+            path, local, read, barrier = predicate
             if future.done():
                 self._barriers.pop(future, None)
                 continue
