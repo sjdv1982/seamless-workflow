@@ -151,7 +151,7 @@ class BoundCellBackend:
         else:
             input_ref, path = self.build(_UNSET), None
         result = Cell(input_ref=input_ref, path=path, input_celltype=updates.get("input_celltype", self.celltype),
-                      target_celltype=updates.get("target_celltype", self.target_celltype),
+                      celltype=updates.get("target_celltype", self.target_celltype),
                       validator=updates.get("validator", self.validator),
                       validator_language=updates.get("validator_language", self.validator_language))
         return result._workflow_backend if result._workflow_backend is not None else result

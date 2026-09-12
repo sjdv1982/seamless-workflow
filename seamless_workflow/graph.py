@@ -109,8 +109,6 @@ class Node:
 class Edge:
     source: ViewPath
     target: ViewPath
-    source_celltype: str = "mixed"
-    target_celltype: str = "mixed"
 
 
 class ContextGraph:

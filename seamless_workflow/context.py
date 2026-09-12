@@ -400,13 +400,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _replace_cell_from_builder(self, path, cell):
         node = self._graph.nodes[path]
-        if node.mount and (cell.input_celltype, cell.target_celltype) != (node.cell_config.celltype, node.cell_config.target_celltype):
+        if node.mount and (cell.input_celltype, cell.celltype) != (node.cell_config.celltype, node.cell_config.target_celltype):
             raise ValueError("Mounted celltype cannot change; unmount first")
         session = self._mount_sessions.get(path)
         input_ref = cell.input_ref
         new_config = CellConfig(
             cell.input_celltype,
-            cell.target_celltype,
+            cell.celltype,
             cell.validator,
             cell.validator_language,
         )
@@ -1296,7 +1296,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if input_ref is None:
             raise ValueError(f"Cannot build unwired Cell {node_path!r}")
         node = self._graph.nodes[node_path]
-        return Expression(input_ref, path=_path_string(tuple(local)), input_celltype=node.cell_config.celltype, target_celltype=node.cell_config.target_celltype)
+        return Expression(input_ref, path=_path_string(tuple(local)), input_celltype=node.cell_config.celltype, celltype=node.cell_config.target_celltype)
 
     def _build_source_expression(self, source):
         node_path, local = self._graph.resolve_existing(source)
@@ -1305,7 +1305,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             raise ValueUnavailableError(f"Source {source!r} is not current")
         node = self._graph.nodes[node_path]
         celltype = node.cell_config.celltype if node.kind == "cell" else node.transformer_config.celltypes.get("result", "mixed")
-        return Expression(checksum, path=_path_string(local), input_celltype=celltype, target_celltype=celltype)
+        return Expression(checksum, path=_path_string(local), input_celltype=celltype, celltype=celltype)
 
     def _capture_endpoint(self, endpoint):
         node = self._graph.nodes.get(endpoint.node_path)
@@ -1318,7 +1318,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             raise ValueError("Workflow source has no concrete checksum")
         return Expression(checksum, path=_path_string(endpoint.local_path),
                           input_celltype=self._node_celltype(endpoint.node_path),
-                          target_celltype=self._node_celltype(endpoint.node_path))
+                          celltype=self._node_celltype(endpoint.node_path))
 
     def _public_source(self, source):
         node_path, local = self._graph.resolve_existing(source)
@@ -1459,7 +1459,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 self._retain_code_checksum(copied_path, copied_node.transformer_config.code_checksum)
         for edge in list(self._graph.edges):
             if edge.source[:len(source_prefix)] == source_prefix and edge.target[:len(source_prefix)] == source_prefix:
-                self._graph.edges.append(Edge(target_prefix + edge.source[len(source_prefix):], target_prefix + edge.target[len(source_prefix):], edge.source_celltype, edge.target_celltype))
+                self._graph.edges.append(Edge(target_prefix + edge.source[len(source_prefix):], target_prefix + edge.target[len(source_prefix):]))
         self._derive_all()
 
 
