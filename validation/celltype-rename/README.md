@@ -39,3 +39,13 @@ completion, and a downstream latency test timed out and hung during cleanup.
 The former passed an isolated rerun; the latter passed three isolated reruns.
 A complete workflow rerun, without the other suites running concurrently, passed.
 Raw first-run and rerun logs are retained in `/tmp/celltype-rename-phase1/`.
+
+## Phase 2
+
+Input-side Cell/Expression fields, evaluator keys and parameters, workflow builder
+ingestion, and Dask's Python payload builder now use `input_celltype`. The old
+standalone `celltype` name raises a replacement-directed error; bound `celltype`
+still delegates to its backend. Wire keys, database columns and CellConfig are
+unchanged. Four additional guard tests verify standalone refusal and continued
+bound delegation. All 146 file outcomes and failed test identities match Phase 1;
+workflow passed on its initial run. Logs: `/tmp/celltype-rename-phase2/`.

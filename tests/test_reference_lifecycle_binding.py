@@ -21,7 +21,7 @@ def _count(checksum):
 def test_checksum_backed_cell_binding_adopts_before_builder_release():
     buffer = Buffer(17, "int")
     checksum = buffer.get_checksum()
-    cell = Cell(input_ref=checksum, celltype="int")
+    cell = Cell(input_ref=checksum, input_celltype="int")
     ctx = Context()
     assert _count(checksum) == 1
     ctx.value = cell

@@ -38,7 +38,7 @@ class PreparedTransformer:
 
 @dataclass(frozen=True)
 class PreparedCell:
-    celltype: str
+    input_celltype: str
     target_celltype: str
     validator: object
     validator_language: object
@@ -88,10 +88,10 @@ def evaluate_cell(root, root_type, inputs, target_type):
     return checksum_for_value(value, target_type)
 
 
-def evaluate_projection(checksum, path, celltype, target_celltype, validator=None, validator_language=None):
+def evaluate_projection(checksum, path, input_celltype, target_celltype, validator=None, validator_language=None):
     from seamless.checksum.expression import evaluate_expression
     from .builder_state import _path_string
-    result = evaluate_expression(checksum, _path_string(path), celltype, target_celltype,
+    result = evaluate_expression(checksum, _path_string(path), input_celltype, target_celltype,
                                  validator=validator, validator_language=validator_language)
     if result is None:
         raise KeyError(f'Expression path {path!r} does not exist')

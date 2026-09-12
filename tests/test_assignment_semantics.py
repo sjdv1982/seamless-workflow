@@ -85,7 +85,7 @@ def test_source_replacement_validates_before_detaching_previous_edge():
 @pytest.mark.parametrize("celltype, value", [("mixed", {"v": 1}), ("plain", [1, 2]), ("int", 42)])
 def test_setting_cell_none_clears_checksum_and_unwires_downstream(make_context, route, celltype, value):
     ctx = make_context()
-    ctx.a = Cell(celltype=celltype)
+    ctx.a = Cell(input_celltype=celltype)
     ctx.a.set(value)
     ctx.out = ctx.a
     ctx.echo = echo
