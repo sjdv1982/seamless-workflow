@@ -23,3 +23,19 @@ latter: mounted null cells write empty files without a type error, and required
 `bytes` pins accept canonical null as `b""`. The explicit Phase 5 requirement also
 allows null results for `bytes`. No approval pauses are required between phase
 commits: the user's implementation request authorizes those commits.
+
+## Phase 1
+
+Guardrails added with an initially empty retired-name registry; names enter it
+when their APIs are removed in subsequent phases. Expression type and validator
+fields are keyword-only. Positional call sites in core and transformer tests
+were updated. Six new tests cover reads/writes/deletion on Cell, SubCell, and a
+bound backend, Expression reads, explicit item navigation, and positional refusal.
+
+Final gate: 146 files, the same single transformer reference-ownership failure
+as baseline; all workflow files pass. The first workflow run had two intermittent
+failures: `test_a_repaired_failure_revokes_before_it_recomputes` observed a fast
+completion, and a downstream latency test timed out and hung during cleanup.
+The former passed an isolated rerun; the latter passed three isolated reruns.
+A complete workflow rerun, without the other suites running concurrently, passed.
+Raw first-run and rerun logs are retained in `/tmp/celltype-rename-phase1/`.
