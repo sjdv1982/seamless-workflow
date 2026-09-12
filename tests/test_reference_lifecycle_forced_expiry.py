@@ -118,7 +118,7 @@ def test_same_checksum_replacement_acquires_new_state_before_release():
     ctx.value = 314159
     original = ctx._graph.nodes[("value",)].cell_root_producer.checksum
     assert original == checksum
-    ctx.value = Cell(checksum, celltype="int")
+    ctx.value = Cell(input_ref=checksum, celltype="int")
     ctx.compute(timeout=10)
     assert ctx._graph.nodes[("value",)].cell_root_producer.checksum == checksum
     assert get_buffer_cache().reference_snapshot()[checksum][0] == 2

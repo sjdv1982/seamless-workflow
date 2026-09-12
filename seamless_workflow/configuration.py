@@ -33,6 +33,10 @@ def update_config(original, field, value, key=None, delete=False):
         if field in {'celltype','target_celltype'}:
             if value is None and field == 'target_celltype': value = cfg.celltype
             Buffer._map_celltype(value)
+            # The default target follows the cell's type. Preserve a distinct
+            # target explicitly chosen for an expression conversion.
+            if field == 'celltype' and cfg.target_celltype == cfg.celltype:
+                cfg.target_celltype = value
         setattr(cfg, field, copy.deepcopy(value))
     return cfg
 

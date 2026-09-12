@@ -7,6 +7,10 @@ Context nodes are exposed through the canonical `seamless.Cell` and
 described by the earlier context handoff documents is superseded by
 [`context-internals-followup-plan.md`](../seamless/context-internals-followup-plan.md).
 
+Construct cells with `Cell("int")` or `Cell(celltype="int")`; the default type
+is `"mixed"`. Initial references are keyword-only, for example
+`Cell("int", input_ref=checksum)`. Assign values with `.set(value)`.
+
 Whole Context cells can be mounted to files:
 
 ```python
@@ -14,9 +18,9 @@ from seamless import Cell
 from seamless_workflow import Context
 
 with Context() as ctx:
-    ctx.config = Cell(celltype="plain")
+    ctx.config = Cell("plain")
     ctx.config.mount("config.json")
-    ctx.output = Cell(celltype="text")
+    ctx.output = Cell("text")
     ctx.output.set("ready")
     ctx.output.mount("output.txt", mode="w")
     report = ctx.mounts.sync(timeout=10)

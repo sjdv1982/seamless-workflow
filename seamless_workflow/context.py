@@ -1093,6 +1093,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         producer = node.cell_root_producer
         if not incoming:
             checksum = producer.checksum if producer else None
+            if producer is not None and producer.celltype != cfg.celltype:
+                # The producer retains its original serialization; changing
+                # configuration must convert, not reinterpret, that buffer.
+                state, checksum = self._projection(checksum, (), producer.celltype, cfg.celltype)
+                self._apply_upstream_state(node, (state, checksum))
+                return
             self._replace_current_checksum(path, checksum)
             node.state, node.block_reason, node.exception = ("complete" if checksum is not None else "unwired"), None, None
             return

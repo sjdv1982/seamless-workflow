@@ -21,7 +21,7 @@ def _count(checksum):
 def test_checksum_backed_cell_binding_adopts_before_builder_release():
     buffer = Buffer(17, "int")
     checksum = buffer.get_checksum()
-    cell = Cell(checksum, celltype="int")
+    cell = Cell(input_ref=checksum, celltype="int")
     ctx = Context()
     assert _count(checksum) == 1
     ctx.value = cell
@@ -66,7 +66,7 @@ def test_failed_builder_binding_rolls_back_and_keeps_builder_standalone():
     other = Context()
     other.source = 1
     # Fails inside _create_cell_from_builder, after the node was created.
-    cell = Cell(other.source)
+    cell = Cell(input_ref=other.source)
     ctx = Context()
     with pytest.raises(DependencyError):
         ctx.value = cell
