@@ -147,3 +147,36 @@ Final gate: 151 files (two new pin-conversion files), with the same single
 Expression input-refhold assertion failure as Phase 4. Workflow exits zero;
 all Dask files pass. The final snapshot-copy changes are covered by the 11-case
 pin recheck (including a cloned prebound builder) and 19 compiled end-to-end cases.
+
+## Phase 6
+
+`CellBase` now owns the shared value/type/evaluation and reference-lifecycle API.
+`Cell` retains projection, validators, mounts, derivation, and source protocols.
+`Pin` is a sister class in seamless-transformer, with a Transformer-owned backend;
+reads return fresh handles even when an input is unwired. Core rejects a non-Cell
+CellBase input with a message directing callers to `pin.source`.
+
+Standalone pin storage is `(input reference, input celltype)`: literals serialize
+at assignment and acquire a Transformer refhold; typed inputs remain references.
+The six root writes share the declaration/ownership distinction, and deletion
+removes declarations only when the signature is not fixed. Pin types delegate to
+`Transformer.celltypes`, including compiled inputs. Snapshots record input types
+and freeze Cell sources into Expressions; prebound pins build converting
+Expressions while call-time values override them. Builder clones retain original
+input recipes with independent checksum ownership.
+
+The storage audit found writes only in Pin backend replacement and builder
+cloning, both storing reference/type pairs. New tests cover fresh/unwired handles,
+all six writes, retained serialization types, failed retypes and recovery, source
+refusal, null versus clearing, declaration deletion, compiled pins, and frozen
+snapshots over live Cell sources. Existing literal-lifecycle tests now require
+checksum refholds. The baseline Expression dependency test is corrected to assert
+its input claim remains, while its internally evaluated result has no result
+claim; it passes without changing Expression ownership behavior.
+
+Gate logs: `/tmp/celltype-rename-phase6-gate/`. Final snapshot changes are covered
+by `pin-handles-final.log`, `compiled-recheck.log`, and `snapshot-recheck.log`.
+
+Final gate: all 153 files pass, including the full workflow suite. Two files are
+added relative to Phase 5 (core base contracts and standalone Pin handles).
+The prior baseline refhold assertion is now correctly scoped and passes.
