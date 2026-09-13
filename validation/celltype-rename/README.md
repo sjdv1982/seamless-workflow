@@ -116,3 +116,34 @@ to conversion helpers and the retired-name registry.
 Final gate: 149 files, with only the known baseline failure. The full workflow
 rerun (`workflow-final.log`) exits zero, including all 24 new workflow contract
 cases. The 26 core contract cases and the ported probes also pass.
+
+## Phase 5
+
+Typed transformer arguments now convert from their declared output type to the
+pin type before becoming transformation inputs. This covers call-time arguments
+and prebound references; snapshots retain dependency references while copying
+literal values. Converted integer inputs have the same transformation identity
+as the corresponding integer literal.
+
+Canonical null is accepted by required plain/mixed/bytes pins and rejected with
+a pin-named error for other required types. Optional null inputs are removed for
+all pin types. The Expression null fast path bypasses deserialization and value
+conversion; a regression test replaces its decoder with an assertion failure.
+Python and compiled execution serialize null results for plain/mixed/bytes and
+reject them for other result types. Empty bytes results use the null checksum.
+
+The new Dask test starts a distributed scheduler and workers using the existing
+`create_dummy_client` fixture helper, then executes converted Transformation and
+Cell-expression dependencies, checks input checksums, and checks optional-binary
+null removal and required-int null rejection. The real hashserver/database/
+jobserver schema and cache-hit test remains in the full gate.
+
+Logs: `/tmp/celltype-rename-phase5-gate/`. The shutdown-order test initially failed
+before the writer flush hook ran; its separate rerun passed all 16 cases. The
+hash-type test now expects typed inputs to fail at conversion and report the
+input pin, instead of expecting a later deserialization failure; both cases pass.
+
+Final gate: 151 files (two new pin-conversion files), with the same single
+Expression input-refhold assertion failure as Phase 4. Workflow exits zero;
+all Dask files pass. The final snapshot-copy changes are covered by the 11-case
+pin recheck (including a cloned prebound builder) and 19 compiled end-to-end cases.
