@@ -30,13 +30,10 @@ def update_config(original, field, value, key=None, delete=False):
         if field in {'scratch','direct_print'}: value = bool(value)
         if field == 'language' and value is None: value = 'python'
         if field == 'local': cfg.meta['local'] = value
-        if field in {'celltype','target_celltype'}:
-            if value is None and field == 'target_celltype': value = cfg.celltype
+        if field == 'celltype':
+            if value is None: raise TypeError('celltype must name a supported type')
+            value = {int:'int', float:'float', str:'str', bool:'bool', bytes:'bytes'}.get(value, value)
             Buffer._map_celltype(value)
-            # The default target follows the cell's type. Preserve a distinct
-            # target explicitly chosen for an expression conversion.
-            if field == 'celltype' and cfg.target_celltype == cfg.celltype:
-                cfg.target_celltype = value
         setattr(cfg, field, copy.deepcopy(value))
     return cfg
 

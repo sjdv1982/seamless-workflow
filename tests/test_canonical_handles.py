@@ -169,7 +169,7 @@ def test_bound_cell_input_override_keeps_structure_and_rejects_values():
     other = buffer.get_checksum()
     derived = ctx.a.x.with_input(other)
     assert derived._workflow_backend is None
-    assert derived.input_ref == other
+    assert derived.build().input_checksum == other
     assert derived.path == "x"
     assert derived.run() == ctx.a.x.run(other) == {"y": 42}
     assert ctx.a.x.value == {"y": 1}

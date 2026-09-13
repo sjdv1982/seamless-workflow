@@ -42,7 +42,7 @@ class PreparedCell:
     celltype: str
     validator: object
     validator_language: object
-    input_ref: object
+    _input_ref: object
 
     def _release_refholds(self):
         pass

@@ -199,7 +199,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if self._revisions.get(path, 0) != revision: return False
         node = self._graph.nodes[path]
         if node.kind == "cell":
-            if node.mount and (cfg.celltype, cfg.target_celltype) != (node.cell_config.celltype, node.cell_config.target_celltype):
+            if node.mount and cfg.celltype != node.cell_config.celltype:
                 raise ValueError("Mounted celltype cannot change; unmount first")
             node.cell_config = cfg
         else: node.transformer_config = cfg
@@ -302,8 +302,26 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     self._cell_operation(path, (), value, detach=True)
             else:
                 if self._is_bound_source(value):
+                    source_type = self._source_celltype(value)
+                    endpoint = self._endpoint(value)
+                    if not endpoint.can_source or endpoint.node_path == path or self._would_cycle(endpoint.node_path, path):
+                        raise DependencyError("Invalid source for transformer replacement")
+                    self._replace_current_checksum(path, None)
+                    self._release_node_producers(node, path)
+                    self._release_code_checksum(path)
+                    records = list(self._runtime.superseded_runs.pop(path, ()))
+                    current = self._runtime.current_runs.pop(path, None)
+                    if current is not None: records.append(current)
+                    for record in records:
+                        if record.et is not None: self._effects.append(record.et.cancel)
                     self._replace_edges_to(path)
-                    self._create_cell(path)
+                    node.kind = "cell"
+                    node.cell_config = CellConfig(celltype=source_type)
+                    node.transformer_config = None
+                    node.transformer_pin_producers = {}
+                    node.exception = None
+                    self._sync_module_refholds()
+                    self._sync_superseded_refholds()
                     self._add_endpoint_edge(value, self._cell_endpoint(path))
                 elif isinstance(value, (Transformer, PreparedTransformer)):
                     self._replace_transformer_from_builder(path, value)
@@ -319,7 +337,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         elif isinstance(value, SubContextView):
             self._copy_subcontext(value._prefix, path)
         elif self._is_bound_source(value):
-            self._create_cell(path)
+            self._create_cell(path, celltype=self._source_celltype(value))
             self._add_endpoint_edge(value, self._cell_endpoint(path))
         elif isinstance(value, (Cell, PreparedCell)):
             self._create_cell_from_builder(path, value)
@@ -386,12 +404,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def _create_cell(self, path, *, celltype="mixed"):
         if path in self._graph.nodes:
             raise NodeError(path)
-        node = Node(kind="cell", cell_config=CellConfig(celltype=celltype, target_celltype=celltype))
+        node = Node(kind="cell", cell_config=CellConfig(celltype=celltype))
         self._graph.nodes[path] = node
         return node
 
     def _create_cell_from_builder(self, path, cell):
-        self._create_cell(path, celltype=cell.input_celltype)
+        self._create_cell(path, celltype=cell.celltype)
         try:
             self._replace_cell_from_builder(path, cell)
         except Exception:
@@ -400,12 +418,11 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _replace_cell_from_builder(self, path, cell):
         node = self._graph.nodes[path]
-        if node.mount and (cell.input_celltype, cell.celltype) != (node.cell_config.celltype, node.cell_config.target_celltype):
+        if node.mount and cell.celltype != node.cell_config.celltype:
             raise ValueError("Mounted celltype cannot change; unmount first")
         session = self._mount_sessions.get(path)
-        input_ref = cell.input_ref
+        input_ref = cell._input_ref
         new_config = CellConfig(
-            cell.input_celltype,
             cell.celltype,
             cell.validator,
             cell.validator_language,
@@ -423,7 +440,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             # Acquire the replacement before mutating the graph's semantic
             # configuration or releasing the old producer.
             checksum = input_ref
-            producer = self._retain_producer(checksum, cell.input_celltype)
+            producer = self._retain_producer(checksum, cell.input_celltype or cell.celltype)
             old_producer = node.cell_root_producer
             node.cell_config = new_config
             node.cell_root_producer = producer
@@ -625,6 +642,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _set_cell_root_with_edges(self, path, checksum, celltype, *, clear_edges):
         session = self._mount_sessions.get(path)
+        if session and checksum is None:
+            raise AuthorityError("Cannot clear a mounted cell; unmount first")
         if session: session.sense_error = None
         if checksum is None:
             for lease in self._mount_node_leaves.pop(path, ()): lease._release_refholds()
@@ -641,10 +660,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def _set_cell_value(self, path, local, value):
         self._cell_operation(path, local, value)
 
-    def _set_cell_checksum(self, path, local, checksum, *, celltype=None):
-        self._cell_operation(path, local, Checksum(checksum), checksum_rhs=True)
+    def _set_cell_checksum(self, path, local, checksum, *, input_celltype=None):
+        self._cell_operation(path, local, checksum, checksum_rhs=True, input_celltype=input_celltype)
 
-    def _cell_operation(self, node_path, local, value, *, checksum_rhs=False, detach=False):
+    def _cell_operation(self, node_path, local, value, *, checksum_rhs=False, detach=False, input_celltype=None):
         node = self._graph.nodes[node_path]
         local = tuple(local)
         endpoint = self._endpoint(value)
@@ -654,10 +673,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._validate_write(node_path, local, detach)
             if local:
                 raise RuntimeError("Sub-path values must be prepared outside the controller")
-            from seamless.checksum.hash_type_validation import validate_deserializable_as
-            if value is not None:
-                validate_deserializable_as(value, Buffer._map_celltype(node.cell_config.celltype))
-            self._set_cell_root_with_edges(node_path, value, node.cell_config.celltype, clear_edges=detach)
+            self._set_cell_root_with_edges(node_path, value, input_celltype or node.cell_config.celltype, clear_edges=detach)
         self._derive_all()
 
     def _validate_write(self, node_path, local, detach):
@@ -1078,29 +1094,23 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             return
         incoming = self._incoming_for(path)
         cfg = node.cell_config
-        if () in incoming:
-            edge = incoming[()]
-            state, checksum = self._source_state(edge)
-            if state != "complete":
-                self._apply_upstream_state(node, (state, checksum))
-                return
-            source_path, _ = self._graph.resolve_existing(edge.source)
-            source_type = self._node_celltype(source_path)
-            if source_type != cfg.celltype or cfg.target_celltype != cfg.celltype or cfg.validator is not None:
-                state, checksum = self._projection(checksum, (), source_type, cfg.target_celltype, cfg.validator, cfg.validator_language)
-            self._apply_upstream_state(node, (state, checksum))
-            return
         producer = node.cell_root_producer
-        if not incoming:
-            checksum = producer.checksum if producer else None
-            if producer is not None and producer.celltype != cfg.celltype:
-                # The producer retains its original serialization; changing
-                # configuration must convert, not reinterpret, that buffer.
-                state, checksum = self._projection(checksum, (), producer.celltype, cfg.celltype)
-                self._apply_upstream_state(node, (state, checksum))
-                return
+        if () in incoming or not incoming:
+            edge = incoming.get(())
+            if edge is not None:
+                state, checksum = self._source_state(edge)
+                if state != "complete":
+                    self._apply_upstream_state(node, (state, checksum))
+                    return
+            else:
+                checksum = producer.checksum if producer else None
+            error = None
+            state = "complete" if checksum is not None else "unwired"
+            input_type = self._effective_input_celltype(path)
+            if checksum is not None and (input_type != cfg.celltype or cfg.validator is not None):
+                state, checksum, error = self._projection(checksum, (), input_type, cfg.celltype, cfg.validator, cfg.validator_language)
             self._replace_current_checksum(path, checksum)
-            node.state, node.block_reason, node.exception = ("complete" if checksum is not None else "unwired"), None, None
+            node.state, node.block_reason, node.exception = state, None, error
             return
         inputs = []
         for local, edge in incoming.items():
@@ -1119,6 +1129,29 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._replace_current_checksum(path, checksum)
         node.state, node.block_reason, node.exception = state, None, error
 
+    def _source_celltype(self, value):
+        endpoint = self._endpoint(value)
+        if endpoint.top_id != self.top_id:
+            raise DependencyError("Cannot connect sources from a different top-level Context")
+        return self._node_celltype(endpoint.node_path)
+
+    def _effective_input_celltype(self, path):
+        node = self._graph.nodes[path]
+        edge = self._incoming_for(path).get(())
+        if edge is not None:
+            source, _ = self._graph.resolve_existing(edge.source)
+            return self._node_celltype(source)
+        producer = node.cell_root_producer
+        return producer.celltype if producer is not None else None
+
+    def _public_cell_source(self, node_path, local):
+        incoming = self._incoming_for(node_path)
+        for length in range(len(local), -1, -1):
+            edge = incoming.get(tuple(local[:length]))
+            if edge is not None:
+                return self._public_source(edge.source)
+        return None
+
     def _node_celltype(self, path):
         node = self._graph.nodes[path]
         return node.cell_config.celltype if node.kind == "cell" else node.transformer_config.celltypes.get("result", "mixed")
@@ -1130,7 +1163,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                validator.hex() if isinstance(validator, Checksum) else validator, validator_language)
         state, result, error = self._demand(key, evaluate_projection,
             (checksum, tuple(local), celltype, target_type, validator, validator_language), [checksum])
-        return state, result
+        return state, result, error
 
     def _demand(self, key, function, args, checksums):
         self._used_facts.add(key)
@@ -1198,7 +1231,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if node.state != "complete":
             return ("failed" if node.block_reason == "blocked-by-error" else node.state), None
         if source_local:
-            return self._projection(node.current_checksum, source_local, self._node_celltype(source_node))
+            return self._projection(node.current_checksum, source_local, self._node_celltype(source_node))[:2]
         return "complete", node.current_checksum
 
     def _apply_pending(self, node, edges):
@@ -1290,13 +1323,28 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         return result
 
     def _build_cell_expression(self, node_path, local, input_ref):
-        from seamless.cell_class import _UNSET
+        from seamless.cell_class import _UNSET, _typed_input_celltype
+        node = self._graph.nodes[node_path]
+        celltype = self._node_celltype(node_path)
+        input_type = celltype
         if input_ref is _UNSET:
-            input_ref = self._get_checksum(node_path, ())
+            incoming = self._incoming_for(node_path)
+            if set(incoming) == {()}:
+                input_ref = self._build_source_expression(incoming[()].source)
+                input_type = input_ref.celltype
+            elif not incoming and node.kind == "cell" and node.cell_root_producer is not None:
+                input_ref = node.cell_root_producer.checksum
+                input_type = node.cell_root_producer.celltype
+            else:
+                input_ref = self._get_checksum(node_path, ())
+        else:
+            input_type = _typed_input_celltype(input_ref) or celltype
         if input_ref is None:
             raise ValueError(f"Cannot build unwired Cell {node_path!r}")
-        node = self._graph.nodes[node_path]
-        return Expression(input_ref, path=_path_string(tuple(local)), input_celltype=node.cell_config.celltype, celltype=node.cell_config.target_celltype)
+        expression = Expression(input_ref, input_celltype=input_type, celltype=celltype)
+        if local:
+            return Expression(expression, path=_path_string(tuple(local)), celltype=celltype)
+        return expression
 
     def _build_source_expression(self, source):
         node_path, local = self._graph.resolve_existing(source)
@@ -1386,7 +1434,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         nodes = []
         for path, node in sorted(self._graph.nodes.items()):
             if node.kind == "cell":
-                entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "target_celltype": node.cell_config.target_celltype, "validator": node.cell_config.validator, "validator_language": node.cell_config.validator_language, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
+                entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "validator": node.cell_config.validator, "validator_language": node.cell_config.validator_language, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
             else:
                 cfg = node.transformer_config
                 entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
@@ -1394,7 +1442,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if runtime:
                 entry["runtime"] = {"state": node.state, "block_reason": node.block_reason, "checksum": node.current_checksum.hex() if node.current_checksum else None, "exception": type(node.exception).__name__ if node.exception else None, "run": self._runtime_graph_entry(path)}
             nodes.append(entry)
-        return {"__seamless_workflow__": "0.3", "nodes": nodes, "connections": [{"type": "connection", "source": list(e.source), "target": list(e.target)} for e in sorted(self._graph.edges, key=lambda e: (e.source, e.target))], "params": {}}
+        return {"__seamless_workflow__": "0.4", "nodes": nodes, "connections": [{"type": "connection", "source": list(e.source), "target": list(e.target)} for e in sorted(self._graph.edges, key=lambda e: (e.source, e.target))], "params": {}}
 
     def set_graph(self, graph, *, mount_prepared=()):
         # Acquire the staged durable graph before releasing any live roles.

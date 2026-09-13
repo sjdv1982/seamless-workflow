@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from seamless import Cell
+from seamless import Buffer, Cell
 from seamless_workflow import Context
 
 
@@ -43,7 +43,7 @@ def test_transformer_pin_none_is_a_value_and_del_is_deletion():
     assert ctx._graph.nodes[("echo",)].state == "unwired"
 
 
-def test_standalone_cell_captures_complete_bound_source_checksum():
+def test_standalone_cell_follows_bound_source():
     ctx = Context()
     ctx.a = {"v": 1}
 
@@ -51,16 +51,17 @@ def test_standalone_cell_captures_complete_bound_source_checksum():
     target.set(ctx.a)
     ctx.a = {"v": 2}
 
-    assert target.run() == {"v": 1}
+    assert target.run() == {"v": 2}
 
 
-def test_standalone_cell_capture_rejects_unwired_source():
+def test_standalone_cell_is_blocked_by_unwired_source():
     ctx = Context()
     ctx.a = Cell()
 
     target = Cell()
-    with pytest.raises(ValueError):
-        target.set(ctx.a)
+    target.set(ctx.a)
+    assert target.state == "blocked"
+    assert target.checksum is None
 
 
 def test_source_replacement_validates_before_detaching_previous_edge():
@@ -85,7 +86,7 @@ def test_source_replacement_validates_before_detaching_previous_edge():
 @pytest.mark.parametrize("celltype, value", [("mixed", {"v": 1}), ("plain", [1, 2]), ("int", 42)])
 def test_setting_cell_none_clears_checksum_and_unwires_downstream(make_context, route, celltype, value):
     ctx = make_context()
-    ctx.a = Cell(input_celltype=celltype)
+    ctx.a = Cell(celltype=celltype)
     ctx.a.set(value)
     ctx.out = ctx.a
     ctx.echo = echo
@@ -97,11 +98,11 @@ def test_setting_cell_none_clears_checksum_and_unwires_downstream(make_context, 
 
     def clear():
         if route == "attribute":
-            ctx.a = None
+            ctx.a.checksum = None
         elif route == "item":
-            ctx["a"] = None
+            ctx["a"].buffer = None
         else:
-            ctx.a.set(None)
+            ctx.a.set_checksum(None)
 
     clear()
     clear()  # Clearing an already unwired cell is idempotent.
@@ -122,12 +123,12 @@ def test_setting_cell_none_clears_checksum_and_unwires_downstream(make_context, 
     assert ctx.echo.result.value == {"x": value}
 
 
-def test_new_cell_assigned_none_is_unwired(make_context):
+def test_new_cell_assigned_none_stores_null(make_context):
     ctx = make_context()
     ctx.a = None
     assert isinstance(ctx.a, Cell)
-    assert ctx.a.checksum is None
-    assert ctx.a.state == "unwired"
+    assert ctx.a.checksum == Buffer(None, "mixed").get_checksum()
+    assert ctx.a.state == "complete"
 
 
 def test_assigning_none_detaches_old_upstream_connection(make_context):
@@ -135,11 +136,11 @@ def test_assigning_none_detaches_old_upstream_connection(make_context):
     ctx.source = 1
     ctx.target = ctx.source
     ctx.target = None
-    assert ctx.target.checksum is None
-    assert ctx.target.state == "unwired"
+    assert ctx.target.checksum == Buffer(None, "mixed").get_checksum()
+    assert ctx.target.state == "complete"
     ctx.source = 2
-    assert ctx.target.checksum is None
-    assert ctx.target.state == "unwired"
+    assert ctx.target.checksum == Buffer(None, "mixed").get_checksum()
+    assert ctx.target.state == "complete"
 
 
 def test_structural_null_values_remain_values(make_context):
@@ -159,7 +160,7 @@ def test_clearing_cell_releases_its_checksum_references(make_context):
     ctx.a = {"unique": "cell-none-reference-test"}
     checksum = ctx.a.checksum
     assert get_buffer_cache().reference_snapshot()[checksum][0] == 2
-    ctx.a.set(None)
+    ctx.a.checksum = None
     assert not any(role in {"cell:a:literal", "node:a:current"}
                    for _, role in ctx._refheld_checksums())
     # Superseded runtime results may retain their own leases until close.

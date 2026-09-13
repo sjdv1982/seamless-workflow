@@ -77,3 +77,42 @@ ALTER TABLE expression RENAME COLUMN target_celltype TO celltype;
 
 Alternatively drop/recreate the expression cache table. Test services use fresh
 DBs; no unrelated running service or user cache is modified.
+
+## Phase 4
+
+Cells now retain their input interpretation and convert to their configured
+output type, both standalone and bound. Typed sources supply the input type;
+constants retain the serialization type. Public input access is split into
+read-only `source` and writable output `checksum`. All six value/buffer/checksum
+writes implement declaration versus ownership checks. Expressions snapshot typed
+inputs and reject conflicting declarations. Graphs write version 0.4 and retain
+the declared input type with constant producers.
+
+Null uses one trivial, cache-independent checksum across celltypes; bytes null
+resolves as empty bytes. File mounts read missing, empty, and canonical-null files
+as null without rewriting them, and write null as physically empty files,
+including compressed-file paths. Directory mounts distinguish missing from empty.
+Conversion failures report the cell's exception. Source assignment replacing a
+transformer creates a cell with the source type and preserves downstream edges.
+
+The added core and workflow contract tests cover these semantics. The ported
+original probes are executable with assertions:
+
+```sh
+conda run --no-capture-output -n seamless1 python validation/celltype-rename/celltype_probes.py
+```
+
+Validation logs are in `/tmp/celltype-rename-phase4-gate/`. The initial transformer
+Expression tests contained two conflicting typed-source declarations; these now
+use type inference and their four-case rerun passes. The cancellation CLI test
+again exposed a jobserver startup import-lock race, before request execution.
+Initializing `seamless.util` before transformer startup avoids that import cycle;
+the fresh-service cancellation rerun passes all eight cases. The existing
+Expression dependency refhold assertion remains the single baseline failure.
+The static retired-name check necessarily retains the graph loader's explicit
+legacy `target_celltype` checks, as required for 0.2/0.3 compatibility, in addition
+to conversion helpers and the retired-name registry.
+
+Final gate: 149 files, with only the known baseline failure. The full workflow
+rerun (`workflow-final.log`) exits zero, including all 24 new workflow contract
+cases. The 26 core contract cases and the ported probes also pass.

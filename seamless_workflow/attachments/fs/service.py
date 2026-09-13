@@ -158,6 +158,7 @@ class FileSystemService:
         return root, tuple(entries)
 
     def _decode(self, path, data):
+        if not data: return b""
         if path.endswith('.gz'):
             import io
             with gzip.GzipFile(fileobj=io.BytesIO(data)) as stream:
@@ -169,6 +170,7 @@ class FileSystemService:
         return data
 
     def _encode(self, path, data):
+        if not data: return b""
         if path.endswith('.gz'): return gzip.compress(data, compresslevel=6, mtime=0)
         if path.endswith('.zst'):
             import zstandard
@@ -189,7 +191,13 @@ class FileSystemService:
                 for lease in leases: lease._release_refholds()
                 leases = []
                 fingerprint = self._fingerprint(reg)
-                if fingerprint is None: return Observation(reg.session_id, ws, None, ABSENT)
+                if fingerprint is None:
+                    from seamless.checksum.null import NULL_BUFFER
+                    buf = Buffer(NULL_BUFFER)
+                    cs = buf.get_checksum()
+                    buf.tempref()
+                    leases.append(MountLease(cs, f'mount:{reg.session_id}:observation'))
+                    return Observation(reg.session_id, ws, None, cs.hex(), buf, tuple(leases))
                 if reg.directory:
                     index, size = {}, 0
                     started = time.monotonic()
@@ -310,6 +318,12 @@ class FileSystemService:
     def _write_directory(self, reg, delivery, content):
         import json
         index = json.loads(content)
+        if index is None:
+            if self._fingerprint(reg) != delivery.expected_fingerprint: return False
+            if delivery.expected_fingerprint is not None:
+                import shutil
+                shutil.rmtree(reg.path)
+            return True
         if not isinstance(index, dict): raise ValueError('Directory index must be a mapping')
         if len(index) > self.max_files: raise ValueError('Directory file-count limit exceeded')
         for name in index:
@@ -362,6 +376,9 @@ class FileSystemService:
                 if reg.closed: raise RuntimeError('Mount was unregistered')
                 buf = self._resolve(transport_lease.checksum)
                 content = buf.content if hasattr(buf, 'content') else bytes(buf)
+                from seamless.checksum.null import NULL_BUFFER
+                if not reg.directory and content == NULL_BUFFER:
+                    content = b''
                 written = (self._write_directory(reg, delivery, content) if reg.directory else
                            self._atomic_write(reg.path, content, delivery.expected_fingerprint))
                 if not written:

@@ -31,7 +31,7 @@ def test_populated_celltype_change(
     ctx = make_context()
     if source_kind == "checksum":
         buffer = Buffer(value, old_type)
-        ctx.target = Cell(old_type, input_ref=buffer.get_checksum())
+        ctx.target = Cell(old_type, checksum=buffer.get_checksum())
     else:
         ctx.target = Cell(old_type)
         if source_kind == "literal":
@@ -66,8 +66,8 @@ def test_populated_celltype_change(
     assert ctx.target.value == expected
     assert type(ctx.target.value) is type(expected)
     assert ctx.downstream.state == "complete", ctx.downstream.exception
-    assert ctx.downstream.value == expected
-    assert type(ctx.downstream.value) is type(expected)
+    assert ctx.downstream.value == value
+    assert type(ctx.downstream.value) is type(value)
     assert ctx.get_graph()["connections"] == connections
 
     if source_kind in {"cell", "transformer"}:
@@ -81,7 +81,7 @@ def test_populated_celltype_change(
     assert ctx.target.state == "complete", ctx.target.exception
     assert ctx.target.checksum == Buffer(next_expected, new_type).get_checksum()
     assert ctx.target.value == next_expected
-    assert ctx.downstream.value == next_expected
+    assert ctx.downstream.value == next_value
 
     # A second type change also has to use the correct source serialization.
     ctx.target.celltype = old_type

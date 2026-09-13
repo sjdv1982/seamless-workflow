@@ -37,11 +37,9 @@ def test_configuration_is_snapshot_and_mapping_updates_are_validated():
         ctx.tf.allow_input_fingertip = True
         assert ctx.tf.driver and ctx.tf.allow_input_fingertip
         ctx.a = 12
-        ctx.a.target_celltype = 'text'
-        assert ctx.a.target_celltype == 'text'
-        with pytest.raises(TypeError):
-            ctx.a.target_celltype = 'invalid-celltype'
-        assert ctx.a.target_celltype == 'text'
+        with pytest.raises(AttributeError):
+            ctx.a.input_celltype = 'text'
+        assert ctx.a.input_celltype == ctx.a.celltype
     finally:
         ctx.close()
 

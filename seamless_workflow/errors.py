@@ -1,12 +1,7 @@
 """Workflow-layer exceptions."""
 
 
-class WorkflowError(Exception):
-    """Base class for workflow Context errors."""
-
-
-class AuthorityError(WorkflowError):
-    """Raised when a dependent path is assigned as a local producer."""
+from seamless.cell_errors import WorkflowError, AuthorityError
 
 
 class DependencyError(WorkflowError):

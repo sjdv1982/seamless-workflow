@@ -36,13 +36,13 @@ def _prepare_assignment(ctx, path, value):
     ep = _endpoint(value)
     if ep is not None: return ep
     if isinstance(value, Cell):
-        ref = value.input_ref
+        ref = value._input_ref
         if isinstance(ref, Cell):
             ref = _prepare_assignment(ctx, path, ref)
         elif ref is not None and not isinstance(ref, Checksum):
             ref = _endpoint(ref)
             if ref is None:
-                raise TypeError(f'Cannot bind a Cell whose input_ref is {type(value.input_ref).__name__}')
+                raise TypeError(f'Cannot bind a Cell whose input_ref is {type(value._input_ref).__name__}')
         return PreparedCell(value.input_celltype, value.celltype, value.validator, value.validator_language, ref)
     if isinstance(value, TransformerCore) or callable(value):
         return _prepare_transformer(ctx, value)
@@ -57,7 +57,7 @@ def _prepare_assignment(ctx, path, value):
         if node.kind == 'transformer':
             return _prepare_transformer(ctx, value).config
         celltype = node.cell_config.celltype
-    return None if value is None else checksum_for_value(value, celltype)
+    return checksum_for_value(value, celltype)
 
 
 def _wait(ctx, path=None, local=(), *, read=False, barrier=False, timeout=None):
@@ -147,7 +147,7 @@ def controller_method(method):
             value = _prepare_assignment(self, path, original)
             args = (path, value)
             if isinstance(value, Checksum): leases.append(Lease(value))
-            if isinstance(value, PreparedCell) and isinstance(value.input_ref, Checksum): leases.append(Lease(value.input_ref))
+            if isinstance(value, PreparedCell) and isinstance(value._input_ref, Checksum): leases.append(Lease(value._input_ref))
             if isinstance(value, PreparedTransformer):
                 leases.extend(Lease(v) for v in value.snapshot.args.values() if isinstance(v, Checksum))
         elif name in {'_replace_transformer_from_builder','_create_transformer_from_builder'}:
@@ -193,8 +193,11 @@ def controller_method(method):
                 return _edit(self, path, tuple(local), copy.deepcopy(value), **kwargs)
             if ep is None:
                 cfg = self._node_snapshot(path).cell_config
+                if kwargs.get('checksum_rhs'):
+                    value = None if value is None else Checksum(value)
+                else:
+                    value = checksum_for_value(value, cfg.celltype)
                 if value is not None:
-                    value = Checksum(value) if kwargs.get('checksum_rhs') else checksum_for_value(value, cfg.celltype)
                     leases.append(Lease(value))
             else: value = ep
             args = (path, local, value)
@@ -245,7 +248,7 @@ def controller_method(method):
             return load_graph(self, args[0], **kwargs)
         try:
             reads = {'get_graph', '_node_snapshot', '_lookup', '_child_names', '_incoming_edge',
-                     '_public_source', '_snapshot_transformer', '_build_cell_expression',
+                     '_public_source', '_public_cell_source', '_effective_input_celltype', '_snapshot_transformer', '_build_cell_expression',
                      '_build_source_expression', '_capture_endpoint', '_refheld_checksums'}
             klass = 4 if name in reads else (1 if name in {'prune', '_clear_exception'} else 2)
             result = controller.call(name, *args, klass=klass, **kwargs)

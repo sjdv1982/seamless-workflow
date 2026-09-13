@@ -22,7 +22,7 @@ def test_literal_assignment_stores_checksum_and_value_copy():
 
 def test_bound_alias_survives_assignment():
     ctx = Context()
-    cell = Cell(input_celltype="mixed")
+    cell = Cell(celltype="mixed")
     cell.set({"a": 1})
 
     ctx.a = cell
@@ -56,7 +56,7 @@ def test_cell_subcell_depth_and_celltype_validation():
     ctx.a.b.c.set(3)
     assert ctx.a.value == {"b": {"c": 3}}
 
-    cell = Cell(input_celltype="str")
+    cell = Cell(celltype="str")
     ctx.s = cell
     source = 1
     ctx.source = source

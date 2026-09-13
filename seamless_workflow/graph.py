@@ -25,7 +25,6 @@ class ConstantProducer:
 @dataclass
 class CellConfig:
     celltype: str = "mixed"
-    target_celltype: str = "mixed"
     validator: Any = None
     validator_language: str | None = None
 

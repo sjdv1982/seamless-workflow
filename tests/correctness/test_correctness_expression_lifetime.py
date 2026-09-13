@@ -63,7 +63,7 @@ def test_an_expression_owns_its_input_after_the_context_moves_on(make_context):
         ctx.value = {"token": f"replacement-{index}-{uuid4().hex}"}
     ctx.prune()
 
-    assert expression.input_ref == original_checksum
+    assert expression._input_ref == original_checksum
 
     claims = collect_refholder_claims([expression])
     roles = [role for _holder, role in claims.get(original_checksum, [])]

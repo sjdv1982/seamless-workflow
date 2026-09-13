@@ -51,9 +51,22 @@ class BoundCellBackend:
     path_python = path
 
     @property
-    def input_ref(self):
+    def _input_ref(self):
+        if self.input_celltype is None:
+            return None
+        return self.build(_UNSET)._input_ref
+
+    @property
+    def source(self):
         self._node()
-        return self.context._get_checksum(self.node_path, self.local_path)
+        return self.context._public_cell_source(self.node_path, self.local_path)
+
+    @property
+    def input_celltype(self):
+        self._node()
+        if self.readonly:
+            return self.celltype
+        return self.context._effective_input_celltype(self.node_path)
 
     @property
     def celltype(self):
@@ -68,20 +81,6 @@ class BoundCellBackend:
         if self.readonly:
             raise ReadOnlyEndpointError("Transformer result is read-only")
         self.context._set_node_config(self.node_path, "celltype", value)
-
-    @property
-    def target_celltype(self):
-        node = self._node()
-        if self.readonly:
-            return node.transformer_config.celltypes.get("result", "mixed")
-        return node.cell_config.target_celltype
-
-    @target_celltype.setter
-    def target_celltype(self, value):
-        self._node()
-        if self.readonly:
-            raise ReadOnlyEndpointError("Transformer result is read-only")
-        self.context._set_node_config(self.node_path, "target_celltype", value)
 
     @property
     def validator(self):
@@ -116,11 +115,8 @@ class BoundCellBackend:
     @property
     def value(self):
         self._node()
-        return self.context._get_value(
-            self.node_path,
-            self.local_path,
-            celltype=self.celltype,
-        )
+        value = self.context._get_value(self.node_path, self.local_path, celltype=self.celltype)
+        return value.content if self.celltype == "bytes" and hasattr(value, "content") else value
 
     @property
     def state(self):
@@ -137,25 +133,18 @@ class BoundCellBackend:
 
     def derive(self, **updates):
         self._node()
-        local = self.local_path
-        kwargs = {
-            "readonly": self.readonly,
-        }
-        if "celltype" in updates:
-            kwargs["celltype"] = updates["celltype"]
-        from seamless import Cell
-        if "input_ref" in updates:
-            # The same structure on another input, as build(input_ref) does:
-            # the projection path moves into the derived builder.
-            input_ref, path = updates["input_ref"], _path_string(local)
+        from seamless.cell_class import _UNSET
+        ref = updates.pop("_input_ref", _UNSET)
+        if ref is _UNSET:
+            result = Cell(source=self.build(ref), celltype=self.celltype,
+                          validator=self.validator, validator_language=self.validator_language)
         else:
-            input_ref, path = self.build(_UNSET), None
-        result = Cell(input_ref=input_ref, path=path, input_celltype=updates.get("input_celltype", self.celltype),
-                      celltype=updates.get("target_celltype", self.target_celltype),
-                      validator=updates.get("validator", self.validator),
-                      validator_language=updates.get("validator_language", self.validator_language))
-        return result._workflow_backend if result._workflow_backend is not None else result
-
+            recipe = {"checksum": ref} if ref is None or isinstance(ref, Checksum) else {"source": ref}
+            result = Cell(**recipe, path=_path_string(self.local_path), celltype=self.celltype,
+                          validator=self.validator, validator_language=self.validator_language)
+        for key, value in updates.items():
+            setattr(result, key, value)
+        return result
 
     def derive_item(self, key):
         self._node()
@@ -177,29 +166,42 @@ class BoundCellBackend:
                 f"Transformer result projection {self.path!r} is read-only"
             )
 
-    def set(self, value):
+    def write_value(self, value, *, detach=False):
         self._ensure_writable()
-        self.context._cell_operation(self.node_path, self.local_path, value)
+        self.context._cell_operation(self.node_path, self.local_path, value,
+                                     detach=detach and not self.local_path)
 
-    def set_checksum(self, checksum):
+    def write_checksum(self, checksum, *, input_celltype=None, detach=False):
         self._ensure_writable()
-        self.context._cell_operation(
-            self.node_path, self.local_path, Checksum(checksum), checksum_rhs=True
-        )
+        self.context._cell_operation(self.node_path, self.local_path, checksum,
+                                     checksum_rhs=True, input_celltype=input_celltype,
+                                     detach=detach and not self.local_path)
+
+    def write_buffer(self, buffer, *, detach=False):
+        self._ensure_writable()
+        from seamless.cell_class import _checksum_for_buffer
+        checksum = _checksum_for_buffer(buffer, self.celltype)
+        self.write_checksum(checksum, detach=detach)
+
+    def set(self, value):
+        return self.write_value(value)
+
+    def set_checksum(self, checksum, *, input_celltype=None):
+        return self.write_checksum(checksum, input_celltype=input_celltype)
 
     def assign(self, owner_path, name, value):
         self._ensure_writable()
         path = self.local_path if isinstance(owner_path, str) else tuple(owner_path)
         if _same_endpoint(value, self._endpoint_for_local(path + (name,))):
             return
-        self.context._cell_operation(self.node_path, path + (name,), value, detach=True)
+        self.context._cell_operation(self.node_path, path + (name,), value, detach=False)
 
     def assign_item(self, owner_path, key, value):
         self._ensure_writable()
         path = self.local_path if isinstance(owner_path, str) else tuple(owner_path)
         if _same_endpoint(value, self._endpoint_for_local(path + (key,))):
             return
-        self.context._cell_operation(self.node_path, path + (key,), value, detach=True)
+        self.context._cell_operation(self.node_path, path + (key,), value, detach=False)
 
     def delete(self, owner_path, name):
         self._ensure_writable()
@@ -231,7 +233,8 @@ class BoundCellBackend:
         self._node()
         if input_ref is not _UNSET:
             return self.build(input_ref).run()
-        return self.context._compute_cell_value(self.node_path, self.local_path)
+        value = self.context._compute_cell_value(self.node_path, self.local_path)
+        return value.content if self.celltype == "bytes" and hasattr(value, "content") else value
 
     async def compute_async(self, input_ref, *, timeout=None):
         if input_ref is not _UNSET:

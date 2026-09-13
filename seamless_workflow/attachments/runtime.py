@@ -50,7 +50,7 @@ class AttachmentRuntime:
         if node.mount is not None: raise ValueError('Cell is already mounted; unmount first')
         incoming = self._incoming_for(path)
         if 'r' in spec.mode and incoming: raise AuthorityError('Sensing mount cannot have incoming edges; unmount first')
-        celltype = node.cell_config.target_celltype if () in incoming else node.cell_config.celltype
+        celltype = node.cell_config.celltype
         validate_celltype(celltype)
         return celltype
 
@@ -64,6 +64,11 @@ class AttachmentRuntime:
             celltype = self._mount_validate(path, spec)
             if celltype != registration.celltype: raise ValueError('Celltype changed during mount preparation')
             node = self._graph.nodes[path]
+            if not self._incoming_for(path) and node.cell_root_producer is None:
+                from seamless.checksum.null import NULL_CHECKSUM
+                self._set_cell_root_with_edges(path, Checksum(NULL_CHECKSUM), celltype, clear_edges=False)
+                self._replace_current_checksum(path, Checksum(NULL_CHECKSUM))
+                node.state = 'complete'
             checksum = node.current_checksum.hex() if node.state == 'complete' and node.current_checksum else None
             session = MountSession(registration.session_id, path, spec, registration, celltype,
                                    observation.checksum, observation.fingerprint,

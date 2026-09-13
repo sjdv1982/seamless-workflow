@@ -66,6 +66,6 @@ def test_connected_optional_pin_participates_but_absent_optional_is_skipped():
 
 
 def test_standalone_cell_has_no_public_pins_namespace():
-    cell = Cell(input_celltype="mixed")
+    cell = Cell(celltype="mixed")
     assert not hasattr(Cell, "pins")
     assert isinstance(cell.pins, Cell)

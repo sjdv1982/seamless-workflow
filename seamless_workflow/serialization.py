@@ -8,7 +8,7 @@ from .errors import PathError, DependencyError
 
 def prepare_graph(data):
     version = data.get('__seamless_workflow__', '0.2')
-    if version not in {'0.2', '0.3'}:
+    if version not in {'0.2', '0.3', '0.4'}:
         raise PathError(f'Unsupported workflow graph version: {version!r}')
     graph = ContextGraph()
     for entry in data.get('nodes', []):
@@ -20,7 +20,10 @@ def prepare_graph(data):
         if entry['type'] == 'cell':
             ct = entry.get('celltype', 'mixed')
             Buffer._map_celltype(ct)
-            cfg = CellConfig(ct, entry.get('target_celltype',ct), entry.get('validator'), entry.get('validator_language'))
+            legacy_target = entry.get('target_celltype', ct)
+            if legacy_target != ct or (version == '0.4' and 'target_celltype' in entry):
+                raise PathError('Legacy target_celltype differs from celltype; convert the graph explicitly')
+            cfg = CellConfig(ct, entry.get('validator'), entry.get('validator_language'))
             value = entry.get('value')
             producer = None if value is None else ConstantProducer(Checksum(value['checksum']),value.get('celltype',ct))
             node = Node('cell', cell_config=cfg, cell_root_producer=producer)
@@ -57,7 +60,6 @@ def prepare_graph(data):
                     raise ValueError('Unknown mount spec fields')
                 node.mount = AttachmentSpec(**entry['mount'])
                 validate_celltype(cfg.celltype)
-                validate_celltype(cfg.target_celltype)
             except (TypeError, ValueError) as exc: raise PathError(f'Invalid mount spec: {exc}') from exc
         graph.nodes[path] = node
     for entry in data.get('connections',[]):

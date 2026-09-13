@@ -15,7 +15,7 @@ def benchmark(count=100, rounds=5):
         started=time.perf_counter()
         for n in range(count):
             path=Path(tmp)/str(n);path.write_text('initial')
-            ctx[str(n)]=Cell(input_celltype='text')
+            ctx[str(n)]=Cell(celltype='text')
             ctx[str(n)].mount(path,mode='r')
             paths.append(path)
         attach=time.perf_counter()-started
