@@ -64,7 +64,7 @@ def test_replacement_and_deletion_release_producer_holds():
     assert _refholder_refs(first_pin) == 1
     assert _refholder_refs(second_pin) == 2
 
-    del ctx.identity.pins.value
+    ctx.identity.pins.value.checksum = None
     del ctx.value
     assert _refholder_refs(second_pin) == 1
     ctx.identity.prune()

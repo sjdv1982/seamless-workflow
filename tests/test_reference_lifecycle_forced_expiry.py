@@ -79,7 +79,7 @@ def test_transformer_pin_code_and_module_roles_survive_bound_api_expiry(monkeypa
     for checksum in (pin_checksum, module_checksum, code_checksum):
         force_expiry(checksum)
     ctx.compute(timeout=10)
-    assert ctx.transformer.pins.value.startswith("workflow-pin-")
+    assert ctx.transformer.pins.value.value.startswith("workflow-pin-")
     assert module_checksum.resolve("text").startswith("workflow-module-")
     assert code_checksum.resolve() is not None
     # Handles are views; registering one must not add a second claim.

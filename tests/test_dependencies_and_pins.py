@@ -64,7 +64,7 @@ def test_transformer_pin_named_scratch_never_collides_with_the_setting():
     assert ctx.tf.scratch is False
     ctx.tf.scratch = True
     assert ctx.tf.scratch is True
-    assert ctx.tf.pins.scratch == "pin-value"
+    assert ctx.tf.pins.scratch.value == "pin-value"
     ctx.compute(timeout=10)
     assert ctx.tf.result.value == "pin-value"
 

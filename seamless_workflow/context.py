@@ -539,7 +539,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg)
             self._retain_code_checksum(path, cfg.code_checksum)
             for pin, value in snapshot.args.items():
-                self._set_transformer_pin(path, pin, value)
+                self._set_transformer_pin(path, pin, value,
+                    input_celltype=snapshot.input_celltypes.get(pin))
 
         except Exception:
             self._delete_subtree(path)
@@ -578,7 +579,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     continue
                 checksum = checksum_for_value(value, cfg.celltypes.get(pin, "mixed"))
                 new_producers[pin] = self._retain_producer(
-                    checksum, cfg.celltypes.get(pin, "mixed")
+                    checksum, snapshot.input_celltypes.get(pin) or cfg.celltypes.get(pin, "mixed")
                 )
                 staged_checksums.append(checksum)
 
@@ -735,10 +736,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._replace_code_checksum(node_path, code.code_checksum)
         self._derive_all()
 
-    def _set_transformer_pin(self, node_path, pin, value):
+    def _set_transformer_pin(self, node_path, pin, value, *, input_celltype=None, detach=True, checksum_rhs=False):
         if not isinstance(pin, str) or not pin:
             raise PathError("Transformer pin name must be non-empty")
         cfg = self._graph.nodes[node_path].transformer_config
+        if not detach:
+            self._check_authority(node_path, (pin,))
         cfg.check_pin_name(pin)
         cfg.pins.add(pin)
         cfg.celltypes.setdefault(pin, "mixed")
@@ -746,10 +749,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if endpoint is not None:
             self._add_endpoint_edge(value, self._transformer_endpoint(node_path, pin), detach=True)
         else:
-            self._check_authority(node_path, (pin,))
+            if checksum_rhs and value is None:
+                self._clear_transformer_pin(node_path, pin)
+                return
             checksum = checksum_for_value(value, cfg.celltypes.get(pin, "mixed"))
             producer = self._retain_producer(
-                checksum, cfg.celltypes.get(pin, "mixed")
+                checksum, input_celltype or cfg.celltypes.get(pin, "mixed")
             )
             node = self._graph.nodes[node_path]
             old_producer = node.transformer_pin_producers.get(pin)
@@ -812,15 +817,41 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 checksum.decref_refholder()
 
     def _delete_transformer_pin(self, node_path, pin):
-        if not pin:
-            raise PathError("Transformer pin name must be non-empty")
-        producer = self._graph.nodes[node_path].transformer_pin_producers.pop(
-            pin, None
-        )
+        cfg = self._graph.nodes[node_path].transformer_config
+        if pin not in cfg.pins or cfg.signature_parameters() is not None:
+            raise AttributeError(pin)
+        cfg.pins.remove(pin)
+        cfg.celltypes.pop(pin, None)
+        cfg.optional_pins.discard(pin)
+        self._clear_transformer_pin(node_path, pin)
+
+    def _clear_transformer_pin(self, node_path, pin):
+        node = self._graph.nodes[node_path]
+        producer = node.transformer_pin_producers.pop(pin, None)
         if producer is not None:
             self._release_producer(producer, node_path + (pin,))
         self._remove_edges_targeting(node_path, (pin,), descendants=True)
+        node.pin_states.pop(pin, None)
         self._derive_all()
+
+    def _pin_snapshot(self, node_path, pin):
+        if node_path not in self._graph.nodes:
+            raise StaleWorkflowHandleError(f"Endpoint {node_path!r} is stale")
+        node = self._graph.nodes[node_path]
+        cfg = node.transformer_config
+        if node.kind != 'transformer' or pin not in cfg.pins:
+            raise AttributeError(pin)
+        edge = self._incoming_edge(node_path, (pin,))
+        producer = node.transformer_pin_producers.get(pin)
+        if edge is not None:
+            source_node, _ = self._graph.resolve_existing(edge.source)
+            input_type = self._node_celltype(source_node)
+            source = self._public_source(edge.source)
+        else:
+            input_type = producer.celltype if producer else None
+            source = None
+        state, checksum, error = node.pin_states.get(pin, ('unwired', None, None))
+        return state, error, source, input_type, Lease(checksum, cfg.celltypes.get(pin, 'mixed'))
 
     def _endpoint(self, value):
         if isinstance(value, BoundEndpoint):
@@ -848,7 +879,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         return BoundEndpoint(self.top_id, tuple(node_path), "cell-result" if not local else "cell-subvalue", tuple(local), True, True, True)
 
     def _transformer_endpoint(self, node_path, pin=None):
-        return BoundEndpoint(self.top_id, tuple(node_path), "transformer-code" if pin == "code" else "transformer-input", () if pin is None else (pin,), True, True, True)
+        return BoundEndpoint(self.top_id, tuple(node_path), "transformer-code" if pin == "code" else "transformer-input", () if pin is None else (pin,), False, True, True)
 
     def _add_endpoint_edge(self, source, target, *, detach=False):
         source_ep = self._endpoint(source)

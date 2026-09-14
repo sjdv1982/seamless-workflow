@@ -99,6 +99,7 @@ class Node:
     transformer_config: TransformerConfig | None = None
     cell_root_producer: ConstantProducer | None = None
     transformer_pin_producers: dict[str, ConstantProducer] = field(default_factory=dict)
+    pin_states: dict[str, tuple] = field(default_factory=dict)
     current_checksum: Checksum | None = None
     exception: BaseException | None = None
     mount: object = None

@@ -110,7 +110,7 @@ def test_removed_pins_do_not_reappear_when_signature_restored(make_context, rout
     assign(ctx, original, route)
     assert ctx.tf.state == "unwired"
     assert ctx.tf.block_reason == ["y"]
-    assert ctx.tf.pins.y is None
+    assert ctx.tf.pins.y.checksum is None
     ctx.source_y = 100
     assert ctx.tf.state == "unwired"
     ctx.tf.pins.y = 2
@@ -163,7 +163,7 @@ def test_unwired_shared_pin_stays_unwired(make_context, route):
     assign(ctx, same, route)
     assert ctx.tf.state == "unwired"
     assert ctx.tf.block_reason == ["x"]
-    assert ctx.tf.pins.y == 4
+    assert ctx.tf.pins.y.value == 4
     ctx.tf.pins.x = 6
     ctx.compute(timeout=10)
     assert ctx.tf.result.value == 24

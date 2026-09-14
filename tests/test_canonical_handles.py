@@ -100,7 +100,7 @@ def test_original_bound_alias_and_fresh_lookup_share_state():
     ctx.tf = tf
     tf.pins.x = 3
     ctx.tf.pins.y = 4
-    assert tf.pins.y == 4
+    assert tf.pins.y.value == 4
     assert ctx.tf() == 7
 
 
@@ -209,8 +209,8 @@ def test_pins_is_the_only_transformer_input_namespace():
     assert ctx.tf.scratch is False
     ctx.tf.scratch = True
     assert ctx.tf.scratch is True
-    assert ctx.tf.pins.scratch == "pin"
-    assert ctx.tf.pins.inp == ctx.tf.args.inp == "input"
+    assert ctx.tf.pins.scratch.value == "pin"
+    assert ctx.tf.pins.inp.value == ctx.tf.args.inp.value == "input"
     assert ctx.tf.run() == ["pin", "input"]
 
     # No attribute or item pin sugar in either direction.
@@ -234,8 +234,8 @@ def test_pins_is_the_only_transformer_input_namespace():
     assert ctx.tf.meta["changed"] is True
     assert isinstance(ctx.tf.code, Buffer)
 
-    del ctx.tf.pins.scratch
-    assert ctx.tf.pins.scratch is None
+    ctx.tf.pins.scratch.checksum = None
+    assert ctx.tf.pins.scratch.checksum is None
 
 
 def test_unknown_transformer_attribute_raises_instead_of_navigating():

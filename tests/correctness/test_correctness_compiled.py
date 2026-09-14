@@ -147,3 +147,27 @@ def test_a_compiled_transformer_is_never_complete_with_a_null_result():
     assert not (ctx.tf.state == "complete" and ctx.tf.result.checksum is None), (
         f"compiled node reported {ctx.tf.state!r} with no result: {states(ctx)}"
     )
+
+
+def test_original_compiled_alias_exposes_bound_pins(make_context):
+    from seamless import Cell
+    from seamless_transformer import Pin
+
+    ctx = make_context()
+    original = _builder()
+    ctx.tf = original
+    ctx.source = Cell('str')
+    ctx.source.set('2')
+    original.pins.a = ctx.source
+    original.celltypes.a = 'int'
+    original.args.b = 3
+    ctx.compute(timeout=10)
+    assert isinstance(original.args.a, Pin)
+    assert original.pins.a.value == 2
+    assert original.pins.a.input_celltype == 'str'
+    assert ctx.tf.pins.a.celltype == 'int'
+    original.pins.a.celltype = 'mixed'
+    assert ctx.tf.celltypes.a == 'mixed'
+    original.pins.a.celltype = 'int'
+    ctx.compute(timeout=10)
+    assert original.run() == ctx.tf().run() == 5

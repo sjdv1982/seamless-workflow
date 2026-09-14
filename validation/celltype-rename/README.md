@@ -180,3 +180,43 @@ by `pin-handles-final.log`, `compiled-recheck.log`, and `snapshot-recheck.log`.
 Final gate: all 153 files pass, including the full workflow suite. Two files are
 added relative to Phase 5 (core base contracts and standalone Pin handles).
 The prior baseline refhold assertion is now correctly scoped and passes.
+
+## Phase 7
+
+Bound transformer input reads now return fresh Pin handles. Their backend reports
+source, original input type, converted checksum/value, state, and conversion
+exception. The reactive controller converts each input before constructing a
+transformation; failed conversion blocks on that pin and creates no current run.
+Connected snapshot calls use the same conversion recipe. Optional-null inputs are
+dropped before conversion, while a connected input with no checksum blocks.
+
+Pin writes distinguish declaration from ownership: assignments detach existing
+sources, `set*` methods check authority, and checksum/buffer None clears input
+without removing the declaration. Deleting a pin declaration is allowed only for
+signatureless code. Pin endpoints cannot source edges, and public attempts to use
+a Pin as input direct callers to `pin.source`. Standalone builder ingestion
+preserves the original pin input types, including declared checksums and retypes;
+compiled builder aliases delegate their pin and celltype APIs after binding.
+
+The 40-case retype matrix covers four source kinds and both type-setting APIs.
+Additional contracts cover writes, failed conversion without construction,
+null/missing distinction, graph roundtrips, stale handles, original compiled
+aliases, and input recipes retained through builder replacement. Both original
+scratchpad pin probes are ported into the suite; their output shows conversion
+and canonical input checksums in the formerly reinterpreting cases.
+
+The final audit found a bare empty-bytes checksum bypassing the same-type bound
+pin path. Empty bytes now normalize to canonical null before optional removal,
+including standalone pin construction and Expression inputs. Core tests exercise
+conversion of that input to five output types; function and bound-pin tests
+verify optional absence. A complete core rerun covers the input-key change.
+
+Logs: `/tmp/celltype-rename-phase7-gate/`; initial workflow findings and their
+per-file rechecks are retained in `/tmp/celltype-rename-phase7/`. Existing tests
+now read Pin `.value`/`.checksum` explicitly and clear with `.checksum = None`.
+
+Final gate: all 157 files pass. Four workflow files are added relative to Phase 6
+(the Pin matrix, handle contracts, and two original probes). The complete core
+rerun is green, as are the final 17 bound-Pin cases, 12 standalone conversion
+cases, and six compiled workflow cases. The final JSON records original runs and
+recheck paths separately.

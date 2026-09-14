@@ -39,7 +39,7 @@ def test_transformer_pin_none_is_a_value_and_del_is_deletion():
     ctx.echo.pins.x = 2
     ctx.compute(timeout=10)
     assert ctx.echo.result.value == {"x": 2}
-    del ctx.echo.pins.x
+    ctx.echo.pins.x.checksum = None
     assert ctx._graph.nodes[("echo",)].state == "unwired"
 
 

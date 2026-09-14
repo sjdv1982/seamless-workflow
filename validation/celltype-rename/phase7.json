@@ -1,0 +1,949 @@
+{
+  "seamless-core/tests/test_buffer_cache.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 0.21s",
+    "failures": [],
+    "recheck_log": "core-final/test_buffer_cache.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "3 passed in 0.17s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_cell_backend_contract.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.03s",
+    "failures": [],
+    "recheck_log": "core-final/test_cell_backend_contract.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "1 passed in 0.03s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_cell_base.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 0.06s",
+    "failures": [],
+    "recheck_log": "core-final/test_cell_base.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "4 passed in 0.06s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_cell_expression_builder.py": {
+    "exit_code": 0,
+    "summary": "754 passed in 1.04s",
+    "failures": [],
+    "recheck_log": "core-final/test_cell_expression_builder.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "754 passed in 1.13s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_cell_input_ref.py": {
+    "exit_code": 0,
+    "summary": "35 passed in 0.23s",
+    "failures": [],
+    "recheck_log": "core-final/test_cell_input_ref.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "35 passed in 0.29s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_cell_reference_lifecycle.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 0.23s",
+    "failures": [],
+    "recheck_log": "core-final/test_cell_reference_lifecycle.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "3 passed in 0.17s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_cell_semantics.py": {
+    "exit_code": 0,
+    "summary": "31 passed in 0.28s",
+    "failures": [],
+    "recheck_log": "core-final/test_cell_semantics.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "26 passed in 0.29s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_checksum_cli_compression.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 1.25s",
+    "failures": [],
+    "recheck_log": "core-final/test_checksum_cli_compression.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "5 passed in 0.99s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_expression_fingertip.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 0.36s",
+    "failures": [],
+    "recheck_log": "core-final/test_expression_fingertip.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "2 passed in 0.23s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_expression_hashtype_cases.py": {
+    "exit_code": 0,
+    "summary": "881 passed in 0.71s",
+    "failures": [],
+    "recheck_log": "core-final/test_expression_hashtype_cases.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "881 passed in 0.62s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_expression_local_evaluation.py": {
+    "exit_code": 0,
+    "summary": "377 passed in 0.84s",
+    "failures": [],
+    "recheck_log": "core-final/test_expression_local_evaluation.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "377 passed in 0.96s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_expression_multistep_paths.py": {
+    "exit_code": 0,
+    "summary": "15 passed in 0.20s",
+    "failures": [],
+    "recheck_log": "core-final/test_expression_multistep_paths.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "15 passed in 0.25s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_expression_reference_lifecycle.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 0.13s",
+    "failures": [],
+    "recheck_log": "core-final/test_expression_reference_lifecycle.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "4 passed in 0.17s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_expression_remote_evaluation.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 0.22s",
+    "failures": [],
+    "recheck_log": "core-final/test_expression_remote_evaluation.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "6 passed in 0.22s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_hash_type_computation.py": {
+    "exit_code": 0,
+    "summary": "72 passed in 0.27s",
+    "failures": [],
+    "recheck_log": "core-final/test_hash_type_computation.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "72 passed in 0.39s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_hash_type_remote_cache.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 0.04s",
+    "failures": [],
+    "recheck_log": "core-final/test_hash_type_remote_cache.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "2 passed in 0.07s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_hash_type_validation.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 0.24s",
+    "failures": [],
+    "recheck_log": "core-final/test_hash_type_validation.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "4 passed in 0.20s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_mixed_nested_struct.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 0.14s",
+    "failures": [],
+    "recheck_log": "core-final/test_mixed_nested_struct.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "5 passed in 0.15s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_mixed_unicode_array.py": {
+    "exit_code": 0,
+    "summary": "12 passed in 0.28s",
+    "failures": [],
+    "recheck_log": "core-final/test_mixed_unicode_array.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "12 passed in 0.22s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_reference_lifecycle_cache.py": {
+    "exit_code": 0,
+    "summary": "26 passed in 0.25s",
+    "failures": [],
+    "recheck_log": "core-final/test_reference_lifecycle_cache.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "26 passed in 0.22s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_reference_lifecycle_forced_expiry.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 0.76s",
+    "failures": [],
+    "recheck_log": "core-final/test_reference_lifecycle_forced_expiry.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "6 passed in 1.11s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_reference_lifecycle_registry.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 0.06s",
+    "failures": [],
+    "recheck_log": "core-final/test_reference_lifecycle_registry.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "4 passed in 0.06s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_reference_lifecycle_shutdown.py": {
+    "exit_code": 0,
+    "summary": "16 passed in 2.46s",
+    "failures": [],
+    "recheck_log": "core-final/test_reference_lifecycle_shutdown.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "16 passed in 2.42s",
+      "failures": []
+    }
+  },
+  "seamless-core/tests/test_retired_names.py": {
+    "exit_code": 0,
+    "summary": "14 passed in 0.10s",
+    "failures": [],
+    "recheck_log": "core-final/test_retired_names.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "14 passed in 0.12s",
+      "failures": []
+    }
+  },
+  "seamless-transformer/tests/test_args.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.34s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_bash_pretransformation.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.34s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_bash_transformer.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.43s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_block_transformer.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.30s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_builder_snapshot.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.30s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_cancel_cli.py": {
+    "exit_code": 0,
+    "summary": "8 passed in 93.20s (0:01:33)",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_cancel_signal.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 0.30s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_checksum_sidecars.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 0.20s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_cmd_require_config.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 0.10s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_code_manager.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 0.16s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_compiled_e2e.py": {
+    "exit_code": 0,
+    "summary": "19 passed in 3.08s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_compiled_transformer.py": {
+    "exit_code": 0,
+    "summary": "8 passed in 0.28s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_compiler.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 0.70s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_compression_utils.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.14s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_dependencies.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 14.71s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_download.py": {
+    "exit_code": 0,
+    "summary": "16 passed in 0.15s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_environment.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 0.15s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_execute_bash_directory_inputs.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 0.18s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_execution_records.py": {
+    "exit_code": 0,
+    "summary": "14 passed in 0.45s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_expression_inputs.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 0.29s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_expression_remote_schema.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 13.19s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_expression_transformation_dependencies.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.27s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_fingertip.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 6.73s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_followup_audit.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.26s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_go_e2e.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 1.22s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_hash_type_validation.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 0.25s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_input_file.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 0.11s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_is_cached.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 0.29s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_languages.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 0.13s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_meta_variables.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 0.11s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_metafile.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 0.06s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_nested_transformations.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 1.21s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_nested_transformations_multi.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 20.45s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_nested_transformations_multi_spawn.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 11.12s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_parallel_spawn.py": {
+    "exit_code": 0,
+    "summary": "7 passed in 5.45s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_pin_conversion.py": {
+    "exit_code": 0,
+    "summary": "12 passed in 0.32s",
+    "failures": [],
+    "recheck_log": "transformer-null-recheck.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "12 passed in 0.35s",
+      "failures": []
+    }
+  },
+  "seamless-transformer/tests/test_pin_handles.py": {
+    "exit_code": 0,
+    "summary": "16 passed in 0.80s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_pretransformation.py": {
+    "exit_code": 0,
+    "summary": "8 passed in 0.30s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_probe_capture.py": {
+    "exit_code": 0,
+    "summary": "11 passed in 0.25s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_probe_cli.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 6.54s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_probe_index.py": {
+    "exit_code": 0,
+    "summary": "8 passed in 0.09s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_process_manager.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 3.40s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_py_module.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 0.47s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_reference_lifecycle_forced_expiry.py": {
+    "exit_code": 0,
+    "summary": "14 passed in 5.54s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_remote_job_paths.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 0.07s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_remote_requirements.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 0.28s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_run_transformation_cli.py": {
+    "exit_code": 0,
+    "summary": "7 passed in 76.08s (0:01:16)",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_spawn.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 5.79s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_spawn_config.py": {
+    "exit_code": 0,
+    "summary": "1 passed, 1 warning in 2.24s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_spawn_persistent.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 6.67s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_transformation.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 12.57s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_transformation_async.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 5.47s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_transformation_async_spawn.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 42.32s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_transformation_cache_active.py": {
+    "exit_code": 0,
+    "summary": "7 passed in 0.33s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_transformation_checksum.py": {
+    "exit_code": 0,
+    "summary": "8 passed in 6.29s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_transformation_immutability.py": {
+    "exit_code": 0,
+    "summary": "20 passed in 0.33s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_transformation_reference_lifecycle.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 0.37s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_transformer.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 2.50s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_transformer_reference_lifecycle.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 0.29s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_upload.py": {
+    "exit_code": 0,
+    "summary": "20 passed in 0.26s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_worker_cancel_reclaim.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 1.78s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_worker_spawn.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 1.38s",
+    "failures": []
+  },
+  "seamless-transformer/tests/test_write_remote_job_mode.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.14s",
+    "failures": []
+  },
+  "seamless-remote/tests/test_client_recovery.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 0.13s",
+    "failures": []
+  },
+  "seamless-remote/tests/test_database_client_execution_records.py": {
+    "exit_code": 0,
+    "summary": "8 passed in 0.19s",
+    "failures": []
+  },
+  "seamless-remote/tests/test_jobserver_client.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 0.10s",
+    "failures": []
+  },
+  "seamless-remote/tests/test_resolve_cli.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.13s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_dask_cancel_reclaim.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 4.86s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_dependencies.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 4.45s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_dummy_scheduler.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.56s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_execution_records.py": {
+    "exit_code": 0,
+    "summary": "14 passed in 0.69s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_expression_inputs.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.70s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_hash_type_validation.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.77s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_nested_transformations.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 3.80s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_nested_transformations_multi.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 28.99s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_pin_conversion.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 2.69s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_seamless_client.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 3.10s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_strict_dunder.py": {
+    "exit_code": 0,
+    "summary": "8 passed in 0.36s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_task_cancel.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 3.37s",
+    "failures": []
+  },
+  "seamless-dask/tests/test_transformation_reference_lifecycle.py": {
+    "exit_code": 0,
+    "summary": "10 passed in 0.91s",
+    "failures": []
+  },
+  "seamless-database/tests/test_execution_records.py": {
+    "exit_code": 0,
+    "summary": "11 passed in 0.26s",
+    "failures": []
+  },
+  "seamless-database/tests/test_random_port.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.32s",
+    "failures": []
+  },
+  "seamless-jobserver/tests/test_record_mode.py": {
+    "exit_code": 0,
+    "summary": "12 passed in 0.42s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_assignment_semantics.py": {
+    "exit_code": 0,
+    "summary": "",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_callable_reassignment.py": {
+    "exit_code": 0,
+    "summary": "48 passed in 11.18s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_canonical_handles.py": {
+    "exit_code": 0,
+    "summary": "16 passed in 3.35s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_cell_semantics.py": {
+    "exit_code": 0,
+    "summary": "24 passed in 4.88s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_celltype_changes.py": {
+    "exit_code": 0,
+    "summary": "20 passed in 4.80s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_completion.py": {
+    "exit_code": 0,
+    "summary": "7 passed in 1.42s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_context_basics.py": {
+    "exit_code": 0,
+    "summary": "7 passed in 1.79s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_controller.py": {
+    "exit_code": 0,
+    "summary": "9 passed in 3.54s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_controller_lifecycle.py": {
+    "exit_code": 0,
+    "summary": "7 passed in 6.46s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_dependencies_and_pins.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 1.06s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_followup_audit.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 0.61s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_followup_contract.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.46s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_garbage_collection.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 1.96s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_literal_retention.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 1.01s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_materialisation.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 0.49s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_mount_transport.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 0.95s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_mounts.py": {
+    "exit_code": 0,
+    "summary": "62 passed in 8.92s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_pin_celltype_changes.py": {
+    "exit_code": 0,
+    "summary": "40 passed in 10.52s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_pin_handles.py": {
+    "exit_code": 0,
+    "summary": "17 passed in 4.22s",
+    "failures": [],
+    "recheck_log": "pins-null-recheck.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "16 passed in 3.52s",
+      "failures": []
+    }
+  },
+  "seamless-workflow/tests/test_pin_probe.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.78s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_pin_probe2.py": {
+    "exit_code": 0,
+    "summary": "1 passed in 0.78s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_reactive_engine.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 5.82s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_reference_lifecycle_binding.py": {
+    "exit_code": 0,
+    "summary": "11 passed in 2.44s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_reference_lifecycle_forced_expiry.py": {
+    "exit_code": 0,
+    "summary": "9 passed in 4.12s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_runtime_and_prune.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 1.10s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_spawned_traceback.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 3.39s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_state_machine.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 1.59s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_transformer_binding.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 1.83s",
+    "failures": []
+  },
+  "seamless-workflow/tests/test_transformer_block_reason.py": {
+    "exit_code": 0,
+    "summary": "33 passed in 4.82s",
+    "failures": []
+  },
+  "seamless-workflow/tests/node-transition/test_transition_cache_hit.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 5.20s",
+    "failures": []
+  },
+  "seamless-workflow/tests/node-transition/test_transition_eligibility.py": {
+    "exit_code": 0,
+    "summary": "7 passed in 1.98s",
+    "failures": []
+  },
+  "seamless-workflow/tests/node-transition/test_transition_failure.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 1.37s",
+    "failures": []
+  },
+  "seamless-workflow/tests/node-transition/test_transition_invalidation.py": {
+    "exit_code": 0,
+    "summary": "9 passed in 10.70s",
+    "failures": []
+  },
+  "seamless-workflow/tests/node-transition/test_transition_unwired.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 1.38s",
+    "failures": []
+  },
+  "seamless-workflow/tests/quiescence-barrier/test_barrier_async.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 9.54s",
+    "failures": []
+  },
+  "seamless-workflow/tests/quiescence-barrier/test_barrier_context.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 5.44s",
+    "failures": []
+  },
+  "seamless-workflow/tests/quiescence-barrier/test_barrier_no_pump.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 3.32s",
+    "failures": []
+  },
+  "seamless-workflow/tests/quiescence-barrier/test_barrier_node.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 7.52s",
+    "failures": []
+  },
+  "seamless-workflow/tests/quiescence-barrier/test_barrier_timeout.py": {
+    "exit_code": 0,
+    "summary": "8 passed in 14.20s",
+    "failures": []
+  },
+  "seamless-workflow/tests/latency/test_latency_delay_port.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 7.18s",
+    "failures": []
+  },
+  "seamless-workflow/tests/latency/test_latency_downstream.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 3.25s",
+    "failures": []
+  },
+  "seamless-workflow/tests/latency/test_latency_last_pin.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 8.74s",
+    "failures": []
+  },
+  "seamless-workflow/tests/correctness/test_correctness_bash.py": {
+    "exit_code": 0,
+    "summary": "5 passed in 1.57s",
+    "failures": []
+  },
+  "seamless-workflow/tests/correctness/test_correctness_compiled.py": {
+    "exit_code": 0,
+    "summary": "6 passed in 1.59s",
+    "failures": [],
+    "recheck_log": "compiled-bound-final.log",
+    "initial_result": {
+      "exit_code": 0,
+      "summary": "6 passed in 1.97s",
+      "failures": []
+    }
+  },
+  "seamless-workflow/tests/correctness/test_correctness_environment.py": {
+    "exit_code": 0,
+    "summary": "3 passed in 1.11s",
+    "failures": []
+  },
+  "seamless-workflow/tests/correctness/test_correctness_expression_lifetime.py": {
+    "exit_code": 0,
+    "summary": "2 passed in 1.09s",
+    "failures": []
+  },
+  "seamless-workflow/tests/correctness/test_correctness_expressions.py": {
+    "exit_code": 0,
+    "summary": "11 passed in 2.37s",
+    "failures": []
+  },
+  "seamless-workflow/tests/correctness/test_correctness_fanin.py": {
+    "exit_code": 0,
+    "summary": "8 passed in 1.90s",
+    "failures": []
+  },
+  "seamless-workflow/tests/correctness/test_correctness_modules.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 1.44s",
+    "failures": []
+  },
+  "seamless-workflow/tests/correctness/test_correctness_no_code.py": {
+    "exit_code": 0,
+    "summary": "4 passed in 1.45s",
+    "failures": []
+  }
+}

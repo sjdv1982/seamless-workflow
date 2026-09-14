@@ -12,6 +12,9 @@ from .errors import ConcurrentUpdateError, ValueUnavailableError, StaleWorkflowH
 
 
 def _endpoint(value):
+    from seamless import CellBase
+    if isinstance(value, CellBase) and not isinstance(value, Cell):
+        raise TypeError("a Pin can't be a source; connect pin.source instead")
     from .endpoints import BoundEndpoint
     if isinstance(value, BoundEndpoint): return value
     method = getattr(value, '_workflow_endpoint', None)
@@ -180,10 +183,18 @@ def controller_method(method):
         elif name == '_set_transformer_pin':
             path, pin, value = args
             ep = _endpoint(value)
+            if not kwargs.get('detach', True):
+                controller.call('_check_authority', path, (pin,), klass=4)
             if ep is None:
                 cfg = self._node_snapshot(path).transformer_config
-                value = checksum_for_value(value, cfg.celltypes.get(pin, 'mixed'))
-                leases.append(Lease(value))
+                celltype = cfg.celltypes.get(pin, 'mixed')
+                if kwargs.get('checksum_rhs'):
+                    value = None if value is None else Checksum(value)
+                else:
+                    value = checksum_for_value(value, celltype)
+                from seamless_transformer.transformation_utils import validate_pin_null
+                validate_pin_null(value, celltype, pin, optional=pin in cfg.optional_pins)
+                if value is not None: leases.append(Lease(value))
             else: value = ep
             args = (path, pin, value)
         elif name == '_cell_operation':
@@ -248,7 +259,7 @@ def controller_method(method):
             return load_graph(self, args[0], **kwargs)
         try:
             reads = {'get_graph', '_node_snapshot', '_lookup', '_child_names', '_incoming_edge',
-                     '_public_source', '_public_cell_source', '_effective_input_celltype', '_snapshot_transformer', '_build_cell_expression',
+                     '_pin_snapshot', '_public_source', '_public_cell_source', '_effective_input_celltype', '_snapshot_transformer', '_build_cell_expression',
                      '_build_source_expression', '_capture_endpoint', '_refheld_checksums'}
             klass = 4 if name in reads else (1 if name in {'prune', '_clear_exception'} else 2)
             result = controller.call(name, *args, klass=klass, **kwargs)

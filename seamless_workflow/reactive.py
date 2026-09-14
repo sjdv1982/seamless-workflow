@@ -17,6 +17,7 @@ class Reactive:
         code = cfg.code_checksum
         pending = []
         node.block_pins = []
+        node.pin_states = {}
 
         def unavailable(pin, state):
             if state == 'failed':
@@ -34,20 +35,48 @@ class Reactive:
         elif code is None:
             pending.append(('unwired', 'code'))
         pins = {}
+        from seamless.checksum.null import is_null, canonicalize_checksum
+        from seamless_transformer.transformation_utils import validate_pin_null
         for pin in sorted(cfg.pins):
             edge = incoming.get((pin,))
+            output_type = cfg.celltypes.get(pin, 'mixed')
             if edge is not None:
                 state, checksum = self._source_state(edge)
+                if state != 'complete':
+                    node.pin_states[pin] = ('blocked' if state in {'failed', 'blocked', 'unwired'} else state, None, None)
+                    unavailable(pin, state)
+                    continue
+                source_node, _ = self._graph.resolve_existing(edge.source)
+                input_type = self._node_celltype(source_node)
+            else:
+                producer = node.transformer_pin_producers.get(pin)
+                checksum = producer.checksum if producer else None
+                input_type = producer.celltype if producer else None
+            if checksum is None:
+                node.pin_states[pin] = ('unwired', None, None)
+                if edge is not None:
+                    unavailable(pin, 'unwired')
+                elif pin not in cfg.optional_pins:
+                    pending.append(('unwired', pin))
+                continue
+            checksum = canonicalize_checksum(checksum, input_type)
+            if is_null(checksum) and pin in cfg.optional_pins:
+                node.pin_states[pin] = ('complete', checksum, None)
+                continue
+            try:
+                validate_pin_null(checksum, output_type, pin, optional=False)
+            except TypeError as exc:
+                node.pin_states[pin] = ('failed', None, exc)
+                unavailable(pin, 'failed')
+                continue
+            if input_type != output_type:
+                state, checksum, error = self._projection(checksum, (), input_type, output_type)
+                node.pin_states[pin] = (state, checksum, error)
                 if state != 'complete':
                     unavailable(pin, state)
                     continue
             else:
-                producer = node.transformer_pin_producers.get(pin)
-                checksum = producer.checksum if producer else None
-            if checksum is None:
-                if pin not in cfg.optional_pins:
-                    pending.append(('unwired', pin))
-                continue
+                node.pin_states[pin] = ('complete', checksum, None)
             pins[pin] = checksum
         if pending:
             # Missing inputs take precedence over blocked inputs, then waiting.

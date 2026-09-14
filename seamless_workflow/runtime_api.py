@@ -80,7 +80,8 @@ class RuntimeAPI:
         for pin in cfg.pins if concrete_args is None else ():
             edge = self._incoming_edge(path, (pin,))
             if edge is not None:
-                args[pin] = self._build_source_expression(edge.source)
+                source = self._build_source_expression(edge.source)
+                args[pin] = Expression(source, celltype=cfg.celltypes.get(pin, 'mixed'))
             elif pin in node.transformer_pin_producers:
                 producer = node.transformer_pin_producers[pin]
                 args[pin] = Expression(producer.checksum, input_celltype=producer.celltype,

@@ -130,8 +130,7 @@ def test_a_topology_change_revokes_the_downstream_cone():
     ctx = _chain(Context())
     try_settle(ctx, timeout=30)
 
-    del ctx.tf1.pins.y
-
+    ctx.tf1.pins.y.checksum = None
     assert ctx.tf1.state == "unwired"
     for name, cell in (("tf2", ctx.tf2.result), ("tf3", ctx.tf3.result), ("result", ctx.result)):
         assert cell.state not in {"complete"}, (name, states(ctx))
@@ -305,8 +304,7 @@ def test_a_topology_change_leaves_nodes_outside_the_cone_untouched():
     spared = (("a", ctx.a), ("sibling", ctx.sibling.result), ("island", ctx.island.result))
     before = _snapshot(spared)
 
-    del ctx.tf1.pins.y
-
+    ctx.tf1.pins.y.checksum = None
     assert ctx.tf1.state == "unwired"
     assert ctx.tf2.state not in {"complete"}, states(ctx)
     after = _snapshot(spared)

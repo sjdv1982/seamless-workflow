@@ -292,6 +292,101 @@ class BoundCellBackend:
         return self.context._capture_endpoint(self._workflow_endpoint())
 
 
+class BoundPinBackend:
+    def __init__(self, context, node_path, pin):
+        self.context, self.node_path, self.pin = context, tuple(node_path), pin
+
+    def _node(self):
+        node = self.context._node_snapshot(self.node_path)
+        if node.kind != 'transformer' or self.pin not in node.transformer_config.pins:
+            raise AttributeError(self.pin)
+        return node
+
+    def _read(self, field):
+        state, error, source, input_type, lease = self.context._pin_snapshot(self.node_path, self.pin)
+        try:
+            if field == 'state': return state
+            if field == 'exception': return error
+            if field == 'source': return source
+            if field == 'input_celltype': return input_type
+            if field == 'celltype': return lease.celltype
+            checksum = lease.checksum
+            if field == 'checksum':
+                if checksum is not None: checksum.tempref()
+                return checksum
+            if checksum is None: return None
+            if field == 'buffer': return checksum.resolve()
+            value = checksum.resolve(lease.celltype)
+            return value.content if lease.celltype == 'bytes' and hasattr(value, 'content') else value
+        finally:
+            lease._release_refholds()
+
+    state = property(lambda self: self._read('state'))
+    exception = property(lambda self: self._read('exception'))
+    source = property(lambda self: self._read('source'))
+    input_celltype = property(lambda self: self._read('input_celltype'))
+    checksum = property(lambda self: self._read('checksum'))
+    buffer = property(lambda self: self._read('buffer'))
+    value = property(lambda self: self._read('value'))
+    celltype = property(lambda self: self._read('celltype'))
+
+    @celltype.setter
+    def celltype(self, value):
+        self._node()
+        self.context._set_node_config(self.node_path, 'celltypes', value, key=self.pin)
+
+    @property
+    def _input_ref(self):
+        return self.build()._input_ref
+
+    def build(self, input_ref=_UNSET):
+        from seamless import Expression
+        self._node()
+        if input_ref is not _UNSET:
+            raise TypeError('Pin.build does not accept a replacement input')
+        snapshot = self.context._snapshot_transformer(self.node_path)
+        try:
+            expression = snapshot.args.get(self.pin)
+            if expression is None:
+                return Expression(None, celltype=self.celltype)
+            return expression
+        finally:
+            for lease in snapshot.leases: lease._release_refholds()
+
+    def compute(self, input_ref=_UNSET, *, timeout=None):
+        if input_ref is not _UNSET: raise TypeError('Pin.compute does not accept a replacement input')
+        from .ingress import _wait
+        self._node()
+        _wait(self.context, self.node_path, barrier=True, timeout=timeout)
+        return self.checksum
+
+    async def compute_async(self, input_ref=_UNSET, *, timeout=None):
+        if input_ref is not _UNSET: raise TypeError('Pin.compute does not accept a replacement input')
+        from .ingress import _wait_async
+        self._node()
+        await _wait_async(self.context, self.node_path, barrier=True, timeout=timeout)
+        return self.checksum
+
+    def run(self, input_ref=_UNSET):
+        self.compute(input_ref)
+        return self.value
+
+    def write_value(self, value, *, detach=False):
+        self._node()
+        self.context._set_transformer_pin(self.node_path, self.pin, value, detach=detach)
+
+    def write_checksum(self, checksum, *, input_celltype=None, detach=False):
+        self._node()
+        self.context._set_transformer_pin(self.node_path, self.pin, checksum,
+            input_celltype=input_celltype, detach=detach, checksum_rhs=True)
+
+    def write_buffer(self, buffer, *, detach=False):
+        from seamless.cell_class import _checksum_for_buffer
+        self._node()
+        if not detach: self.context._check_authority(self.node_path, (self.pin,))
+        self.write_checksum(_checksum_for_buffer(buffer, self.celltype), detach=detach)
+
+
 class WorkflowTransformerPins:
     def __init__(self, backend):
         object.__setattr__(self, "_backend", backend)
@@ -305,7 +400,10 @@ class WorkflowTransformerPins:
         return self[name]
 
     def __getitem__(self, key):
-        return self._backend._get_pin(str(key))
+        from seamless_transformer import Pin
+        backend = BoundPinBackend(self._backend.context, self._backend.node_path, str(key))
+        backend._node()
+        return Pin._from_backend(backend)
 
     def __setattr__(self, name, value):
         if name.startswith("_"):
@@ -463,18 +561,6 @@ class BoundTransformerBackend:
     def result(self): return Cell._from_backend(BoundCellBackend(self.context, self.node_path, (), readonly=True))
     @property
     def call_mode(self): return self.cfg.call_mode
-
-    def _get_pin(self, pin):
-        self._node()
-        if pin not in self.cfg.pins:
-            raise AttributeError(pin)
-        edge = self.context._incoming_edge(self.node_path, (pin,))
-        if edge is not None:
-            return self.context._public_source(edge.source)
-        producer = self.cfg and self._node().transformer_pin_producers.get(pin)
-        if producer is None:
-            return None
-        return producer.checksum.resolve(producer.celltype)
 
     def _set_pin(self, pin, value):
         self._node()

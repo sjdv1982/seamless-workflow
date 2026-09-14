@@ -93,8 +93,7 @@ def test_deleting_a_required_pin_returns_a_transformer_to_unwired():
     ctx.tf.pins.y = 2
     assert ctx.tf.state != "unwired"
 
-    del ctx.tf.pins.y
-
+    ctx.tf.pins.y.checksum = None
     assert ctx.tf.state == "unwired"
     assert ctx.tf.result.checksum is None
 
