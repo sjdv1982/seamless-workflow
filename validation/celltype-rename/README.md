@@ -220,3 +220,25 @@ Final gate: all 157 files pass. Four workflow files are added relative to Phase 
 rerun is green, as are the final 17 bound-Pin cases, 12 standalone conversion
 cases, and six compiled workflow cases. The final JSON records original runs and
 recheck paths separately.
+
+## Phase 8
+
+Updated the core, transformer, database and workflow READMEs; type_bits_design;
+mount and attachment designs; pass3, followup and optional-pin rules. Six
+historical plans retain their original content with a supersession note, and the
+handoff's None-deletion rule points to the current followup section. The naming
+and pin-conversion memories now describe the implementation; exact copies are
+committed in memory/, and the external memory index was updated.
+
+Final gate: all 157 test files pass (145 baseline files retained, 12 added).
+Logs: `/tmp/celltype-rename-phase8-gate/`. Dask test_strict_dunder initially failed
+collection with the known Python import-lock race. Its first isolated rerun
+passed eight tests but reported a background-thread import-lock warning; the
+final isolated rerun passed all eight without warnings. Both reruns and the
+initial result remain recorded in phase8.json. No code changes were made in
+this documentation phase. Core and transformer README examples also executed
+successfully, and git diff --check passed for all edited repositories.
+
+See completion-audit.md for specification-to-evidence mapping. The implementation
+retains the plan's stated out-of-scope restrictions, including Pin as a source
+and assigning standalone deferred Cell/Expression inputs directly to bound pins.

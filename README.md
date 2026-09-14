@@ -8,8 +8,36 @@ described by the earlier context handoff documents is superseded by
 [`context-internals-followup-plan.md`](../seamless/context-internals-followup-plan.md).
 
 Construct cells with `Cell("int")` or `Cell(celltype="int")`; the default type
-is `"mixed"`. Initial references are keyword-only, for example
-`Cell("int", input_ref=checksum)`. Assign values with `.set(value)`.
+is `"mixed"` without a typed source. Initial references are keyword-only, for example
+`Cell("int", checksum=checksum)`. Assign values with `.set(value)`.
+
+`celltype` is the output type; `input_celltype` is read-only and follows the
+source or the constant's declared serialization type. Creating `ctx.a = ctx.b`
+copies `b.celltype` once. Rewiring an existing cell retains its type. Retyping
+converts the original input; `.build().run()` agrees with `.value`. A cell's own
+conversion failure reports `failed` with `.exception`.
+
+`cell.source` reports the configured source. On a projection it reports the edge
+at that path, else the nearest enclosing source, else None. `.checksum` reads
+the produced checksum. Public `input_ref` and `target_celltype` are retired.
+
+`ctx.tf.pins.x` returns a fresh Pin, also when unwired. Read `.value`, `.checksum`,
+`.buffer`, `.source`, `.input_celltype`, `.state`, or `.exception` explicitly.
+`pin.celltype` and `ctx.tf.celltypes.x` are linked. Pins convert their original
+inputs before transformation construction; a failed conversion leaves the Pin
+failed and the Transformer blocked on its name. A Pin is not a source; connect
+`pin.source`. There are no sub-pin targets, validators, or mounts.
+
+For Cells and Pins, `.value`, `.buffer`, and `.checksum` assignments declare a
+new input and detach connections; `set`, `set_buffer`, and `set_checksum` check
+ownership. `set_checksum(cs, input_celltype=...)` declares the input encoding.
+`.value = None` stores canonical null; `.buffer = None` and `.checksum = None`
+clear the input. All Cell types allow null. Required pins allow null only for
+plain/mixed/bytes; optional pins of any type drop null before conversion.
+A connected optional pin whose upstream has no checksum blocks.
+
+`del ctx.a` deletes a node. `del ctx.tf.pins.x` deletes a declaration only for
+signatureless code; use `.checksum = None` to clear a fixed-signature pin.
 
 Whole Context cells can be mounted to files:
 
@@ -29,8 +57,8 @@ with Context() as ctx:
 `mount(path, mode="rw", authority="file", persistent=True)` blocks through the
 initial read and first write attempt. Modes are `r`, `w`, and `rw`. Authority
 chooses the initial winner; subsequent file edits are authoritative inputs in
-sensing modes. `file-strict` reports missing files as cell exceptions. Invalid
-or unreadable input also fails the cell, preserves its stored last good value,
+sensing modes. Missing, empty, and canonical-null files all read as null for
+every supported celltype, including `file-strict`. Invalid or unreadable input fails the cell, preserves its stored last good value,
 and continues monitoring. Delivery failures appear on `ctx.output.mount.error`
 and retry with backoff; they do not invalidate the cell's value.
 
@@ -48,6 +76,13 @@ of overlapping paths within one process are refused. Write-only mounts pause
 after three foreign-write reassertions in 20 seconds; inspect `.mount.error` and
 call `.mount.clear_error()` to resume.
 
+Null writes truncate a file to zero bytes, including `.gz` and `.zst` paths.
+A null read does not rewrite the file: missing, empty, and `null\n` representations
+are preserved until the value changes. Missing directories read as null; empty
+directories read as `{}`. Directory null delivery represents absence. Clearing a
+mounted cell is refused; unmount first. These rules are separate from explicit
+nonpersistent unmount cleanup.
+
 Text/code, JSON scalar/plain, bytes, binary, and mixed celltypes are supported.
 `.gz` and `.zst` paths compress canonical bytes. `folder` and `deepfolder` use
 directories, with per-leaf atomic replacement. Directory trees are not replaced
@@ -55,7 +90,9 @@ atomically. Mounts follow a target symlink and preserve it; atomic file writes
 break hardlink sharing. Cross-process exclusion and filesystem aliases such as
 hardlinks are not covered by the registry.
 
-Graphs retain mount specifications (format `0.3`). **Loading a graph can write
+Graphs retain mount specifications (format `0.4`). Legacy 0.2/0.3 graphs load
+only when `target_celltype` is absent or equals `celltype`; conflicting graphs
+raise `PathError`. Constant producers retain their input encoding as `value.celltype`. **Loading a graph can write
 files:** use `ctx.set_graph(graph, mounts=False)` for graphs of unknown origin.
 Sensing cells cannot receive incoming edges; mounted celltypes cannot change.
 Unmount first. Standalone cells, sub-path projections, transformer pins and code
