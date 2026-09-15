@@ -1,8 +1,12 @@
 """The produced celltype, input recipe, null, and root write contracts."""
 import copy
+import gc
+import re
 import pytest
-from seamless import Buffer, Cell, Checksum
+from seamless import Buffer, CacheMissError, Cell, Checksum
+from seamless.checksum.hash_type_validation import HashTypeValidationError
 from seamless.checksum.null import NULL_CHECKSUM
+from seamless.retired_names import RETIRED_NAMES
 from seamless_workflow import AuthorityError, PathError
 
 
@@ -40,7 +44,8 @@ def test_type_is_copied_once_and_input_type_follows(make_context):
     assert ctx.b.celltype == 'str' and ctx.b.input_celltype == 'float'
     assert ctx.b.value == '7.0'
     with pytest.raises(AttributeError): ctx.b.input_celltype = 'text'
-    with pytest.raises(AttributeError, match='celltype'): ctx.b.target_celltype = 'int'
+    with pytest.raises(AttributeError, match="'target_celltype' has been retired; use celltype instead"):
+        ctx.b.target_celltype = 'int'
 
 
 def test_source_reports_nearest_configured_edge(make_context):
@@ -104,11 +109,14 @@ def test_failed_own_conversion_reports_exception(make_context):
     assert ctx.a.value == ctx.a.build().run() == 'hello'
 
 
-def test_buffer_validation_is_eager_checksum_validation_is_deferred(make_context):
+@pytest.mark.parametrize('form', ['buffer', 'set_buffer'])
+def test_buffer_validation_is_eager_checksum_validation_is_deferred(make_context, form):
     ctx = make_context()
     ctx.a = Cell('int'); ctx.a.set(3)
     invalid = Buffer(b'not an int')
-    with pytest.raises(Exception): ctx.a.buffer = invalid
+    with pytest.raises(HashTypeValidationError):
+        if form == 'buffer': ctx.a.buffer = invalid
+        else: ctx.a.set_buffer(invalid)
     assert ctx.a.value == 3
     ctx.a.checksum = invalid.get_checksum()
     # A checksum declaration neither resolves nor validates its bytes.
@@ -199,3 +207,87 @@ def test_source_assignment_replaces_transformer_and_copies_type(make_context):
     assert ctx.target.value == ctx.tail.value == 12
     ctx.source.set(13); ctx.compute(timeout=10)
     assert ctx.target.value == ctx.tail.value == 13
+
+
+@pytest.mark.parametrize('form', ['buffer', 'set_buffer'])
+def test_buffer_writes_deposit_the_buffer(make_context, form):
+    # Without a tempref, a dropped buffer that nothing deposited can't be resolved.
+    control = Buffer(f'undeposited bound {form}', 'text'); checksum = control.get_checksum()
+    del control; gc.collect()
+    with pytest.raises(CacheMissError): checksum.resolve('text')
+    ctx = make_context()
+    ctx.a = Cell('text')
+    ctx.tf = _identity; ctx.tf.celltypes.value = 'text'
+    for handle, content in ((ctx.a, f'deposited bound cell {form}'),
+                            (ctx.tf.pins.value, f'deposited bound pin {form}')):
+        buffer = Buffer(content, 'text')
+        if form == 'buffer': handle.buffer = buffer
+        else: handle.set_buffer(buffer)
+        del buffer; gc.collect()
+    ctx.compute(timeout=10)
+    assert ctx.a.value == f'deposited bound cell {form}'
+    assert ctx.tf.pins.value.value == f'deposited bound pin {form}'
+
+
+def test_source_and_checksum_of_connected_cells(make_context):
+    ctx = make_context()
+    # Upstream not complete: unwired, and failed.
+    ctx.a = Cell('int'); ctx.b = ctx.a
+    ctx.f = Cell('str'); ctx.f.set('hello'); ctx.g = ctx.f; ctx.f.celltype = 'int'
+    # The connected cell's own conversion fails.
+    ctx.s = Cell('str'); ctx.s.set('hello'); ctx.t = ctx.s; ctx.tail = ctx.t; ctx.t.celltype = 'int'
+    # A conversion that keeps the bytes.
+    ctx.i = Cell('int'); ctx.i.set(42); ctx.j = ctx.i; ctx.j.celltype = 'float'
+    ctx.compute(timeout=10)
+    for target, source in ((ctx.b, ctx.a), (ctx.g, ctx.f), (ctx.t, ctx.s), (ctx.j, ctx.i)):
+        assert target.source._workflow_endpoint() == source._workflow_endpoint()
+    assert ctx.b.checksum is None
+    assert (ctx.b.state, ctx.b.block_reason) == ('blocked', 'blocked-by-unwired')
+    assert ctx.f.state == 'failed' and ctx.g.checksum is None
+    assert (ctx.g.state, ctx.g.block_reason) == ('blocked', 'blocked-by-error')
+    assert ctx.t.state == 'failed' and ctx.t.checksum is None
+    assert (ctx.tail.state, ctx.tail.block_reason) == ('blocked', 'blocked-by-error')
+    assert ctx.j.checksum == ctx.i.checksum and ctx.j.value == 42.0
+
+
+@pytest.mark.parametrize('name,replacement', sorted(RETIRED_NAMES.items()))
+def test_retired_names_are_guarded_on_bound_handles(make_context, name, replacement):
+    ctx = make_context()
+    ctx.a = {'x': 1}; ctx.tf = _identity
+    message = re.escape(f"'{name}' has been retired; use {replacement} instead")
+    for handle in (ctx.a, ctx.a.x, ctx.tf.pins.value):
+        with pytest.raises(AttributeError, match=message): getattr(handle, name)
+        with pytest.raises(AttributeError, match=message): setattr(handle, name, 1)
+    for handle in (ctx.a, ctx.a.x):
+        with pytest.raises(AttributeError, match=message): delattr(handle, name)
+
+
+def _check_reads(cell, expected, checksum):
+    assert cell.value == cell.run() == cell.build().run() == expected
+    assert type(cell.value) is type(expected)
+    assert cell.checksum == checksum
+
+
+def test_standalone_and_bound_retype_agree(make_context):
+    ctx = make_context()
+    standalone = Cell('int'); standalone.set(5)
+    ctx.retyped = standalone
+    standalone.celltype = 'float'; ctx.retyped.celltype = 'float'
+    ctx.compute(timeout=10)
+    for cell in (standalone, ctx.retyped):
+        _check_reads(cell, 5.0, Buffer(5, 'int').get_checksum())
+        assert cell.input_celltype == 'int'
+
+
+def test_typed_source_constructions_agree(make_context):
+    ctx = make_context()
+    upstream = Cell('str'); upstream.set('5')
+    ctx.upstream = upstream
+    ctx.connected = Cell('text', source=ctx.upstream)
+    ctx.rewired = ctx.upstream; ctx.rewired.celltype = 'text'
+    ctx.downstream = ctx.connected
+    ctx.compute(timeout=10)
+    checksum = Buffer('5', 'text').get_checksum()
+    for cell in (Cell('text', source=upstream), Cell('text', source=upstream.build()),
+                 ctx.connected, ctx.rewired, ctx.downstream):
+        _check_reads(cell, '5', checksum)

@@ -123,12 +123,50 @@ def test_setting_cell_none_clears_checksum_and_unwires_downstream(make_context, 
     assert ctx.echo.result.value == {"x": value}
 
 
-def test_new_cell_assigned_none_stores_null(make_context):
+@pytest.mark.parametrize("form", ["attribute", "item"])
+def test_new_cell_assigned_none_stores_null(make_context, form):
     ctx = make_context()
-    ctx.a = None
+    if form == "attribute":
+        ctx.a = None
+    else:
+        ctx["a"] = None
     assert isinstance(ctx.a, Cell)
     assert ctx.a.checksum == Buffer(None, "mixed").get_checksum()
     assert ctx.a.state == "complete"
+
+
+def test_value_assignment_keeps_celltype_and_validates(make_context):
+    ctx = make_context()
+    ctx.a = Cell("int")
+    ctx.a.set(1)
+    ctx.a = 5
+    assert ctx.a.celltype == "int" and ctx.a.value == 5
+    with pytest.raises(ValueError):
+        ctx.a = "abc"
+    assert ctx.a.celltype == "int" and ctx.a.value == 5
+
+
+def test_builder_assignment_replaces_cell_config(make_context):
+    ctx = make_context()
+    ctx.a = Cell("int")
+    ctx.a.set(1)
+    ctx.a = Cell("str")
+    assert ctx.a.celltype == "str"
+    assert ctx.a.state == "unwired" and ctx.a.checksum is None
+
+
+def test_new_cell_from_transformer_copies_result_celltype_once(make_context):
+    ctx = make_context()
+    ctx.echo = echo
+    ctx.echo.celltypes.result = "plain"
+    ctx.echo.pins.x = 3
+    ctx.out = ctx.echo
+    ctx.compute(timeout=10)
+    assert ctx.out.celltype == "plain"
+    assert ctx.out.value == {"x": 3}
+    ctx.echo.celltypes.result = "mixed"
+    ctx.compute(timeout=10)
+    assert ctx.out.celltype == "plain"
 
 
 def test_assigning_none_detaches_old_upstream_connection(make_context):

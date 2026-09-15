@@ -13,11 +13,11 @@ gates against baseline; the README records failures, corrections and reruns.
 | 4 | Converted Cell output, live/declared input types, source/checksum split, six writes, null and mounts; core tests/test_cell_semantics.py, workflow tests/test_celltype_changes.py and mount contracts; phase4.json. |
 | 5 | Typed pin conversion precedes transformation identity; optional null removal precedes conversion; required/result boundary rules; transformer and dask tests/test_pin_conversion.py; phase5.json. |
 | 6 | CellBase and sister Pin, fresh/unwired handles, reference/type storage, ownership, compiled pins and snapshot recipes; core tests/test_cell_base.py and transformer tests/test_pin_handles.py; phase6.json. |
-| 7 | Bound Pin runtime state and pre-execution conversion, six writes, clearing/deletion, source rejection, linked types and compiled aliases; workflow tests/test_pin_handles.py, 40-case test_pin_celltype_changes.py, test_pin_probe.py and test_pin_probe2.py; phase7.json. |
+| 7 | Bound Pin runtime state and pre-execution conversion, six writes, clearing/deletion, source rejection, linked types and compiled aliases; workflow tests/test_pin_handles.py and 40-case test_pin_celltype_changes.py (56 cases since the review follow-up); phase7.json. The assertion-free test_pin_probe.py and test_pin_probe2.py were listed here until the review follow-up removed them. |
 | 8 | Four package READMEs, type_bits_design, both mount designs, pass3/followup and optional-pin rules updated; six historical plans carry supersession notes. Naming and pin-conversion memories updated, with exact committed copies in memory/. Full final gate in phase8.json. |
 
-Additional probe assertions are in celltype_probes.py. The original pin probes
-are part of the workflow gate. The remote schema/cache test launches local
+The review follow-up (README.md) replaced celltype_probes.py and the original pin
+probes with asserting tests in the core, transformer and workflow suites. The remote schema/cache test launches local
 hashserver/database/jobserver services on a fresh database; dask tests run actual
 local distributed workers, including converted pin checksum identity.
 

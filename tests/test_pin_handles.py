@@ -39,7 +39,9 @@ def test_constant_retype_and_failure_blocks_construction():
         assert pin.input_celltype == 'str'
         assert pin.state == 'failed' and pin.exception is not None
         assert ctx.tf.state == 'blocked'
-        assert 'value' in str(ctx.tf.block_reason)
+        # A transformer's block_reason lists the culprit pins; its result carries the kind.
+        assert ctx.tf.block_reason == ['value']
+        assert ctx.tf.result.block_reason == 'blocked-by-error'
         assert ctx.tf.result.checksum is None
         assert ('tf',) not in ctx._runtime.current_runs
         pin.celltype = 'text'
@@ -48,7 +50,7 @@ def test_constant_retype_and_failure_blocks_construction():
         assert ctx.tf.run() == ctx.tf().run() == 'hello'
 
 
-@pytest.mark.parametrize('form', ['value', 'buffer', 'checksum'])
+@pytest.mark.parametrize('form', ['value', 'buffer', 'checksum', 'pins'])
 def test_writes_check_or_detach(form):
     with Context() as ctx:
         ctx.source = Cell('int')
@@ -58,13 +60,15 @@ def test_writes_check_or_detach(form):
         ctx.tf.pins.value = ctx.source
         ctx.compute()
         pin = ctx.tf.pins.value
-        value = 12 if form == 'value' else Buffer(12, 'int')
+        value = 12 if form in ('value', 'pins') else Buffer(12, 'int')
         if form == 'checksum': value = value.get_checksum()
-        method = 'set' if form == 'value' else 'set_' + form
+        method = 'set' if form in ('value', 'pins') else 'set_' + form
         with pytest.raises(AuthorityError): getattr(pin, method)(value)
-        setattr(pin, form, value)
+        if form == 'pins': ctx.tf.pins.value = value
+        else: setattr(pin, form, value)
         ctx.compute()
         assert pin.source is None and pin.value == 12
+        assert ctx.get_graph()['connections'] == []
         assert pin.checksum == Buffer(12, 'int').get_checksum()
         pin.checksum = None
         ctx.compute()
@@ -97,8 +101,15 @@ def test_unset_and_signatureless_deletion():
         ctx.loose = delayed('result = value')
         ctx.loose.pins.value = None
         assert ctx.loose.pins.value.checksum == Buffer(None, 'plain').get_checksum()
+        ctx.loose.celltypes.value = 'int'
+        ctx.loose.optional_pins = {'value'}
         del ctx.loose.pins.value
         with pytest.raises(AttributeError): ctx.loose.pins.value
+        # Deleting the declaration also drops its celltype and optionality.
+        assert ctx.loose.optional_pins == set()
+        with pytest.raises(AttributeError): ctx.loose.celltypes.value
+        node, = [node for node in ctx.get_graph()['nodes'] if node['path'] == ['loose']]
+        assert node['pins'] == {} and node['optional_pins'] == []
 
 
 def optional_identity(value=None):
@@ -126,6 +137,27 @@ def test_optional_null_is_dropped_before_conversion(celltype):
         assert ctx.tf.result.checksum is None
 
 
+def returns_none():
+    return None
+
+
+def test_connected_none_result_drops_optional_pin():
+    with Context() as ctx:
+        ctx.up = returns_none
+        ctx.up.celltypes.result = 'plain'
+        ctx.tf = optional_identity
+        ctx.tf.celltypes.value = 'int'
+        ctx.tf.celltypes.result = 'plain'
+        ctx.tf.optional_pins = {'value'}
+        ctx.tf.pins.value = ctx.up
+        ctx.compute()
+        assert ctx.up.result.checksum == Buffer(None, 'plain').get_checksum()
+        assert ctx.tf.pins.value.state == 'complete'
+        assert ctx.tf.state == 'complete', ctx.tf.exception
+        assert ctx.tf.result.value is None
+        assert 'value' not in ctx.tf().construct().resolve('plain')
+
+
 def test_required_null_is_a_pin_error_and_literal_rejected():
     with Context() as ctx:
         ctx.source = Cell('int')
@@ -139,6 +171,8 @@ def test_required_null_is_a_pin_error_and_literal_rejected():
         assert ctx.tf.pins.value.state == 'failed'
         assert 'int' in str(ctx.tf.pins.value.exception)
         assert ctx.tf.state == 'blocked'
+        assert ctx.tf.block_reason == ['value']
+        assert ctx.tf.result.block_reason == 'blocked-by-error'
         assert ('tf',) not in ctx._runtime.current_runs
 
 
@@ -146,7 +180,10 @@ def test_declared_checksum_roundtrip_preserves_pin_input_type():
     with Context() as ctx, Context() as restored:
         ctx.tf = identity
         ctx.tf.celltypes.value = 'str'
-        ctx.tf.pins.value.set_checksum(Buffer(42, 'int').get_checksum(), input_celltype='int')
+        # A declaration doesn't deposit the buffer, so hold it.
+        buffer = Buffer(42, 'int')
+        buffer.tempref()
+        ctx.tf.pins.value.set_checksum(buffer.get_checksum(), input_celltype='int')
         ctx.compute()
         assert ctx.tf.pins.value.input_celltype == 'int'
         assert ctx.tf.pins.value.value == '42'

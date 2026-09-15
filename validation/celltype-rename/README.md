@@ -242,3 +242,43 @@ successfully, and git diff --check passed for all edited repositories.
 See completion-audit.md for specification-to-evidence mapping. The implementation
 retains the plan's stated out-of-scope restrictions, including Pin as a source
 and assigning standalone deferred Cell/Expression inputs directly to bound pins.
+
+## Review follow-up (2026-09-15)
+
+Implements §1 of `seamless/celltype-rename-review-decisions.md`, on top of
+seamless-core `3701453`, whose conversion engine keeps the checksum for a
+conversion between nested celltypes (that document's §3.3).
+
+Baseline repairs. Checks written before that change failed: the bound pin retype
+matrix (16 of 40 cases) and `test_celltype_changes.py` (4 of 20) expected a new
+checksum for int → float and str → int, and `celltype_probes.py` failed on
+int → float. seamless-dask `test_pin_conversion.py` expected int 42's checksum for
+an int pin fed by a str; it now expects the str's checksum. Both matrices now carry an explicit `keeps_checksum` column.
+`test_declared_checksum_roundtrip_preserves_pin_input_type` declared a checksum
+without holding its buffer; it now holds it.
+
+One workflow check still fails, because of code rather than a stale expectation:
+`correctness/test_correctness_compiled.py::test_original_compiled_alias_exposes_bound_pins`.
+A compiled transformation records every pin as `mixed`, so an `int` pin that keeps a
+str's checksum reaches the C function as a string. The decisions document records it
+for discussion.
+
+Gate: the core, database, dask and workflow suites pass, apart from that compiled
+check. At the committed heads, transformer `test_expression_inputs.py` and
+`test_fingertip.py` also fail; the decisions document records both.
+
+Probes. `test_pin_probe.py` and `test_pin_probe2.py` had no assertions, and
+`celltype_probes.py` ran in no suite; all three are removed. Their scenarios are
+now assertions: the pin matrix gained text → int and int → str rows (56 cases) and
+checks the checksum that enters the transformation, reactively and in a snapshot;
+transformer `test_retype_converts_at_call`; workflow
+`test_standalone_and_bound_retype_agree` and `test_typed_source_constructions_agree`;
+core `test_typed_expression_input_supplies_both_types`. The Phase 4 and Phase 7
+notes above, which describe these probes as executable or ported, are historical.
+
+Added contracts: the block kind of a failed pin conversion, retired names over the
+actual registry, symmetric Expression defaults, pin detachment through the pins
+namespace, buffer deposits without a tempref, the `.source`/`.checksum` rows of
+connected cells, a null result into a connected optional pin, item-form null
+assignment, celltype stability, the database composite key, downstream checksums,
+and pin deletion clearing celltypes and optionality.
