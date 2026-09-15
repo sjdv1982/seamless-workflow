@@ -61,7 +61,7 @@ Cells, Expressions and Context pins are unreleased (not in RELEASE-NOTES 1.3/1.4
   - Base: `celltype`, `input_celltype`, `checksum`, `source`, `buffer`, `value`, `state`, `exception`, `build()`/`compute()`/`run()`, repr, refhold plumbing.
   - `Cell` adds: navigation/projection, validators, `mount`, the `_derive` family, source hooks (`_workflow_endpoint`, `_workflow_capture_source`), `prune`/`clear_exception`, augmented updates.
   - `Pin` adds: `set()`/`set_checksum()`, routed to its Transformer.
-- **Pins hold checksums, never values.** `tf.pins.x = v` is the same as `tf.pins.x.set(v)`:
+- **Pins hold checksums, never values.** `tf.pins.x = v` is serialized like `tf.pins.x.set(v)`:
   - a value is serialized now with `celltypes[x]`;
   - an invalid value raises, as `Cell.set` does;
   - a bound source connects;

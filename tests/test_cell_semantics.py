@@ -258,7 +258,6 @@ def test_retired_names_are_guarded_on_bound_handles(make_context, name, replacem
     for handle in (ctx.a, ctx.a.x, ctx.tf.pins.value):
         with pytest.raises(AttributeError, match=message): getattr(handle, name)
         with pytest.raises(AttributeError, match=message): setattr(handle, name, 1)
-    for handle in (ctx.a, ctx.a.x):
         with pytest.raises(AttributeError, match=message): delattr(handle, name)
 
 
@@ -291,3 +290,51 @@ def test_typed_source_constructions_agree(make_context):
     for cell in (Cell('text', source=upstream), Cell('text', source=upstream.build()),
                  ctx.connected, ctx.rewired, ctx.downstream):
         _check_reads(cell, '5', checksum)
+
+
+def test_set_takes_values_only_on_bound_handles(make_context):
+    ctx = make_context()
+    ctx.source = Cell('int'); ctx.source.set(1)
+    ctx.a = {'x': 1}; ctx.tf = _identity
+    ctx.compute(timeout=10)
+    references = ((ctx.source, r'Cell\(source=\.\.\.\)'),
+                  (ctx.source.checksum, r'use \.set_checksum\(\)'))
+    for handle in (ctx.a, ctx.a.x, ctx.tf.pins.value):
+        for reference, message in references:
+            with pytest.raises(TypeError, match=message): handle.set(reference)
+            with pytest.raises(TypeError, match=message): handle.value = reference
+    ctx.compute(timeout=10)
+    assert ctx.get_graph()['connections'] == []
+    assert ctx.a.value == {'x': 1}
+
+
+@pytest.mark.parametrize('edge,blocked', [('root', True), ('b', True), ('z', False)])
+def test_projection_set_is_blocked_by_an_edge_on_its_path(make_context, edge, blocked):
+    ctx = make_context()
+    ctx.source = {'c': 0}
+    ctx.a = {'b': {'c': 1}, 'z': {'c': 2}}
+    if edge == 'root': ctx.a = ctx.source
+    else: setattr(ctx.a, edge, ctx.source)
+    ctx.compute(timeout=10)
+    if blocked:
+        with pytest.raises(AuthorityError): ctx.a.b.c.set(12)
+        return
+    ctx.a.b.c.set(12); ctx.compute(timeout=10)
+    assert ctx.a.value == {'b': {'c': 12}, 'z': {'c': 0}}
+    assert ctx.a.z.source._workflow_endpoint() == ctx.source._workflow_endpoint()
+
+
+def test_checksum_is_a_value_for_bound_checksum_cells_and_pins(make_context):
+    ctx = make_context()
+    pointer = Checksum('ab' * 32)
+    ctx.a = Cell('checksum'); ctx.a = pointer
+    ctx.b = Cell('checksum'); ctx.b.set(pointer)
+    ctx.c = Cell('checksum'); ctx.c.value = pointer
+    ctx.tf = _identity; ctx.tf.celltypes.value = 'checksum'
+    ctx.tf.pins.value = pointer
+    ctx.compute(timeout=10)
+    for handle in (ctx.a, ctx.b, ctx.c, ctx.tf.pins.value):
+        assert isinstance(handle.value, Checksum) and handle.value == pointer
+        assert handle.checksum == Buffer(pointer, 'checksum').get_checksum()
+    ctx.n = Cell('int')
+    with pytest.raises(TypeError, match=r'use \.set_checksum\(\)'): ctx.n.set(pointer)

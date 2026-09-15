@@ -85,7 +85,7 @@ def evaluate_cell(root, root_type, inputs, target_type):
         if isinstance(local[0], int) and not isinstance(value, (list, tuple)):
             raise TypeError("Integer Cell connection targets require an existing sequence")
         _assign_path(value, local, checksum.resolve(source_type))
-    return checksum_for_value(value, target_type)
+    return checksum_for_value(value, target_type, checksum_is_value=True)
 
 
 def evaluate_projection(checksum, path, input_celltype, celltype, validator=None, validator_language=None):

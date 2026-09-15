@@ -118,8 +118,7 @@ def test_escaped_cell_and_transformer_snapshots_survive_close():
     from helpers.reference_lifecycle import force_expiry
     ctx = Context()
     ctx.a = {'token': 'escaped ownership'}
-    captured = Cell()
-    captured.set(ctx.a.build())
+    captured = Cell(source=ctx.a.build())
     ctx.tf = sleeping
     ctx.tf.pins.x = ctx.a
     snapshot = ctx.tf._snapshot_for_call()

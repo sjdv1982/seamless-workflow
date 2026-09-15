@@ -60,7 +60,7 @@ def _prepare_assignment(ctx, path, value):
         if node.kind == 'transformer':
             return _prepare_transformer(ctx, value).config
         celltype = node.cell_config.celltype
-    return checksum_for_value(value, celltype)
+    return checksum_for_value(value, celltype, checksum_is_value=True)
 
 
 def _wait(ctx, path=None, local=(), *, read=False, barrier=False, timeout=None):
@@ -191,7 +191,7 @@ def controller_method(method):
                 if kwargs.get('checksum_rhs'):
                     value = None if value is None else Checksum(value)
                 else:
-                    value = checksum_for_value(value, celltype)
+                    value = checksum_for_value(value, celltype, checksum_is_value=True)
                 from seamless_transformer.transformation_utils import validate_pin_null
                 validate_pin_null(value, celltype, pin, optional=pin in cfg.optional_pins)
                 if value is not None: leases.append(Lease(value))
@@ -207,7 +207,7 @@ def controller_method(method):
                 if kwargs.get('checksum_rhs'):
                     value = None if value is None else Checksum(value)
                 else:
-                    value = checksum_for_value(value, cfg.celltype)
+                    value = checksum_for_value(value, cfg.celltype, checksum_is_value=True)
                 if value is not None:
                     leases.append(Lease(value))
             else: value = ep
