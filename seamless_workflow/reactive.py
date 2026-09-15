@@ -164,7 +164,8 @@ class Reactive:
                     await tf.cancel_async()
                 raise
             except Exception as exc:
-                completion = (path, generation, None, None, WorkflowExecutionError(str(exc)))
+                from .errors import execution_error
+                completion = (path, generation, None, None, execution_error(exc))
             finally:
                 for lease in leases: lease._release_refholds()
                 if tf is not None: tf._release_refholds()

@@ -1231,8 +1231,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                         checksum = await asyncio.to_thread(evaluate)
                     payload, error = Lease(checksum), None
                 except Exception as exc:
-                    from .errors import WorkflowExecutionError
-                    payload, error = None, WorkflowExecutionError(str(exc))
+                    from .errors import execution_error
+                    payload, error = None, execution_error(exc)
                 finally:
                     for lease in leases: lease._release_refholds()
                 context = owner()

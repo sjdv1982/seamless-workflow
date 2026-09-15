@@ -200,7 +200,7 @@ The mutual exclusivity belongs to the *inputs*, not to this public pair: a node 
 | unwired | `None` | `None` |
 | literal, complete | `None` | the literal, converted if its celltype differs from the node's |
 | connected, complete, no conversion | handle | `== source.checksum` |
-| connected, complete, converting | handle | the converted checksum — equal to the source's only when the conversion preserves bytes (the `trivial`/`reinterpret` classes, e.g. `plain`→`mixed`), different when it reformats (`str`→`text`, `int`→`float`) |
+| connected, complete, converting | handle | the converted checksum — equal to the source's when the conversion keeps the checksum (the `trivial`/`reinterpret` classes, e.g. `plain`→`mixed`, `int`→`float`, `str`→`int`), different when it reformats or converts the value (`str`→`text`, `int`→`bool`) |
 | connected, upstream waiting/blocked/failed | handle | `None` |
 | own conversion or validator failed | handle | `None` |
 

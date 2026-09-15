@@ -69,3 +69,29 @@ class WorkflowExecutionError(RuntimeError):
 
     def __deepcopy__(self, memo):
         return type(self)(str(self), failure_id=self.failure_id)
+
+
+def execution_error(exc):
+    """The error a node records for a worker failure.
+
+    Substrate errors keep their class and arguments, so ``CacheMissError(checksum)``
+    stays one. They get a ``failure_id`` and lose their traceback, whose frames would
+    keep the worker's leases alive. Anything else becomes WorkflowExecutionError text.
+    """
+
+    from seamless import CacheMissError
+    from seamless.checksum.conversion import SeamlessConversionError
+    from seamless.checksum.expression import ExpressionEvaluationError
+    from seamless.checksum.hash_type_validation import HashTypeValidationError
+
+    substrate = (
+        CacheMissError, ExpressionEvaluationError, HashTypeValidationError, SeamlessConversionError,
+    )
+    if not isinstance(exc, substrate):
+        return WorkflowExecutionError(str(exc))
+    exc = exc.with_traceback(None)
+    exc.__cause__ = exc.__context__ = None
+    if getattr(exc, "failure_id", None) is None:
+        from uuid import uuid4
+        exc.failure_id = uuid4().hex
+    return exc
