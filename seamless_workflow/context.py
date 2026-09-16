@@ -1129,6 +1129,17 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if () in incoming or not incoming:
             edge = incoming.get(())
             if edge is not None:
+                source_path, source_local = self._graph.resolve_existing(edge.source)
+                source_node = self._graph.nodes[source_path]
+                if source_local and source_node.state == "complete":
+                    state, checksum, error = self._projection(
+                        source_node.current_checksum, source_local,
+                        self._node_celltype(source_path), cfg.celltype,
+                        cfg.validator, cfg.validator_language,
+                    )
+                    self._replace_current_checksum(path, checksum)
+                    node.state, node.block_reason, node.exception = state, None, error
+                    return
                 state, checksum = self._source_state(edge)
                 if state != "complete":
                     self._apply_upstream_state(node, (state, checksum))
@@ -1413,6 +1424,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             return
         node = self._graph.nodes[node_path]
         if node.exception is None: return
+        for key, (lease, error) in list(self._facts.items()):
+            if error is node.exception:
+                self._facts.pop(key)
+                if lease is not None: lease._release_refholds()
         current = self._runtime.current_runs.pop(node_path, None)
         if current is not None and current.et is not None: self._effects.append(current.et.cancel)
         node.exception = None

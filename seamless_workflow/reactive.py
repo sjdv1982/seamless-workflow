@@ -151,12 +151,16 @@ class Reactive:
                 tf = builder._build_from_snapshot(snapshot)
                 tf_checksum = await tf.construction()
                 if tf_checksum is None:
+                    if isinstance(tf.exception, Exception):
+                        raise tf.exception
                     raise RuntimeError(tf.exception or 'Transformation construction failed')
                 send('_transformation_started', path, generation, tf_checksum)
                 from seamless_transformer.observation import observed_as
                 with observed_as(".".join(path)):
                     result = await tf.computation(require_value=True)
                 if result is None:
+                    if isinstance(tf.exception, Exception):
+                        raise tf.exception
                     raise RuntimeError(tf.exception or 'Transformation failed')
                 completion = (path, generation, tf_checksum, Lease(result), None)
             except asyncio.CancelledError:
