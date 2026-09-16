@@ -11,7 +11,7 @@ import textwrap
 from typing import Any
 from uuid import uuid4
 
-from seamless import Buffer, Cell, Checksum, Expression
+from seamless import Buffer, CacheMissError, Cell, Checksum, Expression
 from seamless_transformer.builder_snapshot import TransformerBuilderSnapshot
 
 from .adapters import buffer_for_checksum, checksum_for_value, normalize_checksum, value_for_checksum
@@ -1229,6 +1229,11 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                                 validator=validator, validator_language=validator_language,
                                 execution=execution, member_id=key)
                             if checksum is None: raise KeyError(_path_string(local))
+                            try:
+                                await asyncio.to_thread(value_for_checksum, checksum, target)
+                            except CacheMissError:
+                                # The result is valid; only this reader lacks its buffer.
+                                pass
                         except asyncio.CancelledError:
                             cancel_expression(cs, _path_string(local), ct, target, member_id=key)
                             raise
@@ -1331,11 +1336,36 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         node = self._graph.nodes[node_path]
         if celltype is None:
             celltype = node.cell_config.celltype if node.kind == "cell" else node.transformer_config.celltypes.get("result", "mixed")
-        return value_for_checksum(checksum, celltype)
+        try:
+            return value_for_checksum(checksum, celltype)
+        except CacheMissError:
+            raise
+        except Exception as exc:
+            from .errors import execution_error
+            error = execution_error(exc)
+            node.state, node.block_reason, node.exception = "failed", None, error
+            raise error
 
     def _get_buffer(self, node_path, local=()):
         checksum = self._get_checksum(node_path, local)
-        return buffer_for_checksum(checksum) if checksum is not None else None
+        if checksum is None:
+            return None
+        node = self._graph.nodes[node_path]
+        celltype = (node.cell_config.celltype if node.kind == "cell" else
+                    node.transformer_config.celltypes.get("result", "mixed"))
+        try:
+            from seamless.checksum.hash_type_validation import validate_deserializable_as
+            validate_deserializable_as(checksum, celltype)
+            buffer = buffer_for_checksum(checksum)
+            validate_deserializable_as(checksum, celltype, buffer=buffer)
+            return buffer
+        except CacheMissError:
+            raise
+        except Exception as exc:
+            from .errors import execution_error
+            error = execution_error(exc)
+            node.state, node.block_reason, node.exception = "failed", None, error
+            raise error
 
     def _compute_node(self, node_path, *, reactive=True, checksum=False):
         node = self._graph.nodes[node_path]

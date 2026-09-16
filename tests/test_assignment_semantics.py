@@ -53,12 +53,12 @@ def test_standalone_cell_follows_bound_source():
     assert target.run() == {"v": 2}
 
 
-def test_standalone_cell_is_blocked_by_unwired_source():
+def test_standalone_cell_waits_for_unwired_source():
     ctx = Context()
     ctx.a = Cell()
 
     target = Cell(source=ctx.a)
-    assert target.state == "blocked"
+    assert target.state == "waiting"
     assert target.checksum is None
 
 

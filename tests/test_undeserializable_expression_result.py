@@ -11,10 +11,6 @@ from seamless import Cell
 from seamless.checksum.hash_type_validation import HashTypeValidationError
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="§8.3/§8.4 not implemented: the bound cell ends 'blocked' with no exception",
-)
 @pytest.mark.parametrize("code,celltype", [("x = (", "python"), ("value: [", "yaml")])
 def test_bound_projection_fails_and_clear_exception_reproduces(make_context, code, celltype):
     ctx = make_context()

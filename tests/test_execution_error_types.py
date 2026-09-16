@@ -9,7 +9,10 @@ import sys
 
 import pytest
 
-from seamless import CacheMissError, Cell, Checksum
+from seamless import Buffer, CacheMissError, Cell, Checksum
+from seamless.caching.buffer_cache import get_buffer_cache
+from seamless.checksum.cached_calculate_checksum import checksum_cache
+from seamless.checksum import expression as expression_mod
 from seamless.checksum.conversion import SeamlessConversionError
 from seamless.checksum.expression import ExpressionEvaluationError
 from seamless.checksum.hash_type_validation import HashTypeValidationError
@@ -70,3 +73,63 @@ def test_projection_over_a_missing_buffer_records_cache_miss_error(make_context,
     assert len(errors) == 1
     assert isinstance(errors[0], CacheMissError)
     assert errors[0].args == (MISSING,)
+
+
+def _drop_buffer(checksum):
+    checksum = Checksum(checksum)
+    cache = get_buffer_cache()
+    with cache.lock:
+        cache.weak_cache.pop(checksum, None)
+        cache.strong_cache.pop(checksum, None)
+    checksum_cache.pop(checksum, None)
+    expression_mod._expression_result_buffers.pop(checksum, None)
+
+
+def test_bound_cache_miss_failure_can_be_cleared_and_retried(make_context, monkeypatch):
+    monkeypatch.setitem(sys.modules, "seamless_remote", None)
+    source = Buffer({"x": "available later"}, "plain")
+    source_checksum, source_content = source.get_checksum(), source.content
+    _drop_buffer(source_checksum)
+
+    ctx = make_context(expression_execution="local")
+    ctx.a = Cell("plain")
+    ctx.a.checksum = source_checksum
+    ctx.b = ctx.a.x
+    ctx.compute(timeout=10)
+
+    assert ctx.b.checksum is None
+    assert ctx.b.state == "failed"
+    assert isinstance(ctx.b.exception, CacheMissError)
+    assert ctx.b.exception.args == (source_checksum,)
+    assert ctx.b.exception.__traceback__ is None
+
+    restored = Buffer(source_content, checksum=source_checksum).tempref()
+    try:
+        ctx.b.clear_exception()
+        ctx.compute(timeout=10)
+        assert ctx.b.value == "available later"
+        assert ctx.b.state == "complete"
+        assert ctx.b.exception is None
+    finally:
+        restored.clear()
+
+
+def test_bound_missing_result_buffer_keeps_complete_state(make_context, monkeypatch):
+    ctx = make_context(expression_execution="local")
+    ctx.a = Cell("plain")
+    ctx.a.set({"x": "evicted"})
+    ctx.b = ctx.a.x
+    ctx.compute(timeout=10)
+    result = ctx.b.checksum
+    assert result is not None
+    _drop_buffer(result)
+
+    def no_fingertip(self):
+        raise AssertionError("bound Cell.value must not fingertip")
+
+    monkeypatch.setattr(Checksum, "fingertip", no_fingertip)
+    with pytest.raises(CacheMissError) as exc_info:
+        ctx.b.value
+    assert exc_info.value.args == (result,)
+    assert ctx.b.state == "complete"
+    assert ctx.b.exception is None

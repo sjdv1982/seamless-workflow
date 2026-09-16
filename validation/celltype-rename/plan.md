@@ -58,8 +58,8 @@ Cells, Expressions and Context pins are unreleased (not in RELEASE-NOTES 1.3/1.4
 ### Pins
 - **`tf.pins.x` returns a `Pin`, in both modes.** It's a fresh handle each time (handle identity carries no meaning). An unset pin reads as an unwired Pin, not `None`. An undeclared name raises AttributeError, as now.
 - **`Pin` is a sister class of `Cell`,** sharing a base `CellBase` in seamless-core; `Pin` lives in seamless-transformer. This was my recommendation; a subclass was the alternative. The reason: with a subclass, `isinstance(pin, Cell)` is true, so every existing source check accepts pins unless it's patched. The subclass would also have to disable projection, the `_derive` family, validators and `mount`.
-  - Base: `celltype`, `input_celltype`, `checksum`, `source`, `buffer`, `value`, `state`, `exception`, `build()`/`compute()`/`run()`, repr, refhold plumbing.
-  - `Cell` adds: navigation/projection, validators, `mount`, the `_derive` family, source hooks (`_workflow_endpoint`, `_workflow_capture_source`), `prune`/`clear_exception`, augmented updates.
+  - Base: `celltype`, `input_celltype`, `checksum`, `source`, `buffer`, `value`, `state`, `exception`, `build()`/`compute()`/`run()`, `clear_exception()`, repr, refhold plumbing.
+  - `Cell` adds: navigation/projection, validators, `mount`, the `_derive` family, source hooks (`_workflow_endpoint`, `_workflow_capture_source`), `prune`, augmented updates.
   - `Pin` adds: `set()`/`set_checksum()`, routed to its Transformer.
 - **Pins hold checksums, never values.** `tf.pins.x = v` is serialized like `tf.pins.x.set(v)`:
   - a value is serialized now with `celltypes[x]`;
@@ -165,7 +165,13 @@ Everything reduces to setting a checksum; the rows differ only in what they do f
 
 `None` in this matrix follows the value/reference split: `.value = None` and `.set(None)` store the **null value**, while `.checksum = None` (canonical), `.buffer = None` and `.set_checksum(None)` mean **no input** and clear the node.
 
-Standalone builders accept all six writes. Of the reads, `.checksum` gives the input checksum when the input is a bare checksum and `None` otherwise (`.source` covers that case), while `.value` and `.buffer` need a computation and so stay bound-only — use `.run()` or `build()`.
+Standalone builders accept all six writes and all three reads. `.checksum` never
+starts an upstream Transformation: it uses an already-produced source result,
+then evaluates the Cell's own projection, conversion, or validator. `.compute()`
+is the explicit operation that starts missing upstream work. `.buffer` and
+`.value` resolve the result without fingertipping. Evaluation failures remain on
+the handle until `clear_exception()`; a missing result buffer raises
+`CacheMissError` without changing the Cell's complete state.
 
 Sub-path writes are one layer further out: `ctx.a["b"] = 5` resolves the current root value, mutates a detached copy, re-serializes and sets the *root* checksum, so it also needs the current value to be materializable (`ValueUnavailableError` otherwise).
 

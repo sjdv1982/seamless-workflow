@@ -287,8 +287,12 @@ def test_typed_source_constructions_agree(make_context):
     ctx.downstream = ctx.connected
     ctx.compute(timeout=10)
     checksum = Buffer('5', 'text').get_checksum()
-    for cell in (Cell('text', source=upstream), Cell('text', source=upstream.build()),
-                 ctx.connected, ctx.rewired, ctx.downstream):
+    expression_cell = Cell('text', source=upstream.build())
+    assert expression_cell.checksum is None
+    assert expression_cell.state == 'waiting'
+    expression_cell.compute()
+    for cell in (Cell('text', source=upstream), expression_cell, ctx.connected,
+                 ctx.rewired, ctx.downstream):
         _check_reads(cell, '5', checksum)
 
 
