@@ -116,17 +116,29 @@ Today's standalone pin path is the same idea done wrong: it serializes `None` as
 
 ### Mounts and null
 1. **Pins are never mounted.** `Pin` has no `mount`, and the base class doesn't carry one.
-2. **A mounted cell never has "no checksum".** Clearing a mounted cell (`.checksum = None`) is refused; unmount first. This is about the *deliberate* state: a mounted cell fed by a still-computing upstream is transiently without a checksum, and there the mount simply doesn't write, leaving the file at its last content.
-3. **A missing file and an empty file both read as the canonical null**, whatever the celltype. This is what makes null a value of every celltype worth having: an `int` cell over a missing file is null, not an error.
-4. **Null is written as an empty file.** The null buffer is never written, and files are never deleted.
-5. **A null that came from the file doesn't rewrite it.** All three forms — missing, empty, containing `null\n` — yield the same checksum, so a mount that writes only when the cell's checksum differs from the one the file last yielded satisfies this with no extra mechanism. It also means a file holding `null\n` keeps it.
+2. **A sensing mount never leaves its cell without a checksum.** If both the cell
+   and file supply no value, it installs null. Clearing a mounted cell
+   (`.checksum = None` or `.buffer = None`) is refused; a connected cell that is
+   still computing simply does not write yet.
+3. **Missing is not null.** A missing path supplies no value. A zero-byte file,
+   an initially empty directory, and an explicit `null\n` file supply null, but
+   missing/zero-byte/empty-directory never override an existing value at mount
+   time. `file-strict` requires the path to exist.
+4. **Deletion preserves the cell value.** In sensing modes deletion leaves the
+   stored value unchanged; `file-strict` masks it with a recoverable sense error.
+   In `w`, a complete non-null value is reasserted.
+5. **Null writes are non-destructive.** Null truncates an existing regular file
+   to zero bytes (including `.gz` and `.zst`), but does not create a missing file
+   and does not delete a directory tree. Missing counts as equal to null when
+   deciding whether to write.
 
 **`bytes` has no empty buffer; empty *is* null.** `bytes` is the only celltype whose canonical serialization of a legitimate value is empty — `Buffer(b"", "bytes")` is `b""`, checksum `e3b0c442…`, which is also the empty file. Rather than special-case mounts, the rule is blanket and applies wherever a `bytes` value is produced: serialization, expression evaluation with output celltype `bytes`, transformation results, and mount reads. **An empty buffer under celltype `bytes` canonicalizes to the null checksum.**
 
 It has to run **both ways** to stay lossless: resolving the null checksum as `bytes` gives `b""`. So `bytes` is the one celltype where null is not `None`, and:
 - `ctx.a = b""` on a `bytes` cell stores null and reads back `b""`;
 - a required `bytes` pin accepts null, because for that celltype null *is* a value — so the "null rejected on required pins" rule reads `plain`/`mixed`/`bytes`;
-- mounts need no special case at all: empty file, missing file, `b""` and null are one state, with no canonicalization at write time and nothing to refuse.
+- mounts canonicalize an empty file and `b""` to null; a missing path remains
+  the distinct no-value state used by the initial and deletion policies above.
 
 One-directional aliasing would be worse than the mount-only rule it replaces: `b""` would silently become "no value", and every downstream required `bytes` pin would then reject it, breaking pipelines that legitimately pass empty data.
 
@@ -134,7 +146,9 @@ The cost is the same one optional pins already carry for `plain`/`mixed`: a *con
 
 No other celltype is affected, because none of them serializes to zero bytes: `text ""` is `b"\n"`, `str ""` is `b'""\n'`, `plain {}` is `b"{}\n"`. What does change for them is *reading* a hand-made empty file: it currently reads as `""` for `text` and raises `HashTypeValidationError` for `plain`, `int` and `mixed`, and under rule 3 all of them read as null — an improvement for the three that used to error.
 
-**Directory mounts.** Rules 3-5 are file-shaped, so for `folder`/`deepfolder` the split is by existence rather than emptiness: a *missing* directory reads as null, an *empty* directory as the empty folder (`{}` → `b"{}\n"`, which is not an empty file, so there is no collision to resolve).
+**Directory mounts.** A missing or initially empty directory supplies no value.
+After mounting, an emptied directory is sensed as the empty folder `{}`. A null
+cell leaves the existing tree in place and reports the mount out of sync.
 
 (The `text`/`str`/`bytes` question is settled by the one-representation rule: `Buffer(None, "text")` currently gives `b"None\n"`, and converting null from `plain` to `text` gives the same; both become the null buffer instead.)
 
@@ -305,7 +319,7 @@ Branching: seamless-workflow is on `main`, so work goes on a new `celltype-renam
   - **Clearing.** `BoundCellBackend` gains a `checksum` setter, backed by a controller operation that removes the root edge or the root producer and re-derives; a sensing mount refuses. Tests: clearing a connected cell removes the edge and re-blocks downstream; clearing a literal cell drops the producer; `ctx.a.set(7)` on a connected cell still raises `AuthorityError`.
   - **Root `None` stores null.** `ctx.a = None` and a bound `.set(None)` store the canonical null checksum for `cfg.celltype`, matching what sub-paths and pins already do (`ingress.py:60` returns `None` unchanged today, so the root clears). Standalone `Cell.set(None)` follows.
   - `configuration.py`: drop the follow rule and the `target_celltype` field handling.
-  - Mounts: `attachments/api.py:131` and `attachments/runtime.py:53` use `cfg.celltype`; the mounted-cell guard compares `celltype` only. The null rules above land here too: missing and empty files read as null, null writes as an empty file, nothing is deleted, a null read from the file is not written back, and clearing a mounted cell is refused. Tests: each of the three null file states survives a read on an `int` and a `plain` cell; a cell that becomes null truncates its file; a file holding `null\n` is left alone.
+  - Mounts: `attachments/api.py:131` and `attachments/runtime.py:53` use `cfg.celltype`; the mounted-cell guard compares `celltype` only. The null rules above land here too: missing is no value, empty files are null, null truncates an existing file without deleting anything, and clearing a mounted cell is refused. Tests cover missing, zero-byte and explicit-null initial states, later deletion/truncation, compressed files and directories.
   - Graph format: write version 0.4 with no `target_celltype`. The input celltype of a constant is the existing `value.celltype`. The loader accepts 0.2/0.3 when `target_celltype` is absent or equal to `celltype`, and raises PathError otherwise.
 - **Updated tests:**
   - `test_controller.py:40-44` becomes a test that setting `input_celltype` raises.

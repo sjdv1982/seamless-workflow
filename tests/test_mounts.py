@@ -14,7 +14,9 @@ from seamless_workflow.diagnostics import record_attachments
 
 
 @pytest.mark.parametrize('mode,authority,disk,node,action', [
-    ('rw','file-strict',ABSENT,'N','error'), ('rw','file',ABSENT,None,'nothing'),
+    ('rw','file-strict',ABSENT,'N','error'),
+    ('rw','file-strict',ABSENT,None,'sense-null-error'),
+    ('rw','file',ABSENT,None,'sense-null'),
     ('r','cell',ABSENT,'N','nothing'), ('rw','file',ABSENT,'N','write'),
     ('r','file','F',None,'sense'), ('rw','file','F','F','nothing'),
     ('rw','file','F','N','sense'), ('rw','cell','F',None,'sense'),
@@ -77,9 +79,10 @@ def test_strict_missing_and_deletion(tmp_path):
     p=tmp_path/'a.txt'
     with Context() as c:
         c.a=Cell(celltype='text');c.a.set('old');c.a.mount(p,authority='file-strict')
-        assert c.a.state=='complete' and c.a.value is None
+        assert c.a.state=='failed' and isinstance(c.a.exception, MountError)
         p.write_text('new');c.mounts.sync(timeout=5);assert c.a.value=='new'
-        p.unlink();c.mounts.sync(timeout=5);assert c.a.state=='complete' and c.a.value is None
+        p.unlink();c.mounts.sync(timeout=5)
+        assert c.a.state=='failed' and isinstance(c.a.exception, MountError)
 
 
 def test_configuration_and_graph(tmp_path):
@@ -150,7 +153,7 @@ def test_compression_symlink_persistence_and_close(tmp_path):
     assert target.stat().st_mode & 0o777==0o640
     p=tmp_path/'data.gz'
     with Context() as c:
-        c.a=Cell(celltype='plain');c.a.set({'a':1});c.a.mount(p,persistent=False,authority='cell')
+        c.a=Cell(celltype='plain');c.a.set({'a':1});c.a.mount(p,persistent=False)
         assert gzip.decompress(p.read_bytes())==Buffer({'a':1},'plain').content
     assert not p.exists()
 
@@ -210,7 +213,7 @@ def test_failed_write_retries_and_recovers(tmp_path):
 def test_conditional_delete_preserves_foreign_edit(tmp_path):
     p=tmp_path/'a.txt'
     with Context() as c:
-        c.a=Cell(celltype='text');c.a.set('ours');c.a.mount(p,persistent=False,authority='cell')
+        c.a=Cell(celltype='text');c.a.set('ours');c.a.mount(p,persistent=False)
         p.write_text('foreign')
         del c.a.mount
         assert p.read_text()=='foreign'
@@ -330,7 +333,7 @@ def test_zstandard_roundtrip(tmp_path):
     zstandard=pytest.importorskip('zstandard')
     p=tmp_path/'a.zst'
     with Context() as c:
-        c.a=Cell(celltype='text');c.a.set('hello');c.a.mount(p,authority='cell')
+        c.a=Cell(celltype='text');c.a.set('hello');c.a.mount(p)
         assert zstandard.ZstdDecompressor().decompress(p.read_bytes())==b'hello\n'
         p.write_bytes(zstandard.ZstdCompressor().compress(b'updated'))
         assert c.mounts.sync(timeout=5)[('a',)]['in_sync']
@@ -340,7 +343,7 @@ def test_zstandard_roundtrip(tmp_path):
 def test_delete_mounted_node_with_downstream(tmp_path):
     p=tmp_path/'a'
     with Context() as c:
-        c.a=Cell(celltype='text');c.a.set('a');c.a.mount(p,persistent=False,authority='cell')
+        c.a=Cell(celltype='text');c.a.set('a');c.a.mount(p,persistent=False)
         c.b=c.a
         del c.a
         c.compute(timeout=5)

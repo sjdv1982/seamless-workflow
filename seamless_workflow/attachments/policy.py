@@ -3,10 +3,18 @@ ABSENT = 'ABSENT'
 INVALID = 'INVALID'
 
 
-def decide_initial(spec, disk, node):
-    if disk == ABSENT:
-        if spec.authority == 'file-strict': return 'error'
-        return 'write' if 'w' in spec.mode and node is not None else 'nothing'
+def decide_initial(spec, disk, node, *, no_value=False, node_is_null=False):
+    """Choose an initial action; ``node is None`` means incomplete, not null."""
+    if node is None:
+        if 'r' not in spec.mode: return 'nothing'
+        if disk == INVALID: return 'error'
+        if disk == ABSENT and spec.authority == 'file-strict': return 'sense-null-error'
+        return 'sense-null' if no_value or disk == ABSENT else 'sense'
+    if disk == ABSENT or no_value:
+        if disk == ABSENT and spec.authority == 'file-strict': return 'error'
+        if node_is_null: return 'nothing'
+        if spec.mode == 'w': return 'write'
+        return 'write' if 'w' in spec.mode else 'nothing'
     if spec.mode == 'w':
         return 'write' if node is not None and node != disk else 'nothing'
     if spec.authority == 'cell' and node is not None:

@@ -38,6 +38,7 @@ class Observation:
     buffer: object = None
     leases: tuple = ()
     reason: str = ''
+    no_value: bool = False
 
     def release(self):
         for lease in self.leases: lease._release_refholds()

@@ -64,22 +64,25 @@ class AttachmentRuntime:
             celltype = self._mount_validate(path, spec)
             if celltype != registration.celltype: raise ValueError('Celltype changed during mount preparation')
             node = self._graph.nodes[path]
-            if not self._incoming_for(path) and node.cell_root_producer is None:
-                from seamless.checksum.null import NULL_CHECKSUM
-                self._set_cell_root_with_edges(path, Checksum(NULL_CHECKSUM), celltype, clear_edges=False)
-                self._replace_current_checksum(path, Checksum(NULL_CHECKSUM))
-                node.state = 'complete'
             checksum = node.current_checksum.hex() if node.state == 'complete' and node.current_checksum else None
             session = MountSession(registration.session_id, path, spec, registration, celltype,
                                    observation.checksum, observation.fingerprint,
                                    processed_ws=observation.ws, last_synced=checksum)
             node.mount = spec
             self._mount_sessions[path] = session
-            action = decide_initial(spec, observation.checksum, checksum)
+            from seamless.checksum.null import NULL_CHECKSUM
+            null_checksum = Checksum(NULL_CHECKSUM).hex()
+            action = decide_initial(spec, observation.checksum, checksum,
+                                    no_value=observation.no_value,
+                                    node_is_null=checksum == null_checksum)
             if checksum is not None and observation.checksum not in {ABSENT, INVALID, checksum} and spec.mode == 'rw':
                 import logging
                 logging.getLogger(__name__).warning('Mount %s: initial %s authority replaces differing content', spec.path, spec.authority)
             if action == 'sense': self._mount_sense(session, observation)
+            elif action == 'sense-null': self._mount_sense_null(session)
+            elif action == 'sense-null-error':
+                self._mount_sense_null(session)
+                self._mount_sense_error(session, 'Required file is missing')
             elif action == 'error': self._mount_sense_error(session, observation.reason or 'Required file is missing')
             elif action == 'write': self._mount_request(session, checksum)
             if checksum == observation.checksum: self._mount_hold_leaves(session, observation)
@@ -95,6 +98,14 @@ class AttachmentRuntime:
             import logging
             logging.getLogger(__name__).warning('Mount %s: %s', session.spec.path, reason)
         session.sense_error = MountError(f'{session.spec.path}: {reason}')
+
+    def _mount_sense_null(self, session):
+        from seamless.checksum.null import NULL_CHECKSUM
+        checksum = Checksum(NULL_CHECKSUM)
+        self._validate_write(session.node_path, (), detach=False)
+        self._set_cell_root_with_edges(session.node_path, checksum, session.celltype, clear_edges=False)
+        session.last_synced = checksum.hex()
+        self._mount_activity += 1
 
     def _mount_hold_leaves(self, session, observation):
         if session.celltype not in {'folder', 'deepfolder'}: return
@@ -131,6 +142,8 @@ class AttachmentRuntime:
                 self._mount_sense_error(session, observation.reason)
             elif kind == 'absent' and session.spec.authority == 'file-strict':
                 self._mount_sense_error(session, 'Required file is missing')
+            elif kind == 'absent':
+                session.sense_error = None
             elif kind == 'unchanged' and session.sense_error and observation.checksum not in {ABSENT, INVALID}:
                 self._mount_sense(session, observation)
             node = self._graph.nodes[session.node_path]
@@ -164,7 +177,13 @@ class AttachmentRuntime:
         if session.in_flight or not session.pending or session.state != 'active': return
         if session.retry_at > time.monotonic(): return
         delivery, session.pending = session.pending, None
-        if delivery.checksum == session.disk:
+        from seamless.checksum.null import NULL_CHECKSUM
+        null_checksum = Checksum(NULL_CHECKSUM).hex()
+        equivalent = delivery.checksum == session.disk or (
+            delivery.checksum == null_checksum and session.disk == ABSENT)
+        if getattr(session.registration, 'directory', False) and delivery.checksum == null_checksum:
+            equivalent = True
+        if equivalent:
             delivery.lease._release_refholds()
             if not session.initial.done(): session.initial.set_result(None)
             return
@@ -248,8 +267,11 @@ class AttachmentRuntime:
         if session is None: return None
         node = self._graph.nodes[path]
         checksum = node.current_checksum.hex() if node.state == 'complete' and node.current_checksum else None
+        from seamless.checksum.null import NULL_CHECKSUM
+        equivalent = checksum == session.disk or (
+            checksum == Checksum(NULL_CHECKSUM).hex() and session.disk == ABSENT)
         return dict(state=session.state, node_checksum=checksum, disk_checksum=session.disk,
-                    in_sync=checksum is not None and checksum == session.disk and session.sense_error is None,
+                    in_sync=checksum is not None and equivalent and session.sense_error is None,
                     pending=session.pending is not None, in_flight=session.in_flight is not None,
                     sense_error=session.sense_error, error=session.error)
 

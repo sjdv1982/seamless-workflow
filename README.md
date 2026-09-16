@@ -57,10 +57,13 @@ with Context() as ctx:
 `mount(path, mode="rw", authority="file", persistent=True)` blocks through the
 initial read and first write attempt. Modes are `r`, `w`, and `rw`. Authority
 chooses the initial winner; subsequent file edits are authoritative inputs in
-sensing modes. Missing, empty, and canonical-null files all read as null for
-every supported celltype, including `file-strict`. Invalid or unreadable input fails the cell, preserves its stored last good value,
-and continues monitoring. Delivery failures appear on `ctx.output.mount.error`
-and retry with backoff; they do not invalidate the cell's value.
+sensing modes. A missing path supplies no value, while zero-byte and `null\n`
+files supply null. At mount time, missing, zero-byte, and an empty directory do
+not override an existing cell value. A sensing mount on a cell without a value
+installs null; `file-strict` instead fails when the path is missing. Invalid or
+unreadable input fails the cell, preserves its stored last good value, and
+continues monitoring. Delivery failures appear on `ctx.output.mount.error` and
+retry with backoff; they do not invalidate the cell's value.
 
 `ctx.compute()` waits only for graph work. Call `ctx.mounts.sync()` before
 reading mounted outputs externally, or `await ctx.mounts.synchronization()` in
@@ -76,12 +79,13 @@ of overlapping paths within one process are refused. Write-only mounts pause
 after three foreign-write reassertions in 20 seconds; inspect `.mount.error` and
 call `.mount.clear_error()` to resume.
 
-Null writes truncate a file to zero bytes, including `.gz` and `.zst` paths.
-A null read does not rewrite the file: missing, empty, and `null\n` representations
-are preserved until the value changes. Missing directories read as null; empty
-directories read as `{}`. Directory null delivery represents absence. Clearing a
-mounted cell is refused; unmount first. These rules are separate from explicit
-nonpersistent unmount cleanup.
+Null writes truncate an existing file to zero bytes, including `.gz` and `.zst`
+paths, but do not create a missing file. Deleting a sensed file preserves the
+stored cell value; under `file-strict` it raises a recoverable sense error. An
+initially empty directory supplies no value, while a directory emptied after
+mounting reads as `{}`. Directory null delivery leaves the tree in place and the
+mount out of sync. Clearing a mounted cell is refused; unmount first. These rules
+are separate from explicit nonpersistent unmount cleanup.
 
 Text/code, JSON scalar/plain, bytes, binary, and mixed celltypes are supported.
 `.gz` and `.zst` paths compress canonical bytes. `folder` and `deepfolder` use

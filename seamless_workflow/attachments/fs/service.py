@@ -125,7 +125,7 @@ class FileSystemService:
     def initial_read(self, reg):
         def initial():
             reg.ws += 1
-            observation = self._read(reg, reg.ws)
+            observation = self._read(reg, reg.ws, initial=True)
             reg.baseline = observation.fingerprint
             return observation
         return self._submit(reg, initial)
@@ -183,7 +183,7 @@ class FileSystemService:
         if len(content) > self.max_file_size: raise ValueError('Decompressed file size limit exceeded')
         return content
 
-    def _read(self, reg, ws):
+    def _read(self, reg, ws, *, initial=False):
         leases = []
         fingerprint = None
         try:
@@ -192,12 +192,8 @@ class FileSystemService:
                 leases = []
                 fingerprint = self._fingerprint(reg)
                 if fingerprint is None:
-                    from seamless.checksum.null import NULL_BUFFER
-                    buf = Buffer(NULL_BUFFER)
-                    cs = buf.get_checksum()
-                    buf.tempref()
-                    leases.append(MountLease(cs, f'mount:{reg.session_id}:observation'))
-                    return Observation(reg.session_id, ws, None, cs.hex(), buf, tuple(leases))
+                    return Observation(reg.session_id, ws, None, ABSENT, no_value=True)
+                no_value = False
                 if reg.directory:
                     index, size = {}, 0
                     started = time.monotonic()
@@ -213,9 +209,20 @@ class FileSystemService:
                         buf.tempref()
                         leases.append(MountLease(cs, f'mount:{reg.session_id}:leaf'))
                         index[key] = cs.hex()
-                    buf = Buffer(index, 'plain')
+                    no_value = initial and not index
+                    if no_value:
+                        from seamless.checksum.null import NULL_BUFFER
+                        buf = Buffer(NULL_BUFFER)
+                    else:
+                        buf = Buffer(index, 'plain')
                 else:
-                    buf = Buffer(canon_T(self._read_bytes(reg.path), reg.celltype))
+                    content = self._read_bytes(reg.path)
+                    no_value = not content
+                    if no_value:
+                        from seamless.checksum.null import NULL_BUFFER
+                        buf = Buffer(NULL_BUFFER)
+                    else:
+                        buf = Buffer(canon_T(content, reg.celltype))
                 after = self._fingerprint(reg)
                 if fingerprint == after: break
                 time.sleep(.01 * (attempt + 1))
@@ -223,7 +230,8 @@ class FileSystemService:
             cs = buf.get_checksum()
             buf.tempref()
             leases.insert(0, MountLease(cs, f'mount:{reg.session_id}:observation'))
-            return Observation(reg.session_id, ws, fingerprint, cs.hex(), buf, tuple(leases))
+            return Observation(reg.session_id, ws, fingerprint, cs.hex(), buf, tuple(leases),
+                               no_value=no_value)
         except Exception as exc:
             for lease in leases: lease._release_refholds()
             return Observation(reg.session_id, ws, fingerprint, INVALID, reason=f'{type(exc).__name__}: {exc}')
@@ -320,9 +328,6 @@ class FileSystemService:
         index = json.loads(content)
         if index is None:
             if self._fingerprint(reg) != delivery.expected_fingerprint: return False
-            if delivery.expected_fingerprint is not None:
-                import shutil
-                shutil.rmtree(reg.path)
             return True
         if not isinstance(index, dict): raise ValueError('Directory index must be a mapping')
         if len(index) > self.max_files: raise ValueError('Directory file-count limit exceeded')
