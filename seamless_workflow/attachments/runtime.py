@@ -51,7 +51,7 @@ class AttachmentRuntime:
         incoming = self._incoming_for(path)
         if 'r' in spec.mode and incoming: raise AuthorityError('Sensing mount cannot have incoming edges; unmount first')
         celltype = node.cell_config.celltype
-        validate_celltype(celltype)
+        validate_celltype(celltype, spec.mode)
         return celltype
 
     def _mount_event(self, session, kind, **detail):

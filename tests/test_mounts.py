@@ -170,7 +170,7 @@ def test_shared_read_and_overlap(tmp_path):
 def test_directory_and_async_sync(tmp_path):
     p=tmp_path/'folder';p.mkdir();(p/'a').write_bytes(b'first')
     with Context() as c:
-        c.a=Cell(celltype='deepfolder');c.a.mount(p)
+        c.a=Cell(celltype='deepfolder');c.a.mount(p,mode='r')
         assert c.a.value['a']==Buffer(b'first').get_checksum().hex()
         (p/'b').write_bytes(b'second')
         report=asyncio.run(c.mounts.synchronization(timeout=5))
@@ -223,7 +223,7 @@ def test_directory_delivery_and_cleanup(tmp_path):
     p=tmp_path/'folder';p.mkdir();(p/'old').write_bytes(b'old')
     leaf=Buffer(b'new');checksum=leaf.get_checksum();leaf.tempref()
     with Context() as c:
-        c.a=Cell(celltype='deepfolder');c.a.set({'sub/a':checksum.hex()})
+        c.a=Cell(celltype='folder');c.a.set({'sub/a':checksum.hex()})
         c.a.mount(p,mode='w');c.mounts.sync(timeout=5)
         assert (p/'sub'/'a').read_bytes()==b'new'
         assert not (p/'old').exists()
@@ -288,7 +288,7 @@ def test_directory_compressed_leaf_update(tmp_path):
     import gzip
     p=tmp_path/'tree';p.mkdir();(p/'a.gz').write_bytes(gzip.compress(b'old'))
     with Context() as c:
-        c.a=Cell(celltype='deepfolder');c.a.mount(p)
+        c.a=Cell(celltype='folder');c.a.mount(p)
         leaf=Buffer(b'new');cs=leaf.get_checksum();leaf.tempref()
         c.a={'a':cs.hex()};report=c.mounts.sync(timeout=5)
         assert report[('a',)]['in_sync']
@@ -302,7 +302,7 @@ def test_directory_leaf_claims_survive_unmount(tmp_path):
     from seamless import Checksum
     p=tmp_path/'tree';p.mkdir();(p/'a').write_bytes(b'leaf-retention')
     with Context() as c:
-        c.a=Cell(celltype='deepfolder');c.a.mount(p)
+        c.a=Cell(celltype='deepfolder');c.a.mount(p,mode='r')
         checksum=Checksum(c.a.value['a'])
         del c.a.mount
         assert checksum.resolve().content==b'leaf-retention'
@@ -321,6 +321,40 @@ def test_graph_invalid_reservation_leaves_existing_mount(tmp_path):
         assert a.x.mount.spec.path==str(p)
         a.x='still active';a.mounts.sync(timeout=5)
         assert p.read_text()=='still active\n'
+
+
+def test_deepfolder_write_mount_rejected(tmp_path):
+    p = tmp_path / 'folder'
+    with Context() as c:
+        c.a = Cell(celltype='deepfolder')
+        with pytest.raises(TypeError): c.a.mount(p, mode='w')
+        with pytest.raises(TypeError): c.a.mount(p)
+
+
+def test_deepfolder_read_mount_allowed(tmp_path):
+    p = tmp_path / 'folder'; p.mkdir(); (p / 'a').write_bytes(b'first')
+    with Context() as c:
+        c.a = Cell(celltype='deepfolder'); c.a.mount(p, mode='r')
+        assert c.a.value['a'] == Buffer(b'first').get_checksum().hex()
+
+
+def test_folder_allows_all_mount_modes(tmp_path):
+    with Context() as c:
+        (tmp_path / 'r').mkdir()
+        c.a = Cell(celltype='folder'); c.a.mount(tmp_path / 'r', mode='r')
+        assert c.a.mount.spec is not None
+        c.b = Cell(celltype='folder'); c.b.set({}); c.b.mount(tmp_path / 'w', mode='w')
+        assert c.b.mount.spec is not None
+        c.d = Cell(celltype='folder'); c.d.set({}); c.d.mount(tmp_path / 'rw', mode='rw')
+        assert c.d.mount.spec is not None
+
+
+def test_graph_deepfolder_write_mount_rejected(tmp_path):
+    p = tmp_path / 'a'; p.mkdir()
+    with Context() as a, Context() as b:
+        a.x = Cell(celltype='deepfolder'); a.x.mount(p, mode='r')
+        graph = a.get_graph(); graph['nodes'][0]['mount']['mode'] = 'w'
+        with pytest.raises(TypeError): b.set_graph(graph)
 
 
 @pytest.mark.parametrize('celltype', ['plain','str','int','float','bool','binary','mixed'])

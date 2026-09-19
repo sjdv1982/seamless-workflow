@@ -89,7 +89,9 @@ are separate from explicit nonpersistent unmount cleanup.
 
 Text/code, JSON scalar/plain, bytes, binary, and mixed celltypes are supported.
 `.gz` and `.zst` paths compress canonical bytes. `folder` and `deepfolder` use
-directories, with per-leaf atomic replacement. Directory trees are not replaced
+directories, with per-leaf atomic replacement. `folder` mounts in `r`, `w` or
+`rw`; `deepfolder` is read-only (sensing) and may only be mounted with
+`mode="r"`. Directory trees are not replaced
 atomically. Mounts follow a target symlink and preserve it; atomic file writes
 break hardlink sharing. Cross-process exclusion and filesystem aliases such as
 hardlinks are not covered by the registry.

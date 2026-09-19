@@ -129,7 +129,7 @@ def load_graph(ctx, data, *, mounts=True):
             if spec is None or not mounts: continue
             incoming = any(graph.resolve_existing(e.target)[0] == path and not graph.resolve_existing(e.target)[1] for e in graph.edges)
             celltype = node.cell_config.celltype
-            validate_celltype(celltype)
+            validate_celltype(celltype, spec.mode)
             reg = service.reserve(spec, celltype, uuid4().hex, make_sink(ctx._controller), replaces=old)
             reservations.append(reg)
             reads.append((path, spec, reg, service.initial_read(reg)))
