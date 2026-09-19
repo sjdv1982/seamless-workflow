@@ -59,7 +59,7 @@ def prepare_graph(data):
                 if set(entry['mount']) - {'path', 'mode', 'authority', 'persistent'}:
                     raise ValueError('Unknown mount spec fields')
                 node.mount = AttachmentSpec(**entry['mount'])
-                validate_celltype(cfg.celltype)
+                validate_celltype(cfg.celltype, node.mount.mode)
             except (TypeError, ValueError) as exc: raise PathError(f'Invalid mount spec: {exc}') from exc
         graph.nodes[path] = node
     for entry in data.get('connections',[]):

@@ -35,7 +35,7 @@ class AttachmentSpec:
         return result
 
 
-def validate_celltype(celltype, mode='r'):
+def validate_celltype(celltype, mode):
     if celltype not in FILE_CELLTYPES | DIRECTORY_CELLTYPES:
         raise TypeError(f'Celltype {celltype!r} is not mountable')
     if celltype == 'deepfolder' and mode != 'r':

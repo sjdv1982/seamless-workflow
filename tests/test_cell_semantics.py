@@ -168,7 +168,7 @@ def test_connected_retype_checksum_value_downstream_and_mount_agree(make_context
 @pytest.mark.parametrize('celltype', ['folder', 'deepfolder'])
 def test_directory_missing_is_null_but_empty_is_mapping(make_context, tmp_path, celltype):
     path = tmp_path / 'directory'
-    ctx = make_context(); ctx.a = Cell(celltype); ctx.a.mount(path)
+    ctx = make_context(); ctx.a = Cell(celltype); ctx.a.mount(path, mode='r')
     assert ctx.a.value is None and not path.exists()
     path.mkdir(); ctx.mounts.sync(timeout=10)
     assert ctx.a.value == {} and ctx.a.checksum != Checksum(NULL_CHECKSUM)

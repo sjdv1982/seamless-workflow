@@ -354,7 +354,7 @@ def test_graph_deepfolder_write_mount_rejected(tmp_path):
     with Context() as a, Context() as b:
         a.x = Cell(celltype='deepfolder'); a.x.mount(p, mode='r')
         graph = a.get_graph(); graph['nodes'][0]['mount']['mode'] = 'w'
-        with pytest.raises(TypeError): b.set_graph(graph)
+        with pytest.raises(PathError): b.set_graph(graph)
 
 
 @pytest.mark.parametrize('celltype', ['plain','str','int','float','bool','binary','mixed'])
