@@ -1212,55 +1212,87 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         fact = self._facts.get(key)
         if fact is not None:
             lease, error = fact
-            return ("failed" if error else "complete"), lease.checksum if lease else None, error
+            return (
+                ("failed" if error else "complete"),
+                lease.checksum if lease else None,
+                error,
+            )
         if key not in self._jobs:
             leases = tuple(Lease(cs) for cs in checksums)
             self._jobs[key] = None
             import weakref
+
             owner = weakref.ref(self)
             execution = self._expression_execution
+
             async def work(leases=leases):
                 try:
                     if function is evaluate_projection:
-                        from seamless.checksum.expression import evaluate_expression_remote, cancel_expression
+                        from seamless.checksum.expression import (
+                            evaluate_expression_remote,
+                            softcancel_expression,
+                        )
+
                         cs, local, ct, target, validator, validator_language = args
                         try:
-                            checksum = await evaluate_expression_remote(cs, _path_string(local), ct, target,
-                                validator=validator, validator_language=validator_language,
-                                execution=execution, member_id=key)
-                            if checksum is None: raise KeyError(_path_string(local))
+                            checksum = await evaluate_expression_remote(
+                                cs,
+                                _path_string(local),
+                                ct,
+                                target,
+                                validator=validator,
+                                validator_language=validator_language,
+                                execution=execution,
+                                member_id=key,
+                            )
+                            if checksum is None:
+                                raise KeyError(_path_string(local))
                             try:
-                                await asyncio.to_thread(value_for_checksum, checksum, target)
+                                await asyncio.to_thread(
+                                    value_for_checksum, checksum, target
+                                )
                             except CacheMissError:
                                 # The result is valid; only this reader lacks its buffer.
                                 pass
                         except asyncio.CancelledError:
-                            cancel_expression(cs, _path_string(local), ct, target, member_id=key)
+                            softcancel_expression(
+                                (cs.hex(), _path_string(local), ct, target), key
+                            )
                             raise
                     else:
                         worker_leases = tuple(Lease(lease.checksum) for lease in leases)
+
                         def evaluate(worker_leases=worker_leases):
                             try:
                                 return function(*args)
                             finally:
-                                for lease in worker_leases: lease._release_refholds()
+                                for lease in worker_leases:
+                                    lease._release_refholds()
+
                         checksum = await asyncio.to_thread(evaluate)
                     payload, error = Lease(checksum), None
                 except Exception as exc:
                     from .errors import execution_error
+
                     payload, error = None, execution_error(exc)
                 finally:
-                    for lease in leases: lease._release_refholds()
+                    for lease in leases:
+                        lease._release_refholds()
                 context = owner()
                 if context is not None and context._controller.accepting:
                     try:
-                        context._controller.submit("_accept_fact", (key, payload, error), klass=5)
+                        context._controller.submit(
+                            "_accept_fact", (key, payload, error), klass=5
+                        )
                     except Exception:
-                        if payload is not None: payload._release_refholds()
+                        if payload is not None:
+                            payload._release_refholds()
                 elif payload is not None:
                     payload._release_refholds()
+
             def launch():
                 self._jobs[key] = self._side.submit(work())
+
             self._effects.append(launch)
         return "waiting", None, None
 
