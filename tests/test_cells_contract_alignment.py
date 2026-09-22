@@ -662,7 +662,9 @@ def test_two_conversions_keep_the_intermediate_recipe(world):
     child = world.bind(root.as_celltype("plain").as_celltype("mixed"))
     world.settle(root, child)
     assert child.value == [1, 2]
-    intermediate = Buffer([1, 2], "plain")
+    # text -> plain preserves JSON-parseable bytes (conversion contract).
+    # Canonical serialization of [1, 2] need not have the same checksum.
+    intermediate = Buffer(b"[1,2]\n")
     hold = intermediate.tempref()
     try:
         actual = child.build()

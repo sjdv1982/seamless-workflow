@@ -140,8 +140,10 @@ class BoundCellBackend:
                           validator=self.validator, validator_language=self.validator_language)
         else:
             recipe = {"checksum": ref} if ref is None or isinstance(ref, Checksum) else {"source": ref}
-            result = Cell(**recipe, path=_path_string(self.local_path), celltype=self.celltype,
-                          validator=self.validator, validator_language=self.validator_language)
+            result = Cell(**recipe, celltype=self.celltype)
+            for component in self.local_path:
+                result = result[component]
+            result = result.with_validator(self.validator, language=self.validator_language)
         for key, value in updates.items():
             setattr(result, key, value)
         return result
