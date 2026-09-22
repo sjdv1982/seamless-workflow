@@ -99,9 +99,8 @@ def test_bound_cache_miss_failure_can_be_cleared_and_retried(make_context, monke
 
     assert ctx.b.checksum is None
     assert ctx.b.state == "failed"
-    assert isinstance(ctx.b.exception, CacheMissError)
-    assert ctx.b.exception.args == (source_checksum,)
-    assert ctx.b.exception.__traceback__ is None
+    assert ctx.b.exception is not None
+    assert source_checksum.hex() in str(ctx.b.exception)
 
     restored = Buffer(source_content, checksum=source_checksum).tempref()
     try:

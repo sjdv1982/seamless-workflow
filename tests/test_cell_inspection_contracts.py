@@ -51,7 +51,7 @@ def test_bound_exception_reports_projection_failure_during_derivation(make_conte
     assert ctx.target.state == "failed"
     assert ctx.target.checksum is None
     error = ctx.target.exception
-    assert error is not None
+    assert isinstance(error, str) and error
     assert ctx.target.exception == error
 
     ctx.source.set({"present": 7, "missing": 11})

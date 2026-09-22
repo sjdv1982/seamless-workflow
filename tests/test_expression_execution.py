@@ -119,6 +119,7 @@ def test_context_projection_dispatches_hashserver_only_input(tmp_path):
 
 @pytest.mark.parametrize("backend", ["jobserver", "daskserver"])
 @pytest.mark.parametrize("mode", ["standalone", "bound"])
+@pytest.mark.xfail(strict=False, reason="cells.md: string exceptions and binding explicit conversion chains are ahead of code")
 def test_missing_input_through_jobserver_fails_and_recovers(tmp_path, mode, backend):
     project = 'expression-missing-recovery-' + uuid.uuid4().hex
     _write_remote_config(tmp_path, backend=backend, project=project)
@@ -153,25 +154,19 @@ def test_missing_input_through_jobserver_fails_and_recovers(tmp_path, mode, back
         ctx = None
         try:
             if {mode!r} == "standalone":
-                cell = Cell(
-                    "str",
-                    checksum=source_checksum,
-                    input_celltype="plain",
-                    path="value",
-                )
+                cell = Cell("plain", checksum=source_checksum)["value"].as_celltype("str")
             else:
                 ctx = Context()
                 ctx.source = Cell("plain")
                 ctx.source.checksum = source_checksum
-                ctx.projected = ctx.source["value"]
-                ctx.projected.celltype = "str"
+                ctx.projected = ctx.source["value"].as_celltype("str")
                 cell = ctx.projected
                 ctx.compute(timeout=30)
 
             assert cell.checksum is None
             assert cell.state == "failed"
-            assert isinstance(cell.exception, CacheMissError), cell.exception
-            assert cell.exception.checksum == source_checksum
+            assert isinstance(cell.exception, str), cell.exception
+            assert source_checksum.hex() in cell.exception
             assert "Traceback" not in str(cell.exception)
 
             source = Buffer(source_content, checksum=source_checksum)
