@@ -37,7 +37,7 @@ def test_join_reacts_to_edits_and_reuses_checksum_after_revert(make_context):
     ctx = make_context()
     ctx.source = "first"
     ctx.join = Cell("plain")
-    ctx.join.value = ctx.source
+    ctx.join["value"] = ctx.source
     ctx.compute(timeout=10)
     first_checksum = ctx.join.checksum
 
@@ -58,7 +58,7 @@ def test_join_is_blocked_by_error_when_an_upstream_fails(make_context):
     ctx.broken = fail
     ctx.broken.pins.value = 1
     ctx.join = Cell("plain")
-    ctx.join.value = ctx.broken
+    ctx.join["value"] = ctx.broken
 
     ctx.compute(timeout=10)
 
@@ -72,7 +72,7 @@ def test_join_is_blocked_by_unwired_when_an_upstream_is_unwired(make_context):
     ctx = make_context()
     ctx.source = Cell("plain")
     ctx.join = Cell("plain")
-    ctx.join.value = ctx.source
+    ctx.join["value"] = ctx.source
 
     ctx.compute(timeout=10)
 
@@ -100,7 +100,7 @@ def test_join_waits_for_local_sidework_without_entering_computing(
     ctx = make_context()
     ctx.source = 42
     ctx.join = Cell("plain")
-    ctx.join.value = ctx.source
+    ctx.join["value"] = ctx.source
 
     try:
         assert entered.wait(timeout=10)
@@ -117,7 +117,7 @@ def test_join_build_is_a_snapshot_expression_not_a_join_recipe(make_context):
     ctx = make_context()
     ctx.source = "before"
     ctx.join = Cell("plain")
-    ctx.join.value = ctx.source
+    ctx.join["value"] = ctx.source
     ctx.compute(timeout=10)
 
     joined_checksum = ctx.join.checksum

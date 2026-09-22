@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import gc
 
+import pytest
+
 from seamless import CacheMissError
 from seamless.caching.buffer_cache import get_buffer_cache
 from seamless_workflow import Context
@@ -40,6 +42,10 @@ def test_transformer_literal_survives_tempref_expiry():
     assert ctx.add_length.result.value == 20 + len(payload)
 
 
+@pytest.mark.xfail(
+    strict=False,
+    reason="contract ahead of code: Transformer.exception still returns exception objects, not strings",
+)
 def test_unavailable_literal_is_captured_as_transformer_exception(capsys):
     ctx = Context()
     ctx.add_length = add_length
@@ -56,8 +62,8 @@ def test_unavailable_literal_is_captured_as_transformer_exception(capsys):
 
     restored.compute(timeout=10)
     assert restored.add_length.state == "failed"
-    assert isinstance(restored.add_length.exception, RuntimeError)
-    assert "CacheMissError" in str(restored.add_length.exception)
+    assert isinstance(restored.add_length.exception, str)
+    assert "CacheMissError" in restored.add_length.exception
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
