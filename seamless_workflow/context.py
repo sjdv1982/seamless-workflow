@@ -202,7 +202,16 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if node.mount and cfg.celltype != node.cell_config.celltype:
                 raise ValueError("Mounted celltype cannot change; unmount first")
             node.cell_config = cfg
-        else: node.transformer_config = cfg
+        else:
+            for pin, celltype in cfg.celltypes.items():
+                if celltype == node.transformer_config.celltypes.get(pin):
+                    continue
+                edge = self._incoming_edge(path, (pin,))
+                if edge is not None:
+                    source_path, local = self._graph.resolve_existing(edge.source)
+                    if local and self._node_celltype(source_path) != celltype:
+                        raise TypeError("Cannot implicitly convert behind a projection; use as_celltype() before or after projecting")
+            node.transformer_config = cfg
         self._revisions[path] = revision + 1
         self._derive_all()
         return True
@@ -533,7 +542,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 # interactive functions whose source cannot be inspected.
                 source = ""
             buf = Buffer(source, "python")
-            signature = inspect.signature(code)
+            from seamless_transformer.optional_pins import pin_signature
+            signature = pin_signature(inspect.signature(code))
             return TransformerConfig(
                 code=buf,
                 code_checksum=buf.get_checksum(),
@@ -766,6 +776,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if not detach:
             self._check_authority(node_path, (pin,))
         cfg.check_pin_name(pin)
+        self._graph.nodes[node_path].pin_read_errors.pop(pin, None)
         cfg.pins.add(pin)
         cfg.celltypes.setdefault(pin, "mixed")
         endpoint = self._endpoint(value)
@@ -876,6 +887,19 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         state, checksum, error = node.pin_states.get(pin, ('unwired', None, None))
         return state, error, source, input_type, Lease(checksum, cfg.celltypes.get(pin, 'mixed'))
 
+    def _record_pin_read_error(self, node_path, pin, identity, error):
+        state, _, _, input_type, lease = self._pin_snapshot(node_path, pin)
+        try:
+            if state != 'complete' or lease.checksum is None:
+                return
+            current = (lease.checksum.hex(), input_type, lease.celltype)
+            if current != identity:
+                return
+            self._graph.nodes[node_path].pin_read_errors[pin] = (identity, error)
+        finally:
+            lease._release_refholds()
+        self._derive_all()
+
     def _endpoint(self, value):
         if isinstance(value, BoundEndpoint):
             return value
@@ -920,6 +944,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         elif target.endpoint_kind == "transformer-input":
             if len(target.local_path) != 1:
                 raise PathError("Transformer targets must address a whole pin")
+            celltype = self._graph.nodes[target.node_path].transformer_config.celltypes.get(target.local_path[0], 'mixed')
+            if source_ep.local_path and self._node_celltype(source_ep.node_path) != celltype:
+                raise TypeError("Cannot implicitly convert behind a projection; use as_celltype() before or after projecting")
         self._add_edge(source_ep.node_path + source_ep.local_path, target.node_path + target.local_path, detach=detach)
         target_node = self._graph.nodes[target.node_path]
         if target_node.kind == "cell" and not target.local_path:
@@ -1330,6 +1357,14 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def _source_state(self, edge):
         source_node, source_local = self._graph.resolve_existing(edge.source)
         node = self._graph.nodes[source_node]
+        target_path, target_local = self._graph.resolve_existing(edge.target)
+        target_node = self._graph.nodes[target_path]
+        if source_local and target_node.kind == 'transformer' and target_local != ('code',):
+            pin_type = target_node.transformer_config.celltypes.get(target_local[0], 'mixed')
+            if self._node_celltype(source_node) != pin_type:
+                return 'miswired', None
+        if node.state == 'miswired' or node.block_reason == 'blocked-by-miswiring':
+            return 'blocked-by-miswiring', None
         if node.state != "complete":
             return ("failed" if node.block_reason == "blocked-by-error" else node.state), None
         if source_local:
@@ -1338,7 +1373,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _apply_pending(self, node, edges):
         states = [self._source_state(edge)[0] for edge in edges]
-        if "failed" in states:
+        if "miswired" in states or "blocked-by-miswiring" in states:
+            node.state, node.block_reason = "blocked", "blocked-by-miswiring"
+        elif "failed" in states:
             node.state, node.block_reason = "blocked", "blocked-by-error"
         elif any(state in {"blocked", "unwired"} for state in states):
             node.state, node.block_reason = "blocked", "blocked-by-unwired"
@@ -1508,9 +1545,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._effects.append(lambda: session.registration.service.poll(session.registration, force=True))
             return
         node = self._graph.nodes[node_path]
-        if node.exception is None: return
+        errors = [node.exception]
+        errors.extend(error for _, _, error in node.pin_states.values() if error is not None)
+        node.pin_read_errors.clear()
+        if not any(error is not None for error in errors): return
         for key, (lease, error) in list(self._facts.items()):
-            if error is node.exception:
+            if error is not None and any(error is candidate for candidate in errors):
                 self._facts.pop(key)
                 if lease is not None: lease._release_refholds()
         current = self._runtime.current_runs.pop(node_path, None)

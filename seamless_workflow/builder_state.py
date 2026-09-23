@@ -129,7 +129,7 @@ class BoundCellBackend:
     @property
     def exception(self):
         node = self._node()
-        return node.exception if node.state == "failed" else None
+        return str(node.exception) if node.state == "failed" and node.exception is not None else None
 
     def derive(self, **updates):
         self._node()
@@ -308,7 +308,7 @@ class BoundPinBackend:
         state, error, source, input_type, lease = self.context._pin_snapshot(self.node_path, self.pin)
         try:
             if field == 'state': return state
-            if field == 'exception': return error
+            if field == 'exception': return str(error) if error is not None else None
             if field == 'source': return source
             if field == 'input_celltype': return input_type
             if field == 'celltype': return lease.celltype
@@ -316,10 +316,25 @@ class BoundPinBackend:
             if field == 'checksum':
                 if checksum is not None: checksum.tempref()
                 return checksum
-            if checksum is None: return None
-            if field == 'buffer': return checksum.resolve()
+            if checksum is None:
+                if error is not None:
+                    raise RuntimeError(str(error))
+                return None
+            if field == 'buffer':
+                from seamless.checksum.hash_type_validation import validate_deserializable_as
+                validate_deserializable_as(checksum, lease.celltype)
+                buffer = checksum.resolve()
+                validate_deserializable_as(checksum, lease.celltype, buffer=buffer)
+                return buffer
             value = checksum.resolve(lease.celltype)
             return value.content if lease.celltype == 'bytes' and hasattr(value, 'content') else value
+        except Exception as exc:
+            from seamless import CacheMissError
+            if field in {'buffer', 'value'} and lease.checksum is not None and not isinstance(exc, CacheMissError):
+                from .errors import execution_error
+                identity = (lease.checksum.hex(), input_type, lease.celltype)
+                self.context._record_pin_read_error(self.node_path, self.pin, identity, execution_error(exc))
+            raise
         finally:
             lease._release_refholds()
 
@@ -372,6 +387,14 @@ class BoundPinBackend:
     def run(self, input_ref=_UNSET):
         self.compute(input_ref)
         return self.value
+
+    def fingertip(self):
+        checksum = self.checksum
+        return None if checksum is None else checksum.fingertip_sync()
+
+    def clear_exception(self):
+        self._node()
+        return self.context._clear_exception(self.node_path)
 
     def write_value(self, value, *, detach=False):
         self._node()
@@ -501,14 +524,14 @@ class BoundTransformerBackend:
     @property
     def block_reason(self):
         node = self._node()
-        if node.state not in {'unwired', 'blocked', 'waiting'}:
+        if node.state not in {'miswired', 'unwired', 'blocked', 'waiting'}:
             return None
-        return list(node.block_pins)
+        return dict(node.pin_block_reasons)
 
     @property
     def exception(self):
         node = self._node()
-        return node.exception if node.state == "failed" else None
+        return str(node.exception) if node.state == "failed" and node.exception is not None else None
 
     @property
     def language(self): return self.cfg.language

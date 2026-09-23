@@ -9,8 +9,8 @@ from typing import Any, Literal
 from seamless import Checksum
 
 NodeKind = Literal["cell", "transformer"]
-NodeState = Literal["unwired", "blocked", "waiting", "computing", "complete", "failed"]
-BlockReason = Literal["blocked-by-unwired", "blocked-by-error"]
+NodeState = Literal["miswired", "unwired", "blocked", "waiting", "computing", "complete", "failed"]
+BlockReason = Literal["blocked-by-miswiring", "blocked-by-unwired", "blocked-by-error"]
 NodePath = tuple[str, ...]
 Path = tuple[Any, ...]
 ViewPath = tuple[Any, ...]
@@ -63,7 +63,8 @@ class TransformerConfig:
         if not callable(self.callable):
             return None
         try:
-            return set(inspect.signature(self.callable).parameters)
+            from seamless_transformer.optional_pins import pin_signature
+            return set(pin_signature(inspect.signature(self.callable)).parameters)
         except (TypeError, ValueError):
             return None
 
@@ -95,11 +96,13 @@ class Node:
     state: NodeState = "unwired"
     block_reason: BlockReason | None = None
     block_pins: list[str] = field(default_factory=list)
+    pin_block_reasons: dict[str, str] = field(default_factory=dict)
     cell_config: CellConfig | None = None
     transformer_config: TransformerConfig | None = None
     cell_root_producer: ConstantProducer | None = None
     transformer_pin_producers: dict[str, ConstantProducer] = field(default_factory=dict)
     pin_states: dict[str, tuple] = field(default_factory=dict)
+    pin_read_errors: dict[str, tuple] = field(default_factory=dict)
     current_checksum: Checksum | None = None
     exception: BaseException | None = None
     mount: object = None

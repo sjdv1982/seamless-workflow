@@ -40,7 +40,7 @@ def test_constant_retype_and_failure_blocks_construction():
         assert pin.state == 'failed' and pin.exception is not None
         assert ctx.tf.state == 'blocked'
         # A transformer's block_reason lists the culprit pins; its result carries the kind.
-        assert ctx.tf.block_reason == ['value']
+        assert ctx.tf.block_reason == {'value': 'blocked-by-error'}
         assert ctx.tf.result.block_reason == 'blocked-by-error'
         assert ctx.tf.result.checksum is None
         assert ('tf',) not in ctx._runtime.current_runs
@@ -102,7 +102,8 @@ def test_unset_and_signatureless_deletion():
         ctx.loose.pins.value = None
         assert ctx.loose.pins.value.checksum == Buffer(None, 'plain').get_checksum()
         ctx.loose.celltypes.value = 'int'
-        ctx.loose.optional_pins = {'value'}
+        with pytest.raises(AttributeError):
+            ctx.loose.optional_pins = {'value'}
         del ctx.loose.pins.value
         with pytest.raises(AttributeError): ctx.loose.pins.value
         # Deleting the declaration also drops its celltype and optionality.
@@ -123,7 +124,7 @@ def test_optional_null_is_dropped_before_conversion(celltype):
         ctx.source.set(None)
         ctx.tf = optional_identity
         ctx.tf.celltypes.value = celltype
-        ctx.tf.optional_pins = {'value'}
+        assert ctx.tf.optional_pins == {'value'}
         ctx.tf.pins.value = ctx.source
         ctx.compute()
         assert ctx.tf.pins.value.state == 'complete'
@@ -148,7 +149,7 @@ def test_connected_none_result_drops_optional_pin():
         ctx.tf = optional_identity
         ctx.tf.celltypes.value = 'int'
         ctx.tf.celltypes.result = 'plain'
-        ctx.tf.optional_pins = {'value'}
+        assert ctx.tf.optional_pins == {'value'}
         ctx.tf.pins.value = ctx.up
         ctx.compute()
         assert ctx.up.result.checksum == Buffer(None, 'plain').get_checksum()
@@ -171,7 +172,7 @@ def test_required_null_is_a_pin_error_and_literal_rejected():
         assert ctx.tf.pins.value.state == 'failed'
         assert 'int' in str(ctx.tf.pins.value.exception)
         assert ctx.tf.state == 'blocked'
-        assert ctx.tf.block_reason == ['value']
+        assert ctx.tf.block_reason == {'value': 'blocked-by-error'}
         assert ctx.tf.result.block_reason == 'blocked-by-error'
         assert ('tf',) not in ctx._runtime.current_runs
 
@@ -226,7 +227,7 @@ def test_empty_bytes_checksum_canonicalizes_before_optional_drop():
     with Context() as ctx:
         ctx.tf = optional_identity
         ctx.tf.celltypes.value = 'bytes'
-        ctx.tf.optional_pins = {'value'}
+        assert ctx.tf.optional_pins == {'value'}
         ctx.tf.pins.value.set_checksum(Buffer(b'').get_checksum())
         ctx.compute()
         assert ctx.tf.pins.value.checksum == Buffer(None, 'plain').get_checksum()

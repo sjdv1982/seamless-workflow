@@ -16,11 +16,11 @@ def add(x, y):
 def test_unwired_pins_update_and_diagnostics_are_detached(make_context):
     ctx = make_context()
     ctx.tf = add
-    assert ctx.tf.block_reason == ["x", "y"]
+    assert ctx.tf.block_reason == {"x": "unwired", "y": "unwired"}
     ctx.tf.block_reason.clear()
-    assert ctx.tf.block_reason == ["x", "y"]
+    assert ctx.tf.block_reason == {"x": "unwired", "y": "unwired"}
     ctx.tf.pins.x = 1
-    assert ctx.tf.block_reason == ["y"]
+    assert ctx.tf.block_reason == {"y": "unwired"}
     ctx.tf.pins.y = 2
     ctx.compute(timeout=10)
     assert ctx.tf.block_reason is None
@@ -32,7 +32,7 @@ def test_multiple_upstream_unwired_pins(make_context):
     ctx.tf = add
     ctx.tf.pins.x = ctx.source
     ctx.tf.pins.y = ctx.source
-    assert ctx.tf.block_reason == ["x", "y"]
+    assert ctx.tf.block_reason == {"x": "blocked-by-unwired", "y": "blocked-by-unwired"}
 
 
 @pytest.mark.parametrize("source_state, reason", [
@@ -57,7 +57,7 @@ def test_collects_code_and_all_pins(source_state, reason):
     assert node.block_reason == (None if reason == "waiting" else reason)
     assert node.block_pins == ["code", "x", "y"]
     backend = SimpleNamespace(_node=lambda: node)
-    assert BoundTransformerBackend.block_reason.fget(backend) == ["code", "x", "y"]
+    assert BoundTransformerBackend.block_reason.fget(backend) == dict.fromkeys(["code", "x", "y"], reason)
 
 
 def test_optional_missing_pins_are_omitted():
@@ -85,7 +85,7 @@ def test_blocked_pins_include_both_errors_and_missing_upstream_inputs():
     )
     Reactive._derive_transformer(context, ("tf",), node)
     assert node.state == "blocked"
-    assert node.block_pins == ["code", "x"]
+    assert node.block_pins == ["code", "x", "y"]
 
 
 @pytest.mark.parametrize("input_states", list(permutations([
@@ -107,19 +107,21 @@ def test_mixed_inputs_follow_state_precedence_regardless_of_pin_order(input_stat
     Reactive._derive_transformer(context, ("tf",), node)
     assert node.state == "unwired"
     missing_pin = names[input_states.index("missing")]
-    assert BoundTransformerBackend.block_reason.fget(backend) == [missing_pin]
+    reasons = {"missing": "unwired", "failed": "blocked-by-error",
+               "unwired": "blocked-by-unwired", "computing": "waiting"}
+    expected = {name: reasons[state] for name, state in zip(names, input_states)}
+    assert BoundTransformerBackend.block_reason.fget(backend) == expected
 
     # Wiring the missing pin reveals all blocked inputs, including errors.
     incoming[(missing_pin,)] = "computing"
     Reactive._derive_transformer(context, ("tf",), node)
     assert node.state == "blocked"
-    assert node.block_reason == "blocked-by-error"
-    assert BoundTransformerBackend.block_reason.fget(backend) == sorted(
-        name for name, state in zip(names, input_states) if state in {"failed", "unwired"}
-    )
+    assert node.block_reason == "blocked-by-unwired"
+    expected[missing_pin] = "waiting"
+    assert BoundTransformerBackend.block_reason.fget(backend) == expected
 
     # Once those inputs can progress, all inputs are waiting.
     incoming.update({(name,): "computing" for name in names})
     Reactive._derive_transformer(context, ("tf",), node)
     assert node.state == "waiting"
-    assert BoundTransformerBackend.block_reason.fget(backend) == list(names)
+    assert BoundTransformerBackend.block_reason.fget(backend) == dict.fromkeys(names, "waiting")

@@ -165,13 +165,13 @@ def controller_method(method):
                     prepared = _prepare_transformer(self, value).config
                     old = self._node_snapshot(path).transformer_config
                     old.code, old.code_checksum, old.callable = prepared.code, prepared.code_checksum, prepared.callable
+                    old.optional_pins = set(prepared.optional_pins)
                     if prepared.signature_parameters() is not None:
                         old.pins = set(prepared.pins)
                         old.celltypes = {
                             pin: celltype for pin, celltype in old.celltypes.items()
                             if pin in old.pins or pin == 'result'
                         }
-                        old.optional_pins.intersection_update(old.pins)
                     else:
                         old.pins.update(prepared.pins)
                     for pin in prepared.pins: old.celltypes.setdefault(pin, 'mixed')

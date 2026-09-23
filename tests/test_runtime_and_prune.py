@@ -55,7 +55,7 @@ def test_node_level_prune_scopes_to_downstream_cone():
 def test_connected_optional_pin_participates_but_absent_optional_is_skipped():
     ctx = Context()
     ctx.add = add
-    ctx.add.optional_pins = {"y"}
+    assert ctx.add.optional_pins == {"y"}
     ctx.add.pins.x = 5
 
     ctx.compute(timeout=10)

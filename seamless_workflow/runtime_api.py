@@ -54,7 +54,7 @@ class RuntimeAPI:
                 continue
             if read and barrier:
                 node = self._graph.nodes[path]
-                if node.state in {'unwired','blocked','failed'}:
+                if node.state in {'miswired','unwired','blocked','failed'}:
                     future.set_exception(copy.deepcopy(node.exception) if node.state == 'failed' else NodeError(f'Node is {node.state}: {node.block_reason}'))
                     self._barriers.pop(future, None)
                     continue
@@ -74,6 +74,7 @@ class RuntimeAPI:
         from seamless_transformer.builder_snapshot import TransformerBuilderSnapshot
         from .builder_state import _path_string
         import inspect
+        from seamless_transformer.optional_pins import pin_signature
         node = self._graph.nodes[path]
         cfg = node.transformer_config
         args = {} if concrete_args is None else dict(concrete_args)
@@ -103,5 +104,5 @@ class RuntimeAPI:
             scratch=cfg.scratch, direct_print=cfg.direct_print, local=cfg.local,
             call_mode=cfg.call_mode, callable=cfg.callable,
             schema=cfg.schema, compilation=copy.deepcopy(cfg.compilation), objects=copy.deepcopy(cfg.objects), header=cfg.header,
-            signature=inspect.signature(cfg.callable) if callable(cfg.callable) else None,
+            signature=pin_signature(inspect.signature(cfg.callable)) if callable(cfg.callable) else None,
             leases=leases)

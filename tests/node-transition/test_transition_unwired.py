@@ -102,7 +102,7 @@ def test_deleting_a_required_pin_returns_a_transformer_to_unwired():
 def test_an_optional_pin_left_unset_does_not_make_a_transformer_unwired():
     ctx = Context()
     ctx.tf = optional_sum
-    ctx.tf.optional_pins = {"y"}
+    assert ctx.tf.optional_pins == {"y"}
     ctx.tf.pins.x = 5
 
     assert ctx.tf.state != "unwired", states(ctx)

@@ -70,8 +70,7 @@ def test_callable_signature_replacement(make_context, route, binding, replacemen
     old_handle = ctx.tf
     assign(ctx, replacement, route)
     if replacement is optional:
-        # Seamless optionality is explicit, independent of Python defaults.
-        ctx.tf.optional_pins = {"z"}
+        assert ctx.tf.optional_pins == {"z"}
     node = graph_node(ctx)
     assert set(node["pins"]) == pins
     assert set(node["producers"]) <= pins
@@ -82,7 +81,7 @@ def test_callable_signature_replacement(make_context, route, binding, replacemen
         assert not any(e["target"] == ["tf", removed] for e in ctx.get_graph()["connections"])
     if missing:
         assert ctx.tf.state == "unwired"
-        assert ctx.tf.block_reason == missing
+        assert ctx.tf.block_reason == dict.fromkeys(missing, "unwired")
         ctx.tf.pins.z = 3
     ctx.compute(timeout=10)
     assert ctx.tf.result.value == expected
@@ -109,7 +108,7 @@ def test_removed_pins_do_not_reappear_when_signature_restored(make_context, rout
     ctx.compute(timeout=10)
     assign(ctx, original, route)
     assert ctx.tf.state == "unwired"
-    assert ctx.tf.block_reason == ["y"]
+    assert ctx.tf.block_reason == {"y": "unwired"}
     assert ctx.tf.pins.y.checksum is None
     ctx.source_y = 100
     assert ctx.tf.state == "unwired"
@@ -162,7 +161,7 @@ def test_unwired_shared_pin_stays_unwired(make_context, route):
     ctx.tf.pins.y = 4
     assign(ctx, same, route)
     assert ctx.tf.state == "unwired"
-    assert ctx.tf.block_reason == ["x"]
+    assert ctx.tf.block_reason == {"x": "unwired"}
     assert ctx.tf.pins.y.value == 4
     ctx.tf.pins.x = 6
     ctx.compute(timeout=10)

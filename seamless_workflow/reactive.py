@@ -17,10 +17,13 @@ class Reactive:
         code = cfg.code_checksum
         pending = []
         node.block_pins = []
+        node.pin_block_reasons = {}
         node.pin_states = {}
 
         def unavailable(pin, state):
-            if state == 'failed':
+            if state in {'miswired', 'blocked-by-miswiring'}:
+                reason = state
+            elif state == 'failed':
                 reason = 'blocked-by-error'
             elif state in {'blocked', 'unwired'}:
                 reason = 'blocked-by-unwired'
@@ -43,7 +46,7 @@ class Reactive:
             if edge is not None:
                 state, checksum = self._source_state(edge)
                 if state != 'complete':
-                    node.pin_states[pin] = ('blocked' if state in {'failed', 'blocked', 'unwired'} else state, None, None)
+                    node.pin_states[pin] = ('blocked' if state in {'failed', 'blocked', 'unwired', 'blocked-by-miswiring'} else state, None, None)
                     unavailable(pin, state)
                     continue
                 source_node, _ = self._graph.resolve_existing(edge.source)
@@ -77,22 +80,32 @@ class Reactive:
                     continue
             else:
                 node.pin_states[pin] = ('complete', checksum, None)
+            read_error = node.pin_read_errors.get(pin)
+            if read_error is not None:
+                identity, error = read_error
+                if identity == (checksum.hex(), input_type, output_type):
+                    node.pin_states[pin] = ('failed', None, error)
+                    unavailable(pin, 'failed')
+                    continue
+                node.pin_read_errors.pop(pin, None)
             pins[pin] = checksum
         if pending:
             # Missing inputs take precedence over blocked inputs, then waiting.
             priority = {
-                'unwired': 0,
-                'blocked-by-error': 1,
-                'blocked-by-unwired': 2,
-                'waiting': 3,
+                'miswired': 0,
+                'unwired': 1,
+                'blocked-by-miswiring': 2,
+                'blocked-by-unwired': 3,
+                'blocked-by-error': 4,
+                'waiting': 5,
             }
             reason = min((why for why, pin in pending), key=priority.__getitem__)
             self._suspend(path)
             node.state = 'blocked' if reason.startswith('blocked-by-') else reason
             node.block_reason = reason if node.state == 'blocked' else None
+            node.pin_block_reasons = {pin: why for why, pin in pending}
             node.block_pins = sorted(
                 pin for why, pin in pending
-                if why == reason or (node.state == 'blocked' and why.startswith('blocked-by-'))
             )
             if node.state == 'unwired':
                 node.exception = None

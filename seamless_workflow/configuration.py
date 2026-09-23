@@ -6,7 +6,17 @@ from .graph import TransformerConfig
 
 def update_config(original, field, value, key=None, delete=False):
     cfg = copy.deepcopy(original)
-    if field in {'celltypes', 'modules', 'globals'}:
+    if field == 'optional_pin':
+        import inspect
+        from seamless_transformer.optional_pins import optional_names
+        signature = inspect.signature(cfg.callable) if callable(cfg.callable) else None
+        if cfg.language != 'python' or key not in optional_names(signature):
+            raise AttributeError(key)
+        if value:
+            cfg.optional_pins.add(key)
+        else:
+            cfg.optional_pins.discard(key)
+    elif field in {'celltypes', 'modules', 'globals'}:
         mapping = getattr(cfg, field)
         if delete:
             mapping.pop(key, None)
