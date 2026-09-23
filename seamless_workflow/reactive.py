@@ -13,6 +13,19 @@ from .errors import WorkflowExecutionError
 class Reactive:
     def _derive_transformer(self, path, node):
         cfg = node.transformer_config
+        compiled = cfg.compilation is not None
+        if compiled:
+            from seamless_transformer.compiled_validation import validate_stage1
+            try:
+                sig = validate_stage1(cfg.schema, cfg.celltypes, cfg.optional_pins,
+                                      cfg.meta.get('metavars', {}))
+            except Exception as exc:
+                self._suspend(path)
+                node.state, node.block_reason = 'blocked', 'blocked-by-error'
+                node.exception = exc
+                node.block_pins, node.pin_states, node.pin_block_reasons = [], {}, {}
+                self._replace_current_checksum(path, None)
+                return
         incoming = self._incoming_for(path)
         code = cfg.code_checksum
         pending = []
@@ -67,13 +80,17 @@ class Reactive:
                 node.pin_states[pin] = ('complete', checksum, None)
                 continue
             try:
-                validate_pin_null(checksum, output_type, pin, optional=False)
+                if not compiled:
+                    validate_pin_null(checksum, output_type, pin, optional=False)
             except TypeError as exc:
                 node.pin_states[pin] = ('failed', None, exc)
                 unavailable(pin, 'failed')
                 continue
             if input_type != output_type:
                 state, checksum, error = self._projection(checksum, (), input_type, output_type)
+                if compiled and error is not None:
+                    error = ValueError(f"Pin {pin!r} conversion from {input_type!r} to {output_type!r}: {error}")
+                    node.exception = error
                 node.pin_states[pin] = (state, checksum, error)
                 if state != 'complete':
                     unavailable(pin, state)
@@ -88,6 +105,16 @@ class Reactive:
                     unavailable(pin, 'failed')
                     continue
                 node.pin_read_errors.pop(pin, None)
+            if compiled:
+                from seamless_transformer.compiled_validation import validate_pin
+                try:
+                    parameter = next(p for p in sig.inputs if p.name == pin)
+                    validate_pin(parameter, output_type, checksum)
+                except TypeError as exc:
+                    node.pin_states[pin] = ('failed', None, exc)
+                    node.exception = exc
+                    unavailable(pin, 'failed')
+                    continue
             pins[pin] = checksum
         if pending:
             # Missing inputs take precedence over blocked inputs, then waiting.

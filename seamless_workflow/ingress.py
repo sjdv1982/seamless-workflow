@@ -162,8 +162,13 @@ def controller_method(method):
             if ep is None:
                 if value is None: value = TransformerConfig()
                 else:
-                    prepared = _prepare_transformer(self, value).config
                     old = self._node_snapshot(path).transformer_config
+                    if old.compilation is not None:
+                        buffer = Buffer(value, 'text')
+                        prepared = copy.deepcopy(old)
+                        prepared.code, prepared.code_checksum = buffer, buffer.get_checksum()
+                    else:
+                        prepared = _prepare_transformer(self, value).config
                     old.code, old.code_checksum, old.callable = prepared.code, prepared.code_checksum, prepared.callable
                     old.optional_pins = set(prepared.optional_pins)
                     if prepared.signature_parameters() is not None:
@@ -187,13 +192,32 @@ def controller_method(method):
                 controller.call('_check_authority', path, (pin,), klass=4)
             if ep is None:
                 cfg = self._node_snapshot(path).transformer_config
+                cfg.check_pin_name(pin)
                 celltype = cfg.celltypes.get(pin, 'mixed')
                 if kwargs.get('checksum_rhs'):
                     value = None if value is None else Checksum(value)
                 else:
-                    value = checksum_for_value(value, celltype, checksum_is_value=True)
-                from seamless_transformer.transformation_utils import validate_pin_null
-                validate_pin_null(value, celltype, pin, optional=pin in cfg.optional_pins)
+                    if cfg.compilation is not None and not isinstance(value, Checksum):
+                        try:
+                            buffer = Buffer(value, celltype)
+                        except Exception as exc:
+                            raise type(exc)(f"Compiled pin {pin!r}: {exc}") from exc
+                        from seamless_transformer.compiled_validation import validate_stage1, validate_pin
+                        try:
+                            sig = validate_stage1(cfg.schema, cfg.celltypes, cfg.optional_pins,
+                                                  cfg.meta.get('metavars', {}))
+                        except Exception:
+                            pass  # Inconsistent builder state remains editable.
+                        else:
+                            parameter = next(p for p in sig.inputs if p.name == pin)
+                            validate_pin(parameter, celltype, buffer.get_checksum(), buffer=buffer)
+                        value = buffer.get_checksum()
+                        buffer.tempref()
+                    else:
+                        value = checksum_for_value(value, celltype, checksum_is_value=True)
+                if cfg.compilation is None:
+                    from seamless_transformer.transformation_utils import validate_pin_null
+                    validate_pin_null(value, celltype, pin, optional=pin in cfg.optional_pins)
                 if value is not None: leases.append(Lease(value))
             else: value = ep
             args = (path, pin, value)

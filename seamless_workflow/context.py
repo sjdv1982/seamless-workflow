@@ -211,6 +211,14 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     source_path, local = self._graph.resolve_existing(edge.source)
                     if local and self._node_celltype(source_path) != celltype:
                         raise TypeError("Cannot implicitly convert behind a projection; use as_celltype() before or after projecting")
+            if cfg.compilation is not None:
+                removed_pins = node.transformer_config.pins - cfg.pins
+                for pin in removed_pins:
+                    producer = node.transformer_pin_producers.pop(pin, None)
+                    if producer is not None:
+                        self._release_producer(producer, path + (pin,))
+                    self._remove_edges_targeting(path, (pin,), descendants=True)
+                    node.pin_read_errors.pop(pin, None)
             node.transformer_config = cfg
         self._revisions[path] = revision + 1
         self._derive_all()

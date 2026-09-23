@@ -6,6 +6,24 @@ from .graph import TransformerConfig
 
 def update_config(original, field, value, key=None, delete=False):
     cfg = copy.deepcopy(original)
+    compiled = isinstance(cfg, TransformerConfig) and cfg.compilation is not None
+    if compiled and field in ('optional_pin', 'optional_pins') and value:
+        raise TypeError('compiled inputs cannot be optional')
+    if compiled and field == 'schema':
+        import yaml
+        from seamless_signature import Signature, generate_header
+        from seamless_transformer.compiled_validation import validate_declarations
+        sig = Signature.from_dict(yaml.safe_load(value))
+        header = generate_header(sig)
+        cfg.schema, cfg.header = value, header
+        allowed_metavars = {f'max{w}' for w in sig.output_wildcards}
+        cfg.meta['metavars'] = {k: v for k, v in cfg.meta.get('metavars', {}).items()
+                                if k in allowed_metavars}
+        cfg.pins = {p.name for p in sig.inputs}
+        cfg.celltypes = {**{p: cfg.celltypes.get(p, 'mixed') for p in cfg.pins},
+                         'result': cfg.celltypes.get('result', 'mixed')}
+        validate_declarations(sig, cfg.celltypes, warn=True)
+        return cfg
     if field == 'optional_pin':
         import inspect
         from seamless_transformer.optional_pins import optional_names
@@ -26,6 +44,12 @@ def update_config(original, field, value, key=None, delete=False):
                 value = {int:'int', float:'float', str:'str', bool:'bool', bytes:'bytes'}.get(value, value)
                 if value not in celltypes + ['deepcell','deepfolder','folder','module']:
                     raise TypeError(f'Unknown celltype: {value!r}')
+                if compiled and key != 'result':
+                    from seamless_transformer.compiled_validation import ALLOWED_CELLTYPES, CompiledPinCelltypeError
+                    if key not in cfg.pins:
+                        raise AttributeError(key)
+                    if value not in ALLOWED_CELLTYPES:
+                        raise CompiledPinCelltypeError(f"Compiled pin {key!r}: unsupported celltype {value!r}")
                 cfg.check_pin_name(key, allow_result=True)
                 if key != 'result': cfg.pins.add(key)
             mapping[key] = copy.deepcopy(value)
@@ -45,6 +69,16 @@ def update_config(original, field, value, key=None, delete=False):
             value = {int:'int', float:'float', str:'str', bool:'bool', bytes:'bytes'}.get(value, value)
             Buffer._map_celltype(value)
         setattr(cfg, field, copy.deepcopy(value))
+    if compiled and field == 'celltypes' and cfg.schema:
+        import yaml
+        from seamless_signature import Signature
+        from seamless_transformer.compiled_validation import validate_declarations
+        try:
+            sig = Signature.from_dict(yaml.safe_load(cfg.schema))
+        except Exception:
+            pass
+        else:
+            validate_declarations(sig, cfg.celltypes, warn=True)
     return cfg
 
 

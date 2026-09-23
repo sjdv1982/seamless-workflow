@@ -531,7 +531,7 @@ class BoundTransformerBackend:
     @property
     def exception(self):
         node = self._node()
-        return str(node.exception) if node.state == "failed" and node.exception is not None else None
+        return str(node.exception) if node.state in {"failed", "blocked"} and node.exception is not None else None
 
     @property
     def language(self): return self.cfg.language

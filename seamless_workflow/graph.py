@@ -60,6 +60,8 @@ class TransformerConfig:
         name may be declared.
         """
 
+        if self.compilation is not None:
+            return set(self.pins)
         if not callable(self.callable):
             return None
         try:

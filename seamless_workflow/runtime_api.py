@@ -77,6 +77,12 @@ class RuntimeAPI:
         from seamless_transformer.optional_pins import pin_signature
         node = self._graph.nodes[path]
         cfg = node.transformer_config
+        signature = pin_signature(inspect.signature(cfg.callable)) if callable(cfg.callable) else None
+        if cfg.compilation is not None:
+            from seamless_transformer.compiled_validation import validate_stage1
+            sig = validate_stage1(cfg.schema, cfg.celltypes, cfg.optional_pins, cfg.meta.get('metavars', {}))
+            signature = inspect.Signature([inspect.Parameter(p.name, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                                           for p in sig.inputs])
         args = {} if concrete_args is None else dict(concrete_args)
         for pin in cfg.pins if concrete_args is None else ():
             edge = self._incoming_edge(path, (pin,))
@@ -104,5 +110,5 @@ class RuntimeAPI:
             scratch=cfg.scratch, direct_print=cfg.direct_print, local=cfg.local,
             call_mode=cfg.call_mode, callable=cfg.callable,
             schema=cfg.schema, compilation=copy.deepcopy(cfg.compilation), objects=copy.deepcopy(cfg.objects), header=cfg.header,
-            signature=pin_signature(inspect.signature(cfg.callable)) if callable(cfg.callable) else None,
+            signature=signature,
             leases=leases)

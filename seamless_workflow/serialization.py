@@ -45,6 +45,22 @@ def prepare_graph(data):
                 scratch=entry.get('scratch',False), local=entry.get('local'), direct_print=entry.get('direct_print',False),
                 call_mode=entry['call_mode'], schema=entry.get('schema'),
                 compilation=copy.deepcopy(entry.get('compilation')), objects=copy.deepcopy(entry.get('objects')), header=entry.get('header'))
+            if cfg.compilation is not None:
+                if cfg.optional_pins:
+                    raise TypeError('compiled inputs cannot be optional')
+                import yaml
+                from seamless_signature import Signature, generate_header
+                from seamless_transformer.compiled_validation import validate_declarations
+                try:
+                    sig = Signature.from_dict(yaml.safe_load(cfg.schema))
+                    cfg.header = generate_header(sig)
+                except Exception:
+                    cfg.header = None
+                else:
+                    cfg.pins = {p.name for p in sig.inputs}
+                    cfg.celltypes = {**{p: cfg.celltypes.get(p, 'mixed') for p in cfg.pins},
+                                     'result': cfg.celltypes.get('result', 'mixed')}
+                    validate_declarations(sig, cfg.celltypes, warn=True)
             fingerprint(cfg)
             producers = {p:ConstantProducer(Checksum(q['checksum']),q.get('celltype',cfg.celltypes.get(p,'mixed')))
                          for p,q in entry.get('producers',{}).items()}
