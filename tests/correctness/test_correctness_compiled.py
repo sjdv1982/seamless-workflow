@@ -1,17 +1,15 @@
 """[MOD-15] — compiled transformers are a representation gap, not only an execution gap.
 
-    ``CompiledTransformer(CompiledMixin, TransformerCore)`` inherits
-    ``_snapshot_for_call``, and ``TransformerBuilderSnapshot`` has no schema
-    field; neither does ``TransformerConfig``, nor ``get_graph()``.  So
-    ``ctx.tf = compiled_tf`` silently discards the schema, and the durable graph
-    format cannot express a compiled transformer at all.  The format change must
-    therefore **precede** its correctness tests.
+    The compiled builder returned by ``Transformer(..., compiled=True)`` has
+    additional snapshot state. The builder snapshot, ``TransformerConfig`` and
+    durable graph must all preserve its schema before compiled workflow
+    correctness can be claimed.
 
 Which is why the first test here is about ``get_graph()`` and not about a
 result: a compiled transformer that cannot be written down cannot be reloaded,
 shared, or submitted, no matter how execution is routed.
 
-Measured against the current implementation, binding a ``CompiledTransformer``
+Measured against the current implementation, binding a compiled Transformer
 also loses its *language*: the node reports ``language="python"`` and stores the
 builder object itself as ``callable``, so the very next line —
 ``ctx.tf.pins.a = 2`` — raises ``AttributeError: Unknown transformer pin 'a'``,
@@ -27,7 +25,7 @@ import shutil
 import pytest
 
 from contract_helpers import compute_or_settle, states
-from seamless_transformer import CompiledTransformer
+from seamless_transformer import Transformer
 from seamless_workflow import Context
 
 
@@ -70,7 +68,7 @@ int transform(int32_t a, int32_t b, int32_t *result) {
 
 
 def _builder():
-    tf = CompiledTransformer("c")
+    tf = Transformer("c", compiled=True)
     tf.schema = ADD_SCHEMA
     tf.code = ADD_C
     return tf

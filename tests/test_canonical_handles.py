@@ -302,7 +302,7 @@ def test_graph_roundtrip_preserves_call_mode_and_source_paths():
 
     clone = Context()
     clone.set_graph(graph)
-    assert type(clone.add).__name__ == "Transformer"
+    assert type(clone.add).__name__ == "PythonTransformer"
     assert clone.add.run() == 7
     clone.compute(timeout=10)
     assert clone.out.value == 2
@@ -314,4 +314,4 @@ def test_graph_roundtrip_preserves_call_mode_and_source_paths():
     direct_graph = direct_ctx.get_graph()
     direct_clone = Context()
     direct_clone.set_graph(direct_graph)
-    assert type(direct_clone.add).__name__ == "DirectTransformer"
+    assert type(direct_clone.add).__name__ == "DirectPythonTransformer"

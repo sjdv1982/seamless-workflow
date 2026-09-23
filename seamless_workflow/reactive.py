@@ -133,7 +133,7 @@ class Reactive:
         owner = weakref.ref(self)
         side = self._side
         async def execute(snapshot=snapshot, leases=leases):
-            from seamless_transformer.transformer_class import Transformer
+            from seamless_transformer.transformer_class import PythonBashBaseTransformer
             tf = None
             completion = None
             def send(operation, *args):
@@ -147,7 +147,7 @@ class Reactive:
                     for item in args:
                         if isinstance(item, Lease): item._release_refholds()
             try:
-                builder = Transformer.__new__(Transformer)
+                builder = PythonBashBaseTransformer.__new__(PythonBashBaseTransformer)
                 tf = builder._build_from_snapshot(snapshot)
                 tf_checksum = await tf.construction()
                 if tf_checksum is None:

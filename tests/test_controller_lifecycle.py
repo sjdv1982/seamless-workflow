@@ -114,7 +114,7 @@ def test_internal_notification_failure_fails_waiters_and_poison_is_visible(monke
 
 def test_escaped_cell_and_transformer_snapshots_survive_close():
     from seamless import Cell
-    from seamless_transformer.transformer_class import Transformer
+    from seamless_transformer.transformer_class import PythonBashBaseTransformer
     from helpers.reference_lifecycle import force_expiry
     ctx = Context()
     ctx.a = {'token': 'escaped ownership'}
@@ -126,5 +126,5 @@ def test_escaped_cell_and_transformer_snapshots_survive_close():
     ctx.close()
     force_expiry(checksum)
     assert captured.run() == {'token': 'escaped ownership'}
-    tf = Transformer.__new__(Transformer)._build_from_snapshot(snapshot)
+    tf = PythonBashBaseTransformer.__new__(PythonBashBaseTransformer)._build_from_snapshot(snapshot)
     assert tf.run() == {'token': 'escaped ownership'}

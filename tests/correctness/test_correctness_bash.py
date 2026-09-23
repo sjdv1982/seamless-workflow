@@ -3,7 +3,7 @@
     A Context transformer today executes ``cfg.callable(**kwargs)``, so bash and
     compiled transformers have no execution path at all — and rather than being
     rejected, a node whose ``callable`` is ``None`` is set to ``complete`` with a
-    null result.  Measured: a ``delayed(…, language="bash")`` transformer bound
+    null result.  Measured: a ``Transformer(language="bash")`` builder bound
     into a Context reports ``Status: OK`` and yields ``None``.  The suite is
     silent because it only smoke-tests state.
 
@@ -25,7 +25,7 @@ from __future__ import annotations
 import pytest
 
 from contract_helpers import compute_or_settle, states
-from seamless_transformer import delayed, direct
+from seamless_transformer import Transformer
 from seamless_workflow import Context
 
 
@@ -43,7 +43,9 @@ DIRECTORY_CODE = (
 
 def _bash_context(code):
     ctx = Context()
-    ctx.tf = delayed(code, "bash")
+    tf = Transformer("bash")
+    tf.code = code
+    ctx.tf = tf
     ctx.tf.celltypes["lines"] = "int"
     ctx.tf.pins.testdata = TESTDATA
     ctx.tf.pins.lines = 3
@@ -109,7 +111,8 @@ def test_a_bound_bash_transformer_agrees_with_the_standalone_one():
     same computation, they cannot possibly agree on the cache key.
     """
 
-    standalone = direct(HEAD_CODE, "bash")
+    standalone = Transformer("bash", direct=True)
+    standalone.code = HEAD_CODE
     standalone.args.testdata = TESTDATA
     standalone.celltypes.lines = int
     expected = standalone(lines=3)

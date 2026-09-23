@@ -42,8 +42,7 @@ signatureless code; use `.checksum = None` to clear a fixed-signature pin.
 Whole Context cells can be mounted to files:
 
 ```python
-from seamless import Cell
-from seamless_workflow import Context
+from seamless.workflow import Cell, Context, Transformer
 
 with Context() as ctx:
     ctx.config = Cell("plain")

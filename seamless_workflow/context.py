@@ -276,16 +276,35 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         return MissingView(self, path)
 
     def _transformer_handle(self, path):
-        from seamless_transformer.transformer_class import DirectTransformer, Transformer
+        from seamless_transformer.compiled_transformer import (
+            CompiledTransformer,
+            DirectCompiledTransformer,
+        )
+        from seamless_transformer.transformer_class import (
+            BashTransformer,
+            DirectBashTransformer,
+            DirectPythonTransformer,
+            PythonBashBaseTransformer,
+            PythonTransformer,
+        )
 
         node = self._graph.nodes[path]
-        cls = DirectTransformer if node.transformer_config.call_mode == "direct" else Transformer
+        cfg = node.transformer_config
+        is_direct = cfg.call_mode == "direct"
+        if cfg.compilation is not None:
+            cls = DirectCompiledTransformer if is_direct else CompiledTransformer
+        elif cfg.language == "python":
+            cls = DirectPythonTransformer if is_direct else PythonTransformer
+        elif cfg.language == "bash":
+            cls = DirectBashTransformer if is_direct else BashTransformer
+        else:
+            cls = PythonBashBaseTransformer
         handle = cls.__new__(cls)
         object.__setattr__(handle, "_workflow_backend", BoundTransformerBackend(self, path))
         return handle
 
     def _assign(self, path: NodePath, value: Any) -> None:
-        from seamless_transformer.transformer_class import Transformer
+        from seamless_transformer.transformer_class import TransformerCore
 
         path = tuple(path)
         if path == ("mounts",): raise AttributeError("mounts is reserved for the Context mount API")
@@ -323,7 +342,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     self._sync_module_refholds()
                     self._sync_superseded_refholds()
                     self._add_endpoint_edge(value, self._cell_endpoint(path))
-                elif isinstance(value, (Transformer, PreparedTransformer)):
+                elif isinstance(value, (TransformerCore, PreparedTransformer)):
                     self._replace_transformer_from_builder(path, value)
                 elif callable(value) or isinstance(value, (str, TransformerConfig)):
                     self._set_transformer_code(path, value)
@@ -341,7 +360,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._add_endpoint_edge(value, self._cell_endpoint(path))
         elif isinstance(value, (Cell, PreparedCell)):
             self._create_cell_from_builder(path, value)
-        elif isinstance(value, (Transformer, PreparedTransformer)):
+        elif isinstance(value, (TransformerCore, PreparedTransformer)):
             self._create_transformer_from_builder(path, value)
         elif callable(value) or isinstance(value, TransformerConfig):
             self._create_transformer(path, value)
@@ -469,7 +488,11 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def _transformer_config_from_snapshot(self, snapshot, *, direct=False):
         codebuf = snapshot.codebuf
         code_checksum = (
-            codebuf if isinstance(codebuf, Checksum) else codebuf.get_checksum()
+            None
+            if codebuf is None
+            else codebuf
+            if isinstance(codebuf, Checksum)
+            else codebuf.get_checksum()
         )
         cfg = TransformerConfig(
             code=codebuf,

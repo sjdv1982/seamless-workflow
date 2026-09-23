@@ -23,7 +23,7 @@ from __future__ import annotations
 import pytest
 
 from contract_helpers import runtime, states
-from seamless_transformer import delayed
+from seamless_transformer import Transformer
 from seamless_workflow import Context
 
 
@@ -57,7 +57,9 @@ def test_clearing_the_code_of_a_wired_transformer_does_not_leave_it_complete():
 )
 def test_a_node_with_no_executable_path_is_not_reported_complete(language, code):
     ctx = Context()
-    ctx.tf = delayed(code, language)
+    tf = Transformer(language)
+    tf.code = code
+    ctx.tf = tf
 
     assert not (ctx.tf.state == "complete" and ctx.tf.result.checksum is None), (
         f"{language} node with no execution path reported {ctx.tf.state!r} and a "
@@ -73,7 +75,9 @@ def test_no_node_in_a_graph_is_complete_without_a_result_checksum():
     ctx.python = add
     ctx.python.pins.x = 1
     ctx.python.pins.y = 2
-    ctx.bash = delayed("echo hello > RESULT", "bash")
+    bash = Transformer("bash")
+    bash.code = "echo hello > RESULT"
+    ctx.bash = bash
     ctx.out = ctx.bash
 
     claiming = {
