@@ -23,7 +23,8 @@ def prepare_graph(data):
             legacy_target = entry.get('target_celltype', ct)
             if legacy_target != ct or (version == '0.4' and 'target_celltype' in entry):
                 raise PathError('Legacy target_celltype differs from celltype; convert the graph explicitly')
-            cfg = CellConfig(ct, entry.get('validator'), entry.get('validator_language'))
+            cfg = CellConfig(ct, entry.get('validator'), entry.get('validator_language'),
+                             bool(entry.get('scratch', False)))
             value = entry.get('value')
             producer = None if value is None else ConstantProducer(Checksum(value['checksum']),value.get('celltype',ct))
             node = Node('cell', cell_config=cfg, cell_root_producer=producer)

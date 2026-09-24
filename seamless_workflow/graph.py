@@ -27,6 +27,7 @@ class CellConfig:
     celltype: str = "mixed"
     validator: Any = None
     validator_language: str | None = None
+    scratch: bool = False
 
 
 @dataclass

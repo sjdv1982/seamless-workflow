@@ -13,7 +13,9 @@ class Lease:
         self.celltype = celltype
         self.released = False
         if checksum is not None:
-            checksum.incref_refholder()
+            # A lease is a snapshot or in-flight claim, not an owner: it keeps
+            # the buffer alive but neither publishes nor changes scratch status.
+            checksum.incref_refholder(scratch=None)
         register_refholder(self)
 
     def _refheld_checksums(self):
@@ -43,6 +45,7 @@ class PreparedCell:
     validator: object
     validator_language: object
     _input_ref: object
+    scratch: bool = False
 
     def _release_refholds(self):
         pass

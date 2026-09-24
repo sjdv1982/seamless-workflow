@@ -462,6 +462,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             cell.celltype,
             cell.validator,
             cell.validator_language,
+            bool(getattr(cell, "scratch", False)),
         )
         if isinstance(input_ref, (Cell, PreparedCell)):
             if isinstance(input_ref, Cell) and input_ref._workflow_backend is not None:
@@ -1072,7 +1073,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         new_checksum = None if checksum is None else normalize_checksum(checksum)
         old_checksum = node.current_checksum
         if new_checksum is not None:
-            new_checksum.incref_refholder()
+            # The node owns its result, so its scratch policy decides.
+            new_checksum.incref_refholder(scratch=self._node_scratch(node))
         node.current_checksum = new_checksum
         if old_checksum is not None:
             old_checksum.decref_refholder()
@@ -1193,7 +1195,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     state, checksum, error = self._projection(
                         source_node.current_checksum, source_local,
                         self._node_celltype(source_path), cfg.celltype,
-                        cfg.validator, cfg.validator_language,
+                        cfg.validator, cfg.validator_language, scratch=cfg.scratch,
                     )
                     self._replace_current_checksum(path, checksum)
                     node.state, node.block_reason, node.exception = state, None, error
@@ -1208,7 +1210,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             state = "complete" if checksum is not None else "unwired"
             input_type = self._effective_input_celltype(path)
             if checksum is not None and (input_type != cfg.celltype or cfg.validator is not None):
-                state, checksum, error = self._projection(checksum, (), input_type, cfg.celltype, cfg.validator, cfg.validator_language)
+                state, checksum, error = self._projection(checksum, (), input_type, cfg.celltype, cfg.validator, cfg.validator_language,
+                                                          scratch=cfg.scratch)
             self._replace_current_checksum(path, checksum)
             node.state, node.block_reason, node.exception = state, None, error
             return
@@ -1256,13 +1259,28 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         node = self._graph.nodes[path]
         return node.cell_config.celltype if node.kind == "cell" else node.transformer_config.celltypes.get("result", "mixed")
 
-    def _projection(self, checksum, local, celltype, target_type=None, validator=None, validator_language=None):
+    def _node_scratch(self, node):
+        if node.kind == "cell":
+            return bool(node.cell_config.scratch)
+        if node.kind == "transformer":
+            return bool(node.transformer_config.scratch)
+        return False
+
+    def _projection(self, checksum, local, celltype, target_type=None, validator=None, validator_language=None,
+                    scratch=True):
+        """Evaluate one Expression; ``scratch`` is the owning cell's policy.
+
+        A non-scratch projection asks for the bytes, so a dispatched one is
+        materialized and written by the executing side.
+        """
         target_type = target_type or celltype
         # Python slices are represented as strings in the content key.
         key = ("expression", checksum.hex(), _path_string(local), celltype, target_type,
-               validator.hex() if isinstance(validator, Checksum) else validator, validator_language)
+               validator.hex() if isinstance(validator, Checksum) else validator, validator_language,
+               bool(scratch))
         state, result, error = self._demand(key, evaluate_projection,
-            (checksum, tuple(local), celltype, target_type, validator, validator_language), [checksum])
+            (checksum, tuple(local), celltype, target_type, validator, validator_language, bool(scratch)),
+            [checksum])
         return state, result, error
 
     def _demand(self, key, function, args, checksums):
@@ -1291,7 +1309,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             softcancel_expression,
                         )
 
-                        cs, local, ct, target, validator, validator_language = args
+                        cs, local, ct, target, validator, validator_language, scratch = args
                         try:
                             checksum = await evaluate_expression_remote(
                                 cs,
@@ -1302,6 +1320,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                                 validator_language=validator_language,
                                 execution=execution,
                                 member_id=key,
+                                scratch=scratch,
                             )
                             if checksum is None:
                                 raise KeyError(_path_string(local))
@@ -1427,7 +1446,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             return node.current_checksum
         if node.current_checksum is None:
             return None
-        return self._projection(node.current_checksum, local, node.cell_config.celltype)[1]
+        return self._projection(node.current_checksum, local, node.cell_config.celltype,
+                                scratch=node.cell_config.scratch)[1]
 
     def _get_value(self, node_path, local=(), *, celltype=None):
         checksum = self._get_checksum(node_path, local)
@@ -1613,7 +1633,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         nodes = []
         for path, node in sorted(self._graph.nodes.items()):
             if node.kind == "cell":
-                entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "validator": node.cell_config.validator, "validator_language": node.cell_config.validator_language, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
+                entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "validator": node.cell_config.validator, "validator_language": node.cell_config.validator_language, "scratch": node.cell_config.scratch, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
             else:
                 cfg = node.transformer_config
                 entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}

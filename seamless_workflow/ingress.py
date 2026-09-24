@@ -46,7 +46,8 @@ def _prepare_assignment(ctx, path, value):
             ref = _endpoint(ref)
             if ref is None:
                 raise TypeError(f'Cannot bind a Cell whose input_ref is {type(value._input_ref).__name__}')
-        return PreparedCell(value.input_celltype, value.celltype, value.validator, value.validator_language, ref)
+        return PreparedCell(value.input_celltype, value.celltype, value.validator, value.validator_language, ref,
+                            scratch=bool(getattr(value, 'scratch', False)))
     if isinstance(value, TransformerCore) or callable(value):
         return _prepare_transformer(ctx, value)
     from .context import Context

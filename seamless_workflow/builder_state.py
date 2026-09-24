@@ -103,6 +103,20 @@ class BoundCellBackend:
         self.context._set_node_config(self.node_path, "validator_language", value)
 
     @property
+    def scratch(self):
+        node = self._node()
+        if node.cell_config is None:
+            # A transformer result follows its transformer's scratch setting.
+            return bool(node.transformer_config.scratch)
+        return bool(node.cell_config.scratch)
+
+    @scratch.setter
+    def scratch(self, value):
+        if self.readonly:
+            raise ReadOnlyEndpointError("Transformer result is read-only")
+        self.context._set_node_config(self.node_path, "scratch", value)
+
+    @property
     def checksum(self):
         self._node()
         return self.context._get_checksum(self.node_path, self.local_path)

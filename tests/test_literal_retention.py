@@ -28,7 +28,7 @@ def test_transformer_literal_survives_tempref_expiry():
     # Reproduce the old failure mode: remove the historical process-global
     # buffer hold, expire the checksum's tempref, and run cache cleanup.
     getattr(adapters, "_LOCAL_BUFFERS", {}).pop(producer.checksum.hex(), None)
-    tempref = buffer.tempref(interest=1e-12, fade_interval=1.0, scratch=True)
+    tempref = buffer.tempref(interest=1e-12, fade_interval=1.0)
     tempref.clear()
     del buffer
     gc.collect()
