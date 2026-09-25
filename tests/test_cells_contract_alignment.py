@@ -208,7 +208,6 @@ def test_declared_checksum_can_convert_but_property_write_uses_output_type(world
         hold.clear()
 
 
-@gap("constructor path= must be removed (Appendix F.1a)")
 def test_constructor_rejects_path(world):
     with pytest.raises(TypeError, match="path"):
         world.make("plain", path="a")
@@ -231,7 +230,7 @@ def test_path_is_readonly(world, name, projection):
     lambda c: c <= 1, lambda c: c > 1, lambda c: c >= 1,
     bool, len, iter, lambda c: c == Cell("plain"),
 ], ids=["eq", "ne", "lt", "le", "gt", "ge", "bool", "len", "iter", "cell-eq"])
-@pytest.mark.parametrize("projection", [pytest.param(False, marks=gap("root guards must move to CellBase")), True])
+@pytest.mark.parametrize("projection", [False, True])
 def test_handle_value_operations_raise_projection_error(world, operation, projection):
     root = world.make("plain")
     root.set({"a": [1, 2]})
@@ -240,7 +239,6 @@ def test_handle_value_operations_raise_projection_error(world, operation, projec
         operation(cell)
 
 
-@gap("SubCell class and exports must be removed (Appendix F.1a)")
 def test_projection_is_a_cell_without_subcell_export(world):
     import seamless
     root = world.make("plain")
@@ -277,7 +275,6 @@ def test_conversion_before_projection_differs_from_projection_before_conversion(
     assert before.build().identity_key != after.build().identity_key
 
 
-@gap("one link may project OR convert; invalid rewiring must raise")
 @pytest.mark.parametrize("api", ["constructor", "with_input"])
 def test_projected_source_cannot_implicitly_convert(world, api):
     source = world.make("text")
@@ -335,7 +332,6 @@ def test_read_evaluates_upstream_expression(world):
         hold.clear()
 
 
-@gap("Cell.exception becomes a string, not an exception object")
 def test_failure_is_a_stable_string_and_new_input_recovers(world):
     cell = world.make("str")
     cell.set("cannot parse as integer")
@@ -417,7 +413,6 @@ def test_deserialization_failure_is_repeatable_after_clear(world):
         hold.clear()
 
 
-@gap("Cell.fingertip is not implemented; no result must mean no work")
 def test_fingertip_without_result_never_evaluates(world, monkeypatch):
     cell = world.make("int")
     def forbidden(*args, **kwargs):

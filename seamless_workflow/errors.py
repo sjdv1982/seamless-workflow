@@ -1,7 +1,7 @@
 """Workflow-layer exceptions."""
 
 
-from seamless.cell_errors import WorkflowError, AuthorityError
+from seamless.cell_errors import WorkflowError, AuthorityError, ValueUnavailableError
 
 
 class DependencyError(WorkflowError):
@@ -22,10 +22,6 @@ class ReadOnlyEndpointError(WorkflowError):
 
 class StaleWorkflowHandleError(WorkflowError):
     """Raised when a bound builder outlives its Context node."""
-
-
-class ValueUnavailableError(WorkflowError):
-    """Raised when a value update cannot materialize its current root value."""
 
 
 __all__ = [

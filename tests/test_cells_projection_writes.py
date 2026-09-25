@@ -1,7 +1,9 @@
-"""The six projection writes: standalone refusal versus bound transaction.
+"""The six projection writes, bound: pathed read-modify-set writes to the parent.
 
-Paired cases in seamless-core and seamless-workflow. The documented write bugs
-are xfailed individually; authority failures never count as successful writes.
+Paired with seamless-core/tests/test_cells_projection_writes.py, where the same
+rule now holds standalone (cells.md, register/cells-RULINGS.md round 9). The
+documented write bugs are xfailed individually; authority failures never count
+as successful writes.
 """
 import pytest
 from seamless import Buffer, Cell
@@ -62,7 +64,7 @@ def test_projection_write_under_source_is_refused(make_context, form, method):
         hold.clear()
 
 
-def test_subpath_assignment_and_augmented_assignment_are_bound_only(make_context):
+def test_subpath_assignment_and_augmented_assignment_are_pathed_root_writes(make_context):
     ctx = make_context()
     ctx.root = Cell("plain")
     ctx.root.a.b = 2

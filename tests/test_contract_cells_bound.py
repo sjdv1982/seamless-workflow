@@ -12,7 +12,8 @@ from seamless import Buffer, Cell, Checksum
 
 
 def gap(reason):
-    return pytest.mark.xfail(strict=False, reason="cells.md " + reason)
+    section, _, why = reason.partition(": ")
+    return pytest.mark.xfail(strict=False, reason=f"cells.md {section}: contract ahead of code: {why}")
 
 
 def _text_source(ctx, name="b", value="[10, 20, 30, 40]"):
@@ -155,8 +156,8 @@ def test_set_graph_checks_the_invariant_on_symbol_table_entries(make_context):
 
 # --- Work: bound builder methods -------------------------------------------------
 
-def test_bound_derivations_are_standalone_but_navigation_stays_bound(make_context):
-    """cells.md §Work, notes: as_celltype/with_validator/with_input give standalone Cells; item/slice stay bound."""
+def test_bound_with_derivations_are_standalone_and_navigation_stays_bound(make_context):
+    """cells.md §Work, notes: with_validator/with_input give standalone snapshots; item/slice stay bound."""
     ctx = make_context()
     ctx.a = Cell("plain")
     ctx.a.set({"x": [1, 2, 3]})
@@ -165,13 +166,11 @@ def test_bound_derivations_are_standalone_but_navigation_stays_bound(make_contex
     hold = other.tempref()
     try:
         derived = {
-            "as_celltype": ctx.a.as_celltype("mixed"),
             "with_validator": ctx.a.with_validator(Checksum("ab" * 32)),
             "with_input": ctx.a.with_input(other.get_checksum()),
         }
         for name, cell in derived.items():
             assert cell._workflow_endpoint() is None, name
-        assert derived["as_celltype"].value == {"x": [1, 2, 3]}
         assert derived["with_input"].value == {"y": 1}
         for cell in (ctx.a["x"], ctx.a["x"][0:2], ctx.a.x):
             assert cell._workflow_endpoint() is not None
@@ -181,6 +180,19 @@ def test_bound_derivations_are_standalone_but_navigation_stays_bound(make_contex
         assert ctx.a.value == {"x": [1, 2, 3]}
     finally:
         hold.clear()
+
+
+@gap("§Connecting / §Work: a bound as_celltype returns a standalone snapshot, not an anonymous handle over the parent's current checksum")
+def test_bound_as_celltype_is_a_live_handle_not_a_snapshot(make_context):
+    ctx = make_context()
+    ctx.a = Cell("plain")
+    ctx.a.set({"x": 1})
+    ctx.compute(timeout=10)
+    handle = ctx.a.as_celltype("mixed")
+    assert handle.value == {"x": 1}
+    ctx.a.set({"x": 2})
+    ctx.compute(timeout=10)
+    assert handle.value == {"x": 2}
 
 
 # --- Scratch policy ---------------------------------------------------------------
@@ -253,14 +265,19 @@ def test_standalone_capture_of_a_bound_endpoint_is_not_a_binding(make_context):
 
 # --- Celltypes: mounted retyping ----------------------------------------------------
 
-def test_mounted_cell_cannot_be_retyped(make_context, tmp_path):
-    """cells.md §Celltypes: retyping is refused on a mounted cell."""
+@pytest.mark.parametrize("mode", ["r", "w", "rw"])
+def test_mounted_cell_cannot_be_retyped(make_context, tmp_path, mode):
+    """cells.md §Celltypes: retyping is refused on a mounted cell, whatever the mount mode (round 8, ruling 4)."""
     ctx = make_context()
+    path = tmp_path / f"m_{mode}.txt"
+    path.write_text("hello\n")
     ctx.m = Cell("text")
-    ctx.m.set("hello")
-    ctx.m.mount(str(tmp_path / "m.txt"), mode="w")
+    if mode != "r":
+        ctx.m.set("hello")
+    ctx.m.mount(str(path), mode=mode)
     try:
         ctx.compute(timeout=10)
+        assert ctx.m.value == "hello"
         with pytest.raises(ValueError, match="unmount first"):
             ctx.m.celltype = "str"
         assert ctx.m.celltype == "text"

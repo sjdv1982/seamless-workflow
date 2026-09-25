@@ -128,7 +128,8 @@ def test_miswiring_blocks_dependents_and_recovers(make_context):
     assert ctx.child.state == "miswired"
     assert ctx.child.checksum is None
     assert ctx.dependent.state == "blocked"
-    assert ctx.dependent.block_reason == {"<root>": "blocked-by-miswiring"}
+    # Only a cell with a one-level sub-path edge reports a dict (node-state-lifecycle.md).
+    assert ctx.dependent.block_reason == "blocked-by-miswiring"
     ctx.source.celltype = "text"
     ctx.compute(timeout=10)
     assert ctx.child.value == ctx.dependent.value == "1"
@@ -196,25 +197,22 @@ def test_bound_checksum_reads_do_not_join_active_evaluation(make_context, monkey
     assert ctx.projected.value == 109
 
 
-@gap("a bound checksum getter must not evaluate an underived projection (Appendix F.2a)")
-def test_bound_checksum_does_not_evaluate_underived_projection(make_context, monkeypatch):
+def test_projection_handle_checksum_pulls_over_the_parent_checksum(make_context):
+    """cells.md §Reads, Anonymous and projection handles (2026-09-25 revision).
+
+    Supersedes the F.2a item 5 reading that a bound getter must not evaluate an
+    underived projection: a handle read builds and runs its Expression over the
+    parent's checksum. Handle-local passive `.state` is pinned separately in
+    test_contract_cells_handles.py.
+    """
     ctx = make_context()
     ctx.root = Cell("plain")
     ctx.root.set({"a": 113})
     ctx.compute(timeout=10)
-    calls = []
-    original = expression_module._evaluate_expression_async
-
-    async def observed(*args, **kwargs):
-        calls.append(1)
-        return await original(*args, **kwargs)
-
-    monkeypatch.setattr(expression_module, "_evaluate_expression_async", observed)
     projected = ctx.root["a"]
-    assert projected.checksum is None
-    assert calls == []
-    assert projected.state == "waiting"
-    projected.compute()
+    assert projected.checksum == Buffer(113, "plain").get_checksum()
+    assert projected.state == "complete"
+    assert projected.compute() == Buffer(113, "plain").get_checksum()
     assert projected.value == 113
 
 

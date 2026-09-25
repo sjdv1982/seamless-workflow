@@ -289,9 +289,10 @@ def test_typed_source_constructions_agree(make_context):
     ctx.compute(timeout=10)
     checksum = Buffer('5', 'text').get_checksum()
     expression_cell = Cell('text', source=upstream.build())
-    assert expression_cell.checksum is None
+    # cells.md §Reads, Laziness: inspection is passive, and a read pulls the
+    # whole cheap chain, evaluating the upstream Expression.
     assert expression_cell.state == 'waiting'
-    expression_cell.compute()
+    assert expression_cell.checksum == checksum
     for cell in (Cell('text', source=upstream), expression_cell, ctx.connected,
                  ctx.rewired, ctx.downstream):
         _check_reads(cell, '5', checksum)
