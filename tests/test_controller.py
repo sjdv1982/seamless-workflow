@@ -25,7 +25,7 @@ def test_configuration_is_snapshot_and_mapping_updates_are_validated():
     ctx = Context()
     try:
         from seamless_transformer import delayed
-        ctx.tf = delayed('result = a', 'python')
+        ctx.tf = delayed('result = a')
         ctx.tf.celltypes.a = int
         assert ctx.tf.celltypes.a == 'int'
         with pytest.raises(TypeError):

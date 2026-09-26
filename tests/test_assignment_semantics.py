@@ -112,7 +112,7 @@ def test_setting_cell_none_clears_checksum_and_unwires_downstream(make_context, 
     assert ctx.out.state == "blocked"
     assert ctx.out.block_reason == "blocked-by-unwired"
     assert ctx.echo.state == "blocked"
-    assert ctx.echo.block_reason == ["x"]
+    assert ctx.echo.block_reason == {"x": "blocked-by-unwired"}
 
     ctx.a.set(value)
     ctx.compute(timeout=10)

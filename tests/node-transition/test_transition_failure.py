@@ -62,7 +62,7 @@ def test_a_failing_transformer_is_failed_and_its_cone_is_blocked_by_error():
     assert ctx.fail.result.checksum is None
 
     assert ctx.tail.state == "blocked", states(ctx)
-    assert ctx.tail.block_reason == ["x"]
+    assert ctx.tail.block_reason == {"x": "blocked-by-error"}
     assert ctx.tail.result.checksum is None
 
     assert ctx.out.state == "blocked", states(ctx)
@@ -85,9 +85,9 @@ def test_the_error_reason_survives_a_second_hop():
 
     compute_or_settle(ctx)
 
-    assert ctx.tail.block_reason == ["x"], states(ctx)
+    assert ctx.tail.block_reason == {"x": "blocked-by-error"}, states(ctx)
     assert ctx.out.block_reason == "blocked-by-error", states(ctx)
-    assert ctx.further.block_reason == ["x"], states(ctx)
+    assert ctx.further.block_reason == {"x": "blocked-by-error"}, states(ctx)
 
 
 @pytest.mark.a4
@@ -102,12 +102,12 @@ def test_only_the_failing_node_reports_the_exception():
 
     compute_or_settle(ctx)
 
-    assert isinstance(ctx.fail.exception, BaseException)
+    assert isinstance(ctx.fail.exception, str)
     assert "boom" in str(ctx.fail.exception)
     assert ctx.tail.exception is None
     assert ctx.fail.state == "failed"
     assert ctx.tail.state == "blocked"
-    assert ctx.tail.block_reason == ["x"]
+    assert ctx.tail.block_reason == {"x": "blocked-by-error"}
 
 
 @pytest.mark.a4

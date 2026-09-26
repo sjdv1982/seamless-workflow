@@ -62,8 +62,17 @@ def test_fresh_handle_state_is_passive_and_local(make_context):
     assert ctx.a["x"].state == "waiting"
 
 
-@ahead("Reads, Anonymous and projection handles", "a projection of an unwired parent reports the parent's unwired state, and compute()/run() raise NodeError")
-@pytest.mark.parametrize("operation", ["checksum", "compute", "compute-timeout", "run"])
+_UNWIRED_PARENT_NODE_ERROR = ahead(
+    "Reads, Anonymous and projection handles",
+    "over an unwired parent, compute()/run() on a bound projection raise NodeError instead of returning None")
+
+
+@pytest.mark.parametrize("operation", [
+    "checksum",
+    pytest.param("compute", marks=_UNWIRED_PARENT_NODE_ERROR),
+    pytest.param("compute-timeout", marks=_UNWIRED_PARENT_NODE_ERROR),
+    pytest.param("run", marks=_UNWIRED_PARENT_NODE_ERROR),
+])
 def test_handle_without_parent_checksum_returns_none_without_raising(make_context, operation):
     ctx = make_context()
     ctx.u = Cell("plain")
@@ -78,7 +87,42 @@ def test_handle_without_parent_checksum_returns_none_without_raising(make_contex
         result = handle.run()
     assert result is None
     assert handle.exception is None
-    assert handle.state == "waiting"
+    # Over an *unwired* parent, whether the handle reports `unwired` or `waiting` is deferred
+    # (cells.md *Open questions*, "Handle state over an unwired parent"); pin neither.
+    assert handle.state in ("waiting", "unwired")
+
+
+@ahead("Reads, Anonymous and projection handles", "compute() on a bound projection waits on the parent "
+       "node's barrier instead of returning None while the parent has no checksum")
+def test_handle_compute_never_waits_on_a_progressing_parent(make_context, monkeypatch):
+    import asyncio
+    import time
+    from threading import Event
+    from seamless.checksum import expression as expression_module
+
+    ctx = make_context()
+    _plain(ctx, name="src", value={"a": {"x": 1}})
+    entered, release = Event(), Event()
+    original = expression_module._evaluate_expression_async
+
+    async def gated(*args, **kwargs):
+        entered.set()
+        await asyncio.to_thread(release.wait, 15)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(expression_module, "_evaluate_expression_async", gated)
+    try:
+        ctx.p = ctx.src["a"]
+        assert entered.wait(5)
+        assert ctx.p.state == "waiting"
+        handle = ctx.p["x"]
+        start = time.monotonic()
+        assert handle.compute(timeout=5) is None
+        assert time.monotonic() - start < 2
+        assert handle.checksum is None
+        assert handle.exception is None
+    finally:
+        release.set()
 
 
 @ahead("Reads, Anonymous and projection handles", "a missing bound projection raises ExpressionEvaluationError instead of recording on the handle")
@@ -209,7 +253,7 @@ def _iadd(x):
     pytest.param("value", marks=ahead("Writes through a handle", "bound as_celltype returns a standalone snapshot whose declare-family writes detach")),
     pytest.param("buffer", marks=ahead("Writes through a handle", "bound as_celltype returns a standalone snapshot whose declare-family writes detach")),
     pytest.param("checksum", marks=ahead("Writes through a handle", "bound as_celltype returns a standalone snapshot whose declare-family writes detach")),
-    pytest.param("iadd", marks=ahead("Writes through a handle", "bound as_celltype returns a standalone snapshot; += raises TypeError")),
+    "iadd",
 ])
 def test_writes_through_an_as_celltype_handle_raise_authority_error(make_context, form):
     ctx = make_context()
@@ -225,13 +269,15 @@ def test_writes_through_an_as_celltype_handle_raise_authority_error(make_context
 
 # --- Binding and assignment of handles -------------------------------------------------
 
-@ahead("Binding", "a bound projection handle is captured like any endpoint")
+@ahead("Binding", "Cell(source=<handle>) is accepted instead of raising DependencyError")
 @pytest.mark.parametrize("kind", ["projection", "as_celltype"])
 def test_anonymous_handle_cannot_be_a_standalone_source(make_context, kind):
+    """Clarity ruling (2026-09-26): capture of an anonymous/projection handle raises DependencyError."""
+    from seamless_workflow.errors import DependencyError
     ctx = make_context()
     _plain(ctx)
     handle = ctx.a["x"] if kind == "projection" else ctx.a.as_celltype("mixed")
-    with pytest.raises(TypeError):
+    with pytest.raises(DependencyError):
         Cell(source=handle)
 
 
@@ -242,14 +288,20 @@ def test_named_bound_node_remains_a_valid_standalone_source(make_context):
     assert Cell(source=ctx.a).value == {"x": 1, "y": [1, 2]}
 
 
-@ahead("Binding", "a cross-Context handle assignment raises DependencyError (not a TypeError); a bound as_celltype cannot be bound at all")
-@pytest.mark.parametrize("kind", ["projection", "as_celltype"])
+@pytest.mark.parametrize("kind", [
+    "projection",
+    pytest.param("as_celltype", marks=ahead(
+        "Binding", "a bound as_celltype is a standalone snapshot: assigning it anywhere raises "
+                   "TypeError('Cannot bind a Cell whose input_ref is Expression')")),
+])
 def test_anonymous_handle_cannot_be_assigned_into_another_context(make_context, kind):
+    """Clarity ruling (2026-09-26): cross-Context assignment of a handle raises DependencyError, as for named nodes."""
+    from seamless_workflow.errors import DependencyError
     ctx = make_context()
     _plain(ctx)
     other = make_context()
     handle = ctx.a["x"] if kind == "projection" else ctx.a.as_celltype("mixed")
-    with pytest.raises(TypeError):
+    with pytest.raises(DependencyError):
         other.z = handle
     # Assigning it into its own Context instead is the valid spelling.
     ctx.own = handle
@@ -280,7 +332,7 @@ def test_assigning_to_a_new_name_takes_the_anonymous_node_over(make_context):
     # x is now a handle to a: a later assignment of x is `ctx.d = ctx.a`.
     ctx.d = x
     edges = ctx.get_graph()["connections"]
-    assert any(edge["target"] == ["d"] and edge["source"] in (["a"], {"node": ["a"]}) for edge in edges)
+    assert any(edge["target"] == ["d"] and edge["source"] == {"node": ["a"]} for edge in edges)
 
 
 @ahead("Connecting, Assigning an anonymous handle", "no anonymous nodes, symbols or renaming")

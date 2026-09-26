@@ -1,10 +1,22 @@
 """Contract tests: contracts/internal/checksum-reference-lifecycle.md (feature 9),
 Context claims and scratch.
 
+Ruling (contract-clarity-rulings.md, "Rulings requested by coverage subagents"):
+"Claims held for scratch nodes must not publish." That covers every claim the
+Context holds for a scratch node: its current and superseded results, a copied
+node's result, a scratch cell's literal, and a scratch transformer's pin, code
+and module claims.
+
 §1 *Neutral claim*: a Context's snapshot and in-flight leases are neutral claims
 (protect, never publish, never change scratch status); a Context node's claim on
 its current result follows the node's scratch policy. §8: only a non-scratch
 owner publishes, and persistence is a property of who holds.
+
+§10 gaps pinned here (xfail): superseded hold, subcontext copy
+(``_copy_subcontext``), literal claim (``_retain_producer``), pin/code claims and
+module claims of a scratch node. The ruling also covers
+``anonymous:<symbol>:current``, which cannot be exercised until anonymous nodes
+exist (see test_contract_reference_lifecycle_anonymous.py).
 """
 
 from __future__ import annotations
@@ -18,7 +30,8 @@ from seamless.caching import buffer_writer
 from seamless.caching.buffer_cache import get_buffer_cache
 from seamless_workflow import Context
 
-DOC = "internal/checksum-reference-lifecycle.md"
+DOC = "checksum-reference-lifecycle.md"
+RULING = "(ruling: claims held for scratch nodes must not publish)"
 
 
 @pytest.fixture
@@ -81,9 +94,9 @@ def test_node_current_claim_follows_the_cell_scratch_policy(writes, scratch):
 
 @pytest.mark.xfail(
     strict=False,
-    reason=f"{DOC} §1/§8: a superseded hold on a scratch node must not publish; "
-    "context.py superseded roles use incref_refholder() (scratch=False), which "
-    "writes the result and clears its scratch status",
+    reason=f"{DOC} §1/§6 {RULING}: contract ahead of code: the superseded role is "
+    "acquired with incref_refholder() (scratch=False), which writes the result and "
+    "clears its scratch status",
 )
 def test_superseded_hold_on_a_scratch_node_neither_publishes_nor_clears_scratch(writes):
     cache = get_buffer_cache()
@@ -107,9 +120,9 @@ def test_superseded_hold_on_a_scratch_node_neither_publishes_nor_clears_scratch(
 
 @pytest.mark.xfail(
     strict=False,
-    reason=f"{DOC} §1/§8: a copied node's current claim follows the node policy; "
-    "Context._copy_subcontext claims current_checksum with incref_refholder() "
-    "(scratch=False) and publishes a scratch node's result",
+    reason=f"{DOC} §1/§6 {RULING}: contract ahead of code: "
+    "Context._copy_subcontext claims the copied current_checksum with "
+    "incref_refholder() (scratch=False) and publishes the scratch node's result",
 )
 def test_subcontext_copy_of_a_scratch_node_does_not_publish(writes):
     ctx = Context()
@@ -127,5 +140,89 @@ def test_subcontext_copy_of_a_scratch_node_does_not_publish(writes):
         ctx.compute(timeout=10)
         assert ctx._graph.nodes[("sub2", "dst")].cell_config.scratch is True
         assert checksum not in writes, "copying a scratch node published its result"
+    finally:
+        ctx._release_refholds()
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=f"{DOC} §1/§6 {RULING}: contract ahead of code: the cell:<path>:literal "
+    "role is acquired with incref_refholder() (scratch=False) regardless of "
+    "Cell.scratch, so a scratch cell's literal is published",
+)
+def test_a_scratch_cell_literal_claim_does_not_publish(writes):
+    ctx = Context()
+    try:
+        ctx.a = Cell("text")
+        ctx.a.scratch = True
+        ctx.a.set(_unique_text())
+        ctx.compute(timeout=10)
+        checksum = ctx.a.checksum
+        assert checksum is not None
+        assert checksum not in writes, "a scratch cell's literal claim published"
+    finally:
+        ctx._release_refholds()
+
+
+def _suffix(word):
+    return word + "-out"
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=f"{DOC} §1/§6 {RULING}: contract ahead of code: the transformer:<path>:pin "
+    "and transformer:<path>:code roles are acquired with incref_refholder() "
+    "(scratch=False) regardless of the transformer's scratch, so they publish",
+)
+def test_a_scratch_transformer_pin_and_code_claims_do_not_publish(writes):
+    from seamless.transformer import delayed
+
+    builder = delayed(_suffix)
+    builder.local = True
+    ctx = Context()
+    try:
+        ctx.tf = builder
+        ctx.tf.scratch = True
+        ctx.tf.pins.word = _unique_text()
+        ctx.compute(timeout=20)
+        claims = {
+            role: checksum
+            for checksum, role in ctx._refheld_checksums()
+            if role.startswith("transformer:tf:")
+        }
+        assert {"transformer:tf:pin:word", "transformer:tf:code"} <= set(claims)
+        published = [role for role, checksum in claims.items() if checksum in writes]
+        assert published == [], f"claims for a scratch transformer published: {published}"
+        result = ctx._graph.nodes[("tf",)].current_checksum
+        assert result is not None and result not in writes
+    finally:
+        ctx._release_refholds()
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=f"{DOC} §1/§6/§10 {RULING}: contract ahead of code: the "
+    "transformer:<path>:module:<name> role is acquired with incref_refholder() "
+    "(scratch=False, context.py:637) regardless of the transformer's scratch, so a "
+    "locally present module buffer is published",
+)
+def test_a_scratch_transformer_module_claim_does_not_publish(writes):
+    from seamless.transformer import delayed
+
+    cache = get_buffer_cache()
+    builder = delayed(_suffix)
+    builder.local = True
+    module = Buffer(f"# scratch-module-{uuid.uuid4().hex}\n".encode())
+    checksum = module.get_checksum()
+    cache.tempref(checksum, buffer=module)  # the buffer is here to be written
+    ctx = Context()
+    try:
+        ctx.tf = builder
+        ctx.tf.scratch = True
+        ctx.tf.modules.example = checksum
+        assert (checksum, "transformer:tf:module:example") in tuple(
+            ctx._refheld_checksums()
+        ), "precondition: the Context holds the module claim"
+        assert checksum not in writes, "a scratch transformer's module claim published"
     finally:
         ctx._release_refholds()

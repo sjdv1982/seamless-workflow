@@ -161,6 +161,85 @@ def test_superseded_result_is_held_until_deterministic_cap_and_prune(monkeypatch
     assert get_buffer_cache().reference_snapshot().get(records[0].result_checksum, (0, 0, False))[0] == 0
 
 
+def _superseded_role_ends_at_the_deadline(ctx, node_path, set_first, set_second):
+    """Drive one supersession and wait (no prune(), no cap overflow) for the
+    self-edit hold timer to end the superseded role."""
+    import time as _time
+
+    ctx._runtime.scheduler.self_edit_hold_seconds = 0.3
+    set_first()
+    ctx.compute(timeout=20)
+    first = ctx._graph.nodes[node_path].current_checksum
+    set_second()
+    ctx.compute(timeout=20)
+    role = next(
+        (r for cs, r in ctx._refheld_checksums() if cs == first and ":superseded:" in r),
+        None,
+    )
+    assert role is not None, "precondition: the old result is under a superseded hold"
+    assert get_buffer_cache().reference_snapshot()[first][0] >= 1
+    for _ in range(30):
+        _time.sleep(0.1)
+        ctx.compute(timeout=10)
+        if not any(r == role for _cs, r in ctx._refheld_checksums()):
+            break
+    else:
+        raise AssertionError(f"{role} outlived its hold deadline")
+    remaining = len(collect_refholder_claims([ctx]).get(first, []))
+    assert get_buffer_cache().reference_snapshot().get(first, (0, 0, False))[0] == remaining
+
+
+def _deadline_suffix(word):
+    return word + "-deadline"
+
+
+def test_superseded_transformer_claim_ends_at_the_hold_deadline():
+    """checksum-reference-lifecycle.md §6: superseded roles end on the cap, the
+    deadline, prune(), ... — the deadline case, which §10 lists as uncovered."""
+    from seamless.transformer import delayed
+
+    builder = delayed(_deadline_suffix)
+    builder.local = True
+    ctx = Context()
+    try:
+        ctx.tf = builder
+
+        def first():
+            ctx.tf.pins.word = _unique("deadline-first")
+
+        def second():
+            ctx.tf.pins.word = _unique("deadline-second")
+
+        _superseded_role_ends_at_the_deadline(ctx, ("tf",), first, second)
+    finally:
+        ctx._release_refholds()
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="checksum-reference-lifecycle.md §6 (superseded roles end on ... the "
+    "deadline): contract ahead of code (scope unconfirmed: the page does not "
+    "distinguish node kinds): a cell node is superseded through "
+    "ContextRuntime.supersede() from Context._update_runtime, which stamps a "
+    "hold_deadline but schedules no _expire_run timer (only Reactive._suspend, the "
+    "transformer path, does), so a cell's superseded claim ends only on the cap, "
+    "prune(), deletion or cleanup",
+)
+def test_superseded_cell_claim_ends_at_the_hold_deadline():
+    ctx = Context()
+    try:
+
+        def first():
+            ctx.value = {"token": _unique("deadline-first")}
+
+        def second():
+            ctx.value = {"token": _unique("deadline-second")}
+
+        _superseded_role_ends_at_the_deadline(ctx, ("value",), first, second)
+    finally:
+        ctx._release_refholds()
+
+
 def test_namespace_deletion_and_graph_copy_keep_independent_claims(monkeypatch):
     ctx = Context()
     ctx.sub = Context()

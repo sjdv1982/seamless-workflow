@@ -44,7 +44,7 @@ def test_initial_file_and_strict_authority_rows(tmp_path):
         ctx.strict = Cell(celltype="text"); ctx.strict.set("kept")
         ctx.strict.mount(strict, authority="file-strict")
         assert ctx.strict.state == "failed"
-        assert isinstance(ctx.strict.exception, MountError)
+        assert isinstance(ctx.strict.exception, str) and isinstance(ctx.strict.mount.status["sense_error"], MountError)
 
 
 def test_set_graph_mount_uses_same_missing_file_policy(tmp_path):
@@ -63,7 +63,7 @@ def test_strict_missing_without_cell_value_stores_hidden_null(tmp_path):
     path = tmp_path / "strict.txt"
     with Context() as ctx:
         ctx.value = Cell(celltype="text"); ctx.value.mount(path, authority="file-strict")
-        assert ctx.value.state == "failed" and isinstance(ctx.value.exception, MountError)
+        assert ctx.value.state == "failed" and isinstance(ctx.value.exception, str) and isinstance(ctx.value.mount.status["sense_error"], MountError)
         graph_value = ctx.get_graph()["nodes"][0]["value"]["checksum"]
         from seamless.checksum.null import NULL_CHECKSUM
         assert graph_value == Checksum(NULL_CHECKSUM).hex()
@@ -112,7 +112,7 @@ def test_deleted_sensing_file_preserves_value_and_strict_fails(tmp_path):
         assert ctx.normal.value == "file"
         ctx.strict = Cell(celltype="text"); ctx.strict.mount(strict, authority="file-strict")
         strict.unlink(); ctx.mounts.sync(timeout=5)
-        assert ctx.strict.state == "failed" and isinstance(ctx.strict.exception, MountError)
+        assert ctx.strict.state == "failed" and isinstance(ctx.strict.exception, str) and isinstance(ctx.strict.mount.status["sense_error"], MountError)
 
 
 def test_file_changes_empty_valid_and_invalid(tmp_path):
@@ -124,7 +124,7 @@ def test_file_changes_empty_valid_and_invalid(tmp_path):
         path.write_text('{"a": 2}'); ctx.mounts.sync(timeout=5)
         assert ctx.value.value == {"a": 2}
         path.write_text("broken"); ctx.mounts.sync(timeout=5)
-        assert ctx.value.state == "failed" and isinstance(ctx.value.exception, MountError)
+        assert ctx.value.state == "failed" and isinstance(ctx.value.exception, str) and isinstance(ctx.value.mount.status["sense_error"], MountError)
         path.unlink(); ctx.mounts.sync(timeout=5)
         assert ctx.value.value == {"a": 2}
 

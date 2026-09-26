@@ -6,6 +6,12 @@ test_mount_transport.py and test_cell_semantics.py are here.
 
 Settled: ``Cell.exception`` is a string (register §2 item 5, implemented);
 ``ctx.a.mount.error`` and ``status['sense_error']`` stay exception objects.
+
+Every entry of mounts.md *Implementation status* is pinned here by an
+``xfail(strict=False)`` test (NodeError unreachability, the same-celltype builder,
+graph format 0.5). Three further contract-ahead-of-code gaps that mounts.md does
+not list (python syntax check, the standalone-Cell message, node deletion waiting
+for cleanup) are pinned the same way, with the omission named in the reason.
 """
 import gzip
 import os
@@ -114,6 +120,26 @@ def test_status_keys_and_values(tmp_path):
         assert status['sense_error'] is None and status['error'] is None
 
 
+def test_exception_is_a_string_while_sense_error_and_error_are_objects(tmp_path):
+    # *status*: "sense_error and error are Exception objects, while Cell.exception
+    # is a string -- the same MountError, rendered with its "<path>: <reason>" prefix".
+    # Also: node_checksum is None when the node is not complete.
+    p = tmp_path / 'a.json'; p.write_text('broken')
+    with Context() as c:
+        c.a = Cell(celltype='plain'); c.a.mount(p, mode='r')
+        status = c.a.mount.status
+        assert type(c.a.exception) is str
+        assert isinstance(status['sense_error'], MountError)
+        assert c.a.exception == str(status['sense_error'])
+        assert c.a.exception.startswith(f'{p}: ')
+        assert status['node_checksum'] is None and status['in_sync'] is False
+        # the other object: a delivery error on the mount, not on the cell
+        c.w = Cell(celltype='text'); c.w.set('v')
+        c.w.mount(tmp_path / 'missing-dir' / 'w.txt', mode='w')
+        assert isinstance(c.w.mount.error, MountError) and isinstance(c.w.mount.status['error'], MountError)
+        assert c.w.exception is None
+
+
 # --- Errors table ------------------------------------------------------------
 
 @pytest.mark.parametrize('kwargs,exc,match', [
@@ -166,41 +192,83 @@ def test_deepfolder_default_mode_message_names_both_remedies(tmp_path):
 def test_already_mounted_is_value_error(tmp_path):
     with Context() as c:
         c.a = Cell(celltype='text'); c.a.set('x'); c.a.mount(tmp_path / 'a.txt')
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match='Cell is already mounted; unmount first'):
             c.a.mount(tmp_path / 'b.txt')
         assert c.a.mount.spec.path == str(tmp_path / 'a.txt')
 
 
-@pytest.mark.xfail(strict=False, reason="mounts.md \u00a7Errors: NodeError for a missing node is unreachable "
-                   "publicly; ctx.missing is a MissingView and ctx.missing.mount(...) raises TypeError")
+_NODE_ERROR_GAP = ("mounts.md *Implementation status*: NodeError('Mounts require an existing whole cell "
+                   "node') is unreachable through the public API; the check exists only inside the "
+                   "controller (AttachmentRuntime). ")
+
+
+@pytest.mark.xfail(strict=False, reason=_NODE_ERROR_GAP + "ctx.missing is a MissingView, so "
+                   "ctx.missing.mount(...) raises TypeError ('MissingView' object is not callable)")
 def test_node_error_for_missing_node(tmp_path):
     with Context() as c:
-        with pytest.raises(NodeError):
-            c.missing.mount(tmp_path / 'b')
-
-
-@pytest.mark.xfail(strict=False, reason="mounts.md \u00a7Errors: NodeError for a non-cell node is unreachable "
-                   "publicly; a transformer handle has no .mount attribute (AttributeError)")
-def test_node_error_for_non_cell_node(tmp_path):
-    def f(x):
-        return x
-    with Context() as c:
-        c.tf = f
-        with pytest.raises(NodeError):
-            c.tf.mount(tmp_path / 'a')
-
-
-def test_mount_on_non_cell_or_missing_node_is_refused(tmp_path):
-    # What the code does today for the two NodeError rows: refused, nothing attached.
-    def f(x):
-        return x
-    with Context() as c:
-        c.tf = f
-        with pytest.raises((NodeError, AttributeError)):
-            c.tf.mount(tmp_path / 'a')
-        with pytest.raises((NodeError, TypeError)):
+        with pytest.raises(NodeError, match='Mounts require an existing whole cell node'):
             c.missing.mount(tmp_path / 'b')
         assert c.mounts.sync(timeout=1) == {}
+
+
+@pytest.mark.xfail(strict=False, reason=_NODE_ERROR_GAP + "a transformer handle has no mount member "
+                   "and raises AttributeError")
+def test_node_error_for_transformer_node(tmp_path):
+    def f(x):
+        return x
+    with Context() as c:
+        c.tf = f
+        with pytest.raises(NodeError, match='Mounts require an existing whole cell node'):
+            c.tf.mount(tmp_path / 'a')
+        assert c.mounts.sync(timeout=1) == {}
+
+
+@pytest.mark.xfail(strict=False, reason=_NODE_ERROR_GAP + "a stale handle raises StaleWorkflowHandleError")
+def test_node_error_for_stale_handle_to_deleted_node(tmp_path):
+    # *Errors*: NodeError when "the node does not exist".
+    with Context() as c:
+        c.a = Cell(celltype='text'); c.a.set('x'); handle = c.a
+        del c.a
+        with pytest.raises(NodeError, match='Mounts require an existing whole cell node'):
+            handle.mount(tmp_path / 'a')
+    assert not (tmp_path / 'a').exists()
+
+
+def test_node_error_check_exists_inside_the_controller():
+    # *Implementation status*: "The NodeError check exists only inside the
+    # controller (AttachmentRuntime)" -- the contract message is already there.
+    with Context() as c:
+        def f(x):
+            return x
+        c.tf = f
+        spec = AttachmentSpec('x', 'rw', 'file')
+        for path in (('missing',), ('tf',)):
+            with pytest.raises(NodeError, match='^Mounts require an existing whole cell node$'):
+                c._controller.call('_mount_validate', path, spec, klass=4)
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "mounts.md *Errors*: a standalone Cell raises AttributeError('mount is only available for bound "
+    "workflow cells'). Contract ahead of code, NOT listed in mounts.md's Implementation status "
+    "(attachments.md tracks it): Cell.__getattr__ swallows the property's message and re-raises a bare "
+    "AttributeError('mount')"))
+def test_standalone_cell_mount_message():
+    with pytest.raises(AttributeError, match='^mount is only available for bound workflow cells$'):
+        Cell().mount('x')
+
+
+def test_read_only_transformer_result_cannot_be_mounted(tmp_path):
+    # *Errors*: "a read-only handle, including a transformer's result ctx.tf.result
+    # -- AttributeError("Only whole Context cell nodes can be mounted")".
+    def f(x):
+        return x
+    with Context() as c:
+        c.tf = f; c.tf.pins.x = 1
+        c.compute(timeout=30)
+        with pytest.raises(AttributeError, match='^Only whole Context cell nodes can be mounted$'):
+            c.tf.result.mount(tmp_path / 'r')
+        assert c.mounts.sync(timeout=1) == {}
+    assert not (tmp_path / 'r').exists()
 
 
 def test_sensing_mount_on_connected_node_is_authority_error(tmp_path):
@@ -216,6 +284,34 @@ def test_sensing_mount_on_connected_node_is_authority_error(tmp_path):
         assert (tmp_path / 'w.txt').read_text() == 'x\n'
 
 
+@pytest.mark.parametrize('mode', ['r', 'w', 'rw'])
+def test_retyping_a_mounted_cell_is_refused_in_every_mode(tmp_path, mode):
+    # *Canonical bytes*: "Retyping while mounted is refused" -- whatever the
+    # mount mode (cells-RULINGS.md round 8, item 4).
+    with Context() as c:
+        c.a = Cell(celltype='text'); c.a.set('x'); c.a.mount(tmp_path / 'a', mode=mode)
+        with pytest.raises(ValueError, match='Mounted celltype cannot change; unmount first'):
+            c.a.celltype = 'bytes'
+        with pytest.raises(ValueError, match='Mounted celltype cannot change; unmount first'):
+            c.a = Cell(celltype='bytes')
+        assert c.a.celltype == 'text' and c.a.mount.spec is not None
+
+
+def test_subpath_projection_cannot_be_mounted(tmp_path):
+    # attachments.md *Scope*: a sub-path projection gives
+    # AttributeError("Only whole Context cell nodes can be mounted").
+    # (Whether a bound as_celltype handle may be mounted, and with which error,
+    # is not stated by the contract, so it is not pinned here.)
+    with Context() as c:
+        c.a = {'k': 'v'}
+        with pytest.raises(AttributeError, match='Only whole Context cell nodes can be mounted'):
+            c.a['k'].mount(tmp_path / 'p')
+        with pytest.raises(AttributeError, match='Only whole Context cell nodes can be mounted'):
+            c.a.k.mount(tmp_path / 'q')
+        assert c.mounts.sync(timeout=1) == {}
+    assert not (tmp_path / 'p').exists() and not (tmp_path / 'q').exists()
+
+
 def test_clearing_a_mounted_cell_is_refused_in_every_mode(tmp_path):
     # Errors: AuthorityError clearing a mounted cell; the refusal fires
     # regardless of mode (register Appendix C, false design statements).
@@ -228,15 +324,39 @@ def test_clearing_a_mounted_cell_is_refused_in_every_mode(tmp_path):
             assert c.a.mount.spec is not None
 
 
-def test_unmounted_cell_handle_answers_none_and_clear_error_raises_key_error():
-    # mounts.md *Implementation status*: .spec/.status/.error answer None and
-    # `del ctx.a.mount` is a silent no-op, while clear_error() raises KeyError.
+@pytest.mark.xfail(strict=False, reason=(
+    "mounts.md *Implementation status*: 'An empty same-celltype builder keeps the mount.' "
+    "ctx.a = Cell(celltype=<same>) on a mounted cell clears the value but leaves the spec, "
+    "status and session attached, and get_graph() still writes the mount entry"))
+@pytest.mark.parametrize('mode', ['r', 'w', 'rw'])
+def test_same_celltype_empty_builder_unmounts_and_clears(tmp_path, mode):
+    # *Unmount, persistence and close* / *Errors*: "ctx.a = Cell(celltype=<same>)
+    # is not refused: it unmounts and clears ... spec, status and session removed,
+    # no mount entry in get_graph() -- and leaves the cell with no value. A
+    # persistent file is left untouched." (Whether a persistent=False file is
+    # deleted on this path is deferred and not pinned.)
+    p = tmp_path / 'a.txt'; p.write_text('value\n')
+    with Context() as c:
+        c.a = Cell(celltype='text'); c.a.set('value')
+        c.a.mount(p, mode=mode); c.mounts.sync(timeout=5)
+        c.a = Cell(celltype='text')                   # not refused
+        assert c.a.mount.spec is None and c.a.mount.status is None
+        assert 'mount' not in c.get_graph()['nodes'][0]
+        assert c.a.checksum is None
+        assert c.mounts.sync(timeout=5) == {}
+        assert p.read_text() == 'value\n'
+        c.a = 'later'; c.compute(timeout=10)
+        p.write_text('edited\n'); time.sleep(0.5)
+        assert c.a.value == 'later' and p.read_text() == 'edited\n'
+
+
+def test_unmounted_cell_handle_answers_none():
+    # mounts.md *The API*: spec "or None", status "None on an unmounted cell",
+    # error "or None". (clear_error()'s KeyError and the silent `del` are recorded
+    # as an inconsistency, not a designed behaviour, so they are not pinned.)
     with Context() as c:
         c.a = Cell(celltype='text'); c.a.set('x')
         assert c.a.mount.spec is None and c.a.mount.status is None and c.a.mount.error is None
-        del c.a.mount
-        with pytest.raises(KeyError):
-            c.a.mount.clear_error()
 
 
 # --- The initial decision table ------------------------------------------------
@@ -480,14 +600,49 @@ def test_emptied_directory_reads_as_empty_index(tmp_path):
         assert c.a.value == {} and c.a.checksum != Checksum(NULL_CHECKSUM)
 
 
-@pytest.mark.xfail(strict=False, reason="mounts.md \u00a7Mountable celltypes: 'Code text is not syntax-checked' "
-                   "is false for python -- the python celltype's HashType validation parses the code, on "
-                   "assignment and on mount alike")
-def test_code_text_file_is_not_syntax_checked(tmp_path):
-    p = tmp_path / 'code.py'; p.write_text('def (:\n')
+_SYNTAX_GAP = ("mounts.md *Mountable celltypes* / *Canonical bytes*: code text is checked by the celltype's "
+               "parser, so a python (or yaml) file that fails to parse is `rejected` and becomes a sense "
+               "error, and ctx.a.set('def (:\\n') raises HashTypeValidationError. Contract ahead of code, and "
+               "NOT listed in mounts.md's Implementation status: canon_T skips the parser for all four code "
+               "celltypes and set() serializes without a syntax check, so both leave the cell 'complete'; "
+               "ast.parse only runs when .value is read")
+
+
+@pytest.mark.xfail(strict=False, reason=_SYNTAX_GAP)
+def test_python_assignment_with_syntax_error_raises():
+    # *Canonical bytes*: "ctx.a.set("def (:\n") raises HashTypeValidationError".
+    from seamless.checksum.hash_type_validation import HashTypeValidationError
     with Context() as c:
-        c.a = Cell(celltype='python'); c.a.mount(p, mode='r')
-        assert c.a.state == 'complete' and c.a.value == 'def (:\n'
+        c.a = Cell(celltype='python')
+        with pytest.raises(HashTypeValidationError):
+            c.a.set('def (:\n')
+
+
+@pytest.mark.xfail(strict=False, reason=_SYNTAX_GAP)
+@pytest.mark.parametrize('celltype,bad,good', [('python', 'def (:\n', 'x = 1\n'),
+                                               ('yaml', 'a: [broken\n', 'a: [1]\n')])
+def test_code_text_syntax_error_is_a_sense_error(tmp_path, celltype, bad, good):
+    # *Canonical bytes*: "a mounted python file with that content is rejected and
+    # becomes a sense error. A syntax error is thus a sense error on the mounted
+    # cell, not something that surfaces only in the transformer that runs the code."
+    # Mounts never give up: fixing the file recovers the cell.
+    p = tmp_path / 'code'; p.write_text(bad)
+    with Context() as c:
+        c.a = Cell(celltype=celltype); c.a.mount(p, mode='r')
+        _assert_sense_error(c.a)
+        assert c.a.mount.status['disk_checksum'] == INVALID
+        assert c.a.mount.status['node_checksum'] is None
+        p.write_text(good); c.mounts.sync(timeout=5)
+        assert c.a.state == 'complete' and c.a.exception is None
+
+
+@pytest.mark.xfail(strict=False, reason=_SYNTAX_GAP)
+def test_canon_t_rejects_unparsable_python():
+    # *Canonical bytes*: canon_T(bytes) = serialize(deserialize(bytes, T), T);
+    # "If deserialization raises, the observation is rejected".
+    from seamless.checksum.canonical import canon_T
+    with pytest.raises(ValueError):
+        canon_T(b'def (:\n', 'python')
 
 
 @pytest.mark.parametrize('celltype,content', [('python', 'def (:\n'), ('yaml', 'a: [broken\n'),
@@ -641,6 +796,14 @@ def test_detector_trip_stops_actuation_and_keeps_registration(tmp_path):
             p.write_text(f'theirs{n}'); c.mounts.sync(timeout=5)
         assert c.a.mount.status['state'] == 'tripped'
         assert c.mounts.errors[('a',)] is c.a.mount.error
+        # "The file driver's error message names the path and the two alternating
+        # checksums" (the rest of the message is prose, per *Implementation status*).
+        from seamless_workflow.attachments import ConflictError
+        err = c.a.mount.error
+        assert isinstance(err, ConflictError)
+        ours = Buffer('ours', 'text').get_checksum().hex()
+        assert str(p) in str(err) and ours in str(err)
+        assert sum(len(tok.strip('(),')) == 64 for tok in str(err).split()) >= 2
         c.a = 'newer'; c.mounts.sync(timeout=5)
         assert p.read_text() == 'theirs2'
         assert c.a.mount.spec is not None
@@ -732,6 +895,29 @@ def test_null_directory_reports_no_error(tmp_path):
         cs = _leaf(b'y')
         c.a = {'b': cs}; report = c.mounts.sync(timeout=5)
         assert report.in_sync
+
+
+def test_transformer_cannot_produce_a_null_folder(tmp_path):
+    # *Null on a directory mount is terminal*: "a transformation whose result is
+    # None for a folder result celltype fails with RuntimeError("Null result is not
+    # allowed for celltype 'folder'"), so the transformer is failed and its result
+    # cell never completes." A w-mounted downstream folder therefore writes nothing.
+    def returns_none():
+        return None
+    p = tmp_path / 'out'
+    with Context() as c:
+        c.tf = returns_none; c.tf.celltypes.result = 'folder'
+        c.out = Cell(celltype='folder'); c.out = c.tf
+        c.out.mount(p, mode='w')
+        c.compute(timeout=30)
+        assert c.tf.state == 'failed'
+        assert "RuntimeError" in c.tf.exception
+        assert "Null result is not allowed for celltype 'folder'" in c.tf.exception
+        assert c.tf.result.state != 'complete'
+        assert c.out.state != 'complete' and c.out.checksum is None
+        status = c.out.mount.status
+        assert status['node_checksum'] is None and status['error'] is None
+        assert not p.exists()
 
 
 # --- sync() report ------------------------------------------------------------
@@ -844,6 +1030,62 @@ def test_set_graph_never_deletes_non_persistent_file(tmp_path, reattach):
         assert (c.a.mount.spec is not None) == reattach
 
 
+@pytest.mark.xfail(strict=False, reason=(
+    "mounts.md *Unmount, persistence and close*: 'Node deletion waits in the same way' as unmount, so a "
+    "persistent=False file is gone when `del ctx.a` returns. Contract ahead of code, NOT listed in "
+    "mounts.md's Implementation status (attachments.md tracks it): _delete_subtree does not wait for the "
+    "unregister future"))
+def test_node_deletion_waits_for_transport_cleanup(tmp_path):
+    with Context() as c:
+        for n in range(5):
+            p = tmp_path / f'a{n}.txt'
+            c.a = Cell(celltype='text'); c.a.set('v'); c.a.mount(p, persistent=False)
+            assert p.exists()
+            del c.a
+            assert not p.exists()
+
+
+def test_service_close_deletes_nothing_and_restarts_lazily(tmp_path):
+    # *Unmount, persistence and close*: "The service close itself deletes nothing:
+    # it unregisters leftovers with deletion disabled (unregister(reg, delete=False)),
+    # so a non-persistent file whose Context was never closed survives ... a
+    # get_service() after a close starts a fresh one."
+    from seamless_workflow.attachments.fs.service import FileSystemService, close_service, get_service
+    p = tmp_path / 'a.txt'
+    calls = []
+    original = FileSystemService.unregister
+
+    def spy(self, reg, *, delete=False, expected=None):
+        calls.append(delete)
+        return original(self, reg, delete=delete, expected=expected)
+
+    c = Context()
+    try:
+        c.a = Cell(celltype='text'); c.a.set('v'); c.a.mount(p, persistent=False)
+        c.mounts.sync(timeout=5)
+        old = get_service()
+        FileSystemService.unregister = spy
+        try:
+            close_service()
+        finally:
+            FileSystemService.unregister = original
+        assert calls and not any(calls)
+        assert old.stopping.is_set()
+        assert p.read_text() == 'v\n'
+        assert not old.broker.is_alive()
+        assert all(t.daemon for t in (old.broker, *old.workers))
+        fresh = get_service()
+        assert fresh is not old and not fresh.stopping.is_set()
+    finally:
+        c.close(timeout=5)
+    # the new service works for a new Context
+    q = tmp_path / 'b.txt'
+    with Context() as c2:
+        c2.b = Cell(celltype='text'); c2.b.set('w'); c2.b.mount(q, mode='w')
+        c2.mounts.sync(timeout=5)
+        assert q.read_text() == 'w\n'
+
+
 # --- Path-overlap registry -------------------------------------------------------
 
 def test_non_persistent_directory_overlap_refused_even_read_only(tmp_path):
@@ -886,9 +1128,56 @@ def test_graph_mount_entry_is_normalized_spec(tmp_path):
         c.a = Cell(celltype='text'); c.a.set('v')
         c.a.mount(p, mode='rw', authority='cell', persistent=False)
         graph = c.get_graph()
-        assert graph['__seamless_workflow__'] == '0.4'
         assert graph['nodes'][0]['mount'] == {'path': str(p), 'mode': 'rw',
                                               'authority': 'cell', 'persistent': False}
+
+
+_FORMAT_05_GAP = ("mounts.md *Implementation status*: 'Graph format 0.5 has not landed.' get_graph() writes "
+                  "0.4 with no anonymous_nodes table, and set_graph() refuses 0.5 with PathError")
+
+
+def _mounted_graph(tmp_path):
+    with Context() as c:
+        c.a = Cell(celltype='text'); c.a.set('v'); c.a.mount(tmp_path / 'g.txt', mode='rw')
+        return c.get_graph()
+
+
+@pytest.mark.xfail(strict=False, reason=_FORMAT_05_GAP)
+def test_get_graph_writes_format_0_5_with_anonymous_nodes(tmp_path):
+    # *Graph serialization*: "The contract format is 0.5, which adds the top-level
+    # anonymous_nodes table"; the mount entry rides on the cell entry.
+    graph = _mounted_graph(tmp_path)
+    assert graph['__seamless_workflow__'] == '0.5'
+    assert graph['anonymous_nodes'] == {}
+    assert graph['nodes'][0]['mount']['mode'] == 'rw'
+
+
+@pytest.mark.xfail(strict=False, reason=_FORMAT_05_GAP)
+def test_set_graph_loads_a_format_0_5_graph_with_mounts(tmp_path):
+    graph = {**_mounted_graph(tmp_path), '__seamless_workflow__': '0.5', 'anonymous_nodes': {}}
+    with Context() as c:
+        c.set_graph(graph, mounts=True)
+        assert c.a.mount.spec is not None and c.a.value == 'v'
+
+
+@pytest.mark.parametrize('version', ['0.2', '0.3', '0.4'])
+def test_older_graph_formats_load_with_mounts(tmp_path, version):
+    # *Graph serialization*: "0.2, 0.3 and 0.4 graphs load".
+    graph = {**_mounted_graph(tmp_path), '__seamless_workflow__': version}
+    with Context() as c:
+        c.set_graph(graph, mounts=True)
+        assert c.a.mount.spec.path == str(tmp_path / 'g.txt')
+        assert c.a.value == 'v'
+
+
+@pytest.mark.parametrize('version', ['99.0', '0.1', '1.0'])
+def test_unknown_graph_version_is_path_error(tmp_path, version):
+    # *Graph serialization*: PathError("Unsupported workflow graph version: ...").
+    graph = {**_mounted_graph(tmp_path), '__seamless_workflow__': version}
+    with Context() as c:
+        for mounts in (True, False):
+            with pytest.raises(PathError, match='^Unsupported workflow graph version: '):
+                c.set_graph(graph, mounts=mounts)
 
 
 def _graph_with_mount(tmp_path, celltype='text', **mount):

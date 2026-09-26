@@ -282,7 +282,7 @@ def test_projected_source_cannot_implicitly_convert(world, api):
     target = world.make("plain")
     target.set({"unchanged": True})
     world.settle(source, target)
-    with pytest.raises(TypeError, match="project"):
+    with pytest.raises(TypeError):  # message text: ruling-8 tests
         if api == "constructor":
             world.make("plain", source=source[3])
         else:
@@ -520,14 +520,15 @@ def test_one_shot_input_override_does_not_mutate_cell(world, method):
         hold.clear()
 
 
-@pytest.mark.parametrize("constructor", [
-    lambda cs: Cell("int", checksum=cs, source=Cell("int")),
-    lambda cs: Cell("int", source=cs),
-    lambda cs: Cell("int", source=Cell("text"), input_celltype="plain"),
+@pytest.mark.parametrize("constructor, error", [
+    (lambda cs: Cell("int", checksum=cs, source=Cell("int")), TypeError),
+    (lambda cs: Cell("int", source=cs), TypeError),
+    (lambda cs: Cell("int", source=Cell("text"), input_celltype="plain"), ValueError),
 ], ids=["checksum-and-source", "bare-checksum-as-source", "conflicting-typed-declaration"])
-def test_constructor_rejects_invalid_reference_declarations(world, constructor):
+def test_constructor_rejects_invalid_reference_declarations(world, constructor, error):
+    """cells.md §The definition: TypeError, TypeError naming checksum=, ValueError respectively."""
     checksum = Buffer(137, "int").get_checksum()
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(error):
         world.bind(constructor(checksum))
 
 
@@ -583,7 +584,8 @@ def test_build_aliases_snapshot_the_same_recipe(world):
     assert all(snapshot.run() == 157 for snapshot in snapshots)
 
 
-@gap("deep one-step paths bypass ordinary project-or-convert validation")
+@gap("§Deep celltypes on a Cell: a bound one-step projection keeps the parent's deep celltype "
+     "instead of the member celltype, so reading it raises 'Illegal deep path ... deepcell -> deepcell'")
 @pytest.mark.parametrize("celltype,member_type,value", [
     ("deepcell", "mixed", {"answer": 163}),
     ("deepfolder", "bytes", b"deep folder member"),
@@ -604,8 +606,12 @@ def test_deep_one_step_selects_member_checksum(world, celltype, member_type, val
             hold.clear()
 
 
-@pytest.mark.parametrize("celltype", celltypes + ["deepcell", "deepfolder", "folder", "module"])
+_NULL_ILLEGAL_TO_INT = ["python", "ipython", "deepcell", "deepfolder", "folder"]
+
+
+@pytest.mark.parametrize("celltype", [c for c in celltypes if c not in _NULL_ILLEGAL_TO_INT])
 def test_null_retype_keeps_checksum(world, celltype):
+    """cells.md §Null and None: null converts to itself, on legal conversion pairs only."""
     cell = world.make(celltype)
     cell.set(None)
     world.settle(cell)
@@ -620,7 +626,24 @@ def test_null_retype_keeps_checksum(world, celltype):
     assert cell.state == "complete"
 
 
-@gap("checksum-preserving conversion + path must fuse with the converted input_celltype")
+# `module` -> `int` is not specified anywhere, so it is pinned neither way.
+@pytest.mark.xfail(strict=False, reason=(
+    "cells.md §Null and None / clarity ruling (null short-circuits only on legal pairs): contract ahead of code: "
+    "the null checksum short-circuits the illegal conversion and the cell reports a complete NULL"))
+@pytest.mark.parametrize("celltype", _NULL_ILLEGAL_TO_INT)
+def test_null_retype_over_an_illegal_pair_fails(world, celltype):
+    cell = world.make(celltype)
+    cell.set(None)
+    world.settle(cell)
+    cell.celltype = "int"
+    world.settle(cell)
+    assert cell.checksum is None
+    assert cell.state == "failed"
+    assert isinstance(cell.exception, str) and cell.exception
+
+
+@gap("§Connecting, Fusion: checksum-preserving conversion + path must fuse with the converted input_celltype; today a bound as_celltype is a standalone snapshot, so binding the chain "
+     "raises 'Cannot bind a Cell whose input_ref is Expression'")
 def test_preserving_conversion_then_path_fuses(world):
     root = world.make("plain")
     root.set({"a": 173})
@@ -632,7 +655,8 @@ def test_preserving_conversion_then_path_fuses(world):
     assert actual.database_key == expected.database_key
 
 
-@gap("reformatting conversion + path must retain the converted buffer as input")
+@gap("§Connecting, Fusion: reformatting conversion + path must retain the converted buffer as input; today a bound as_celltype is a standalone snapshot, so binding the chain "
+     "raises 'Cannot bind a Cell whose input_ref is Expression'")
 def test_reformatting_conversion_then_path_does_not_fuse(world):
     root = world.make("str")
     root.set("word")
@@ -650,7 +674,8 @@ def test_reformatting_conversion_then_path_does_not_fuse(world):
         hold.clear()
 
 
-@gap("two conversions never fuse; text -> plain -> mixed differs from text -> mixed")
+@gap("§Connecting, Fusion: two conversions never fuse; text -> plain -> mixed differs from text -> mixed; today a bound as_celltype is a standalone snapshot, so binding the chain "
+     "raises 'Cannot bind a Cell whose input_ref is Expression'")
 def test_two_conversions_keep_the_intermediate_recipe(world):
     root = world.make("text")
     root.set("[1,2]")
@@ -670,7 +695,8 @@ def test_two_conversions_keep_the_intermediate_recipe(world):
         hold.clear()
 
 
-@gap("a deep step ends the fused run; child work is keyed by the member checksum")
+@gap("§Connecting, Fusion / §Deep celltypes on a Cell: a deep step ends the fused run; today a bound "
+     "one-step projection keeps the parent's deep celltype, so the chain raises 'Illegal deep path'")
 def test_deep_step_is_a_fusion_barrier(world):
     member = Buffer({"a": 179}, "mixed")
     indexes = [Buffer({key: member.get_checksum().hex()}, "plain") for key in ("first", "second")]

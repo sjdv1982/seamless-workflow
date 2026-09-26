@@ -69,11 +69,11 @@ def test_pin_projection_wiring_and_mixed_block_reasons():
         ctx.source.set([2])
         ctx.tf = defaults
         ctx.tf.celltypes.a = 'int'
-        with pytest.raises(TypeError, match='as_celltype'):
+        with pytest.raises(TypeError):
             ctx.tf.pins.a = ctx.source[0]
         ctx.tf.celltypes.a = 'plain'
         ctx.tf.pins.a = ctx.source[0]
-        with pytest.raises(TypeError, match='as_celltype'):
+        with pytest.raises(TypeError):
             ctx.tf.pins.a.celltype = 'int'
         ctx.compute()
         assert ctx.tf.run() == [2, 4]

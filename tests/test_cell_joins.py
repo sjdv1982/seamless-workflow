@@ -51,7 +51,7 @@ def test_join_reacts_to_edits_and_reuses_checksum_after_revert(make_context):
     assert ctx.join.checksum == first_checksum
 
 
-@pytest.mark.xfail(strict=False, reason="2026-09-21 ruling: Cell block_reason is a per-edge dict")
+@pytest.mark.xfail(strict=False, reason="cells.md §Cell-level joins / ruling 4: contract ahead of code: a join's block_reason is a per-edge dict; BoundCellBackend.block_reason returns the scalar")
 def test_join_is_blocked_by_error_when_an_upstream_fails(make_context):
     ctx = make_context()
     ctx.broken = Cell("str")
@@ -64,12 +64,11 @@ def test_join_is_blocked_by_error_when_an_upstream_fails(make_context):
 
     assert ctx.broken.state == "failed"
     assert ctx.join.state == "blocked"
-    assert isinstance(ctx.join.block_reason, dict)
-    assert list(ctx.join.block_reason.values()) == ["blocked-by-error"]
+    assert ctx.join.block_reason == {"value": "blocked-by-error"}
     assert ctx.join.exception is None
 
 
-@pytest.mark.xfail(strict=False, reason="2026-09-21 ruling: Cell block_reason is a per-edge dict")
+@pytest.mark.xfail(strict=False, reason="cells.md §Cell-level joins / ruling 4: contract ahead of code: a join's block_reason is a per-edge dict; BoundCellBackend.block_reason returns the scalar")
 def test_join_is_blocked_by_unwired_when_an_upstream_is_unwired(make_context):
     ctx = make_context()
     ctx.source = Cell("plain")
@@ -80,8 +79,7 @@ def test_join_is_blocked_by_unwired_when_an_upstream_is_unwired(make_context):
 
     assert ctx.source.state == "unwired"
     assert ctx.join.state == "blocked"
-    assert isinstance(ctx.join.block_reason, dict)
-    assert list(ctx.join.block_reason.values()) == ["blocked-by-unwired"]
+    assert ctx.join.block_reason == {"value": "blocked-by-unwired"}
     assert ctx.join.exception is None
 
 

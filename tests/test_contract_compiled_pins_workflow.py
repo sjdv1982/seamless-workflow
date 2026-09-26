@@ -1,6 +1,8 @@
 """Contract tests: compiled pins in bound workflows and graph import.
 
-Oracle: ``seamless/docs/agent/contracts/compiled-pins.md`` §4, §5, §9, §10.
+Oracle: ``seamless/docs/agent/contracts/compiled-pins.md`` §4, §5, §9, §10;
+every §12 "Implementation status" gap is pinned here by an
+``xfail(strict=False)`` test whose reason reads "contract ahead of code".
 Complements ``test_compiled_celltype_workflow.py`` (not repeated here).
 """
 
@@ -13,7 +15,7 @@ from seamless_transformer import Transformer
 from seamless_transformer.compiled_validation import CompiledPinCelltypeWarning
 from seamless_workflow import Context
 
-from seamless import Cell
+from seamless import Buffer, Cell
 
 pytestmark = pytest.mark.skipif(not shutil.which("gcc"), reason="gcc required")
 
@@ -47,8 +49,9 @@ def import_modified(modify):
 
 
 @pytest.mark.parametrize("declared", ["float", "bytes"])
-def test_import_incompatible_declaration_is_kept_and_blocks(declared):
-    """§4/§5: incompatible declarations import as declared and block (Stage 1)."""
+def test_import_incompatible_declaration_is_kept_and_reported(declared):
+    """§4/§5: incompatible declarations import as declared and are reported
+    as a Stage 1 failure (state pinned by test_stage1_failure_is_state_failed)."""
 
     def modify(entry):
         entry["pins"]["x"]["celltype"] = declared
@@ -60,15 +63,15 @@ def test_import_incompatible_declaration_is_kept_and_blocks(declared):
             ctx.set_graph(graph)
         ctx.compute()
         assert ctx.tf.celltypes.x == declared
-        assert ctx.tf.state == "blocked"
         assert isinstance(ctx.tf.exception, str)
         assert "'x'" in ctx.tf.exception and "incompatible" in ctx.tf.exception
         assert "incompatible" in repr(ctx.tf.schema_celltypes)
         assert ctx.tf.schema_celltypes["x"] == "int"
 
 
-def test_import_celltype_no_schema_allows_is_kept_and_blocks():
-    """§4: a celltype no schema allows can arrive by graph import; it blocks."""
+def test_import_celltype_no_schema_allows_is_kept_and_reported():
+    """§4: a celltype no schema allows can arrive by graph import; it is kept
+    and reported as a Stage 1 failure."""
 
     def modify(entry):
         entry["pins"]["x"]["celltype"] = "plain"
@@ -80,7 +83,6 @@ def test_import_celltype_no_schema_allows_is_kept_and_blocks():
             ctx.set_graph(graph)
         ctx.compute()
         assert ctx.tf.celltypes.x == "plain"
-        assert ctx.tf.state == "blocked"
         assert "'x'" in ctx.tf.exception
 
 
@@ -106,8 +108,9 @@ def test_legacy_graph_without_declaration_imports_as_mixed(variant):
         assert ctx.tf.run() == 6
 
 
-def test_legacy_char_input_imports_blocked_as_missing_declaration():
-    """§10 D4: a legacy 1-D char input imports blocked until declared."""
+def test_legacy_char_input_imports_as_missing_declaration():
+    """§10 D4: a legacy 1-D char input imports as a Stage 1 failure (missing
+    declaration) until bytes/text/binary is declared."""
 
     def modify(entry):
         entry["pins"]["x"].pop("celltype")
@@ -122,7 +125,6 @@ def test_legacy_char_input_imports_blocked_as_missing_declaration():
             ctx.set_graph(graph)
         ctx.compute()
         assert ctx.tf.celltypes.x == "mixed"
-        assert ctx.tf.state == "blocked"
         assert "explicit" in ctx.tf.exception
         ctx.tf.celltypes.x = "bytes"
         ctx.tf.code = (
@@ -134,45 +136,315 @@ def test_legacy_char_input_imports_blocked_as_missing_declaration():
         assert ctx.tf.run() == 3
 
 
-def test_executor_side_schema_error_names_pin_and_class():
-    """§5/§9: a data-dependent failure names the pin; D5 (b) class name in text."""
+def test_executor_side_schema_error_is_failed_and_names_pin_and_class():
+    """Rulings 2026-09-26 (rule 3 vs compiled): every pin has a valid checksum
+    but the compiled transformer cannot use it -> state failed, tf.exception
+    set; §9 D5: it carries the class name and names the pin."""
     with Context() as ctx:
         ctx.tf = builder("mixed")
         ctx.src = Cell("mixed")
         ctx.src.set(2**40)
         ctx.tf.pins.x = ctx.src
         ctx.compute()
-        assert ctx.tf.state in ("blocked", "failed")
+        assert ctx.tf.state == "failed"
+        assert ctx.tf.block_reason is None
         exc = ctx.tf.exception
         assert isinstance(exc, str)
         assert "'x'" in exc
-        assert "CompiledPinSchemaError" in exc or "range" in exc
+        assert "CompiledPinSchemaError" in exc
 
 
-def test_bound_mixed_container_names_pin():
-    """§3a/§5: a JSON list on a bound mixed int pin is rejected, naming the pin."""
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "compiled-pins.md §5 + rulings 2026-09-26 (valid pin checksum the "
+        "compiled transformer cannot use -> failed): contract ahead of code: a "
+        "JSON list on a mixed pin is rejected before hashing and the code "
+        "reports the pin failed and the transformer blocked/blocked-by-error"
+    ),
+)
+def test_bound_mixed_container_is_failed_and_names_pin():
+    """§3a: a JSON list is a valid mixed checksum the compiled transformer
+    cannot use -> transformer failed, tf.exception set (names the pin and the
+    other allowed declarations)."""
     with Context() as ctx:
         ctx.tf = builder("mixed")
         ctx.src = Cell("mixed")
         ctx.src.set([1, 2])
         ctx.tf.pins.x = ctx.src
         ctx.compute()
-        assert ctx.tf.state in ("blocked", "failed")
+        assert ctx.tf.state == "failed"
+        assert ctx.tf.block_reason is None
         assert "'x'" in ctx.tf.exception
         assert "binary" in ctx.tf.exception  # lists other allowed declarations
 
 
+def _conversion_failure(ctx):
+    ctx.tf = builder("int")
+    ctx.src = Cell("plain")
+    ctx.src.set("abc")
+    ctx.tf.pins.x = ctx.src
+    ctx.compute()
+
+
 def test_conversion_failure_is_recorded_on_pin_and_blocks():
-    """§9: Expression conversion errors stay conversion errors, name pin and
-    celltypes, and block the transformer (blocked-by-error)."""
+    """§9 + pins.md: a conversion failure (no valid pin checksum) is recorded
+    on the pin (failed, pin.exception names pin and celltypes) and blocks the
+    transformer with blocked-by-error."""
     with Context() as ctx:
-        ctx.tf = builder("int")
-        ctx.src = Cell("plain")
-        ctx.src.set("abc")
-        ctx.tf.pins.x = ctx.src
-        ctx.compute()
+        _conversion_failure(ctx)
         assert ctx.tf.state == "blocked"
         assert ctx.tf.block_reason == {"x": "blocked-by-error"}
-        exc = ctx.tf.exception
+        pin = ctx.tf.pins.x
+        assert pin.state == "failed"
+        exc = pin.exception
+        assert isinstance(exc, str)
         assert "'x'" in exc and "plain" in exc and "int" in exc
         assert "CompiledPin" not in exc and "CompiledMixed" not in exc
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "compiled-pins.md §9 + rulings 2026-09-26 (rule 3: a pin with no valid "
+        "checksum does not set tf.exception): contract ahead of code: the code "
+        "copies the pin's conversion error into tf.exception"
+    ),
+)
+def test_conversion_failure_leaves_transformer_exception_none():
+    with Context() as ctx:
+        _conversion_failure(ctx)
+        assert ctx.tf.exception is None
+
+
+# ------------------------------------------------------------------
+# Ruling 6 (contract-clarity-rulings.md, 2026-09-26): a compiled Stage-1
+# failure is the transformer's own failure -- state "failed".  Under
+# ruling 4 / node-state-lifecycle.md, block_reason is None outside
+# unwired/miswired/blocked/waiting.  §9 D5: .exception is a string that
+# carries the class name and message.
+
+STAGE1_XFAIL = pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "compiled-pins.md §5 + clarity ruling 6: contract ahead of code: a "
+        "Stage-1 failure is state 'failed' with block_reason None; code "
+        "reports 'blocked' with block_reason {}"
+    ),
+)
+
+
+def _stage1_schema_change(ctx):
+    ctx.tf = builder("int")
+    with pytest.warns(CompiledPinCelltypeWarning):
+        ctx.tf.schema = SCHEMA.replace("int32}", "float64}", 1)
+    return "incompatible"
+
+
+def _stage1_missing_declaration(ctx):
+    ctx.tf = builder("int")
+    with pytest.warns(CompiledPinCelltypeWarning):
+        ctx.tf.schema = SCHEMA.replace("dtype: int32}", "dtype: char, shape: [N]}", 1)
+        ctx.tf.celltypes.x = "mixed"
+    return "explicit"
+
+
+def _stage1_metavars(ctx):
+    ctx.tf = builder("int")
+    ctx.tf.schema = SCHEMA.replace(
+        "name: result, dtype: int32", "name: result, dtype: int32, shape: [K]"
+    )
+    return "metavars"
+
+
+def _stage1_import(modify, hint):
+    def scenario(ctx):
+        # Stage 1 needs no code buffer, so the exporting context may close.
+        with Context() as source:
+            source.tf = builder("int")
+            graph = copy.deepcopy(source.get_graph())
+            modify(next(n for n in graph["nodes"] if n["type"] == "transformer"))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", CompiledPinCelltypeWarning)
+                ctx.set_graph(graph)
+        return hint
+
+    return scenario
+
+
+def _set_celltype(value):
+    def modify(entry):
+        entry["pins"]["x"]["celltype"] = value
+
+    return modify
+
+
+def _bad_schema(entry):
+    entry["schema"] = "broken: ["
+
+
+def _legacy_char(entry):
+    entry["pins"]["x"].pop("celltype")
+    entry["schema"] = SCHEMA.replace("dtype: int32}", "dtype: char, shape: [N]}", 1)
+
+
+STAGE1_SCENARIOS = {
+    "schema-change": _stage1_schema_change,
+    "missing-declaration": _stage1_missing_declaration,
+    "metavars": _stage1_metavars,
+    "import-incompatible": _stage1_import(_set_celltype("float"), "incompatible"),
+    "import-unknown-celltype": _stage1_import(_set_celltype("plain"), "plain"),
+    "import-unparsable-schema": _stage1_import(_bad_schema, ""),
+    "import-legacy-char": _stage1_import(_legacy_char, "explicit"),
+}
+
+
+@STAGE1_XFAIL
+@pytest.mark.parametrize("scenario", sorted(STAGE1_SCENARIOS))
+def test_stage1_failure_is_state_failed(scenario):
+    with Context() as ctx:
+        hint = STAGE1_SCENARIOS[scenario](ctx)
+        ctx.compute()
+        assert isinstance(ctx.tf.exception, str) and hint in ctx.tf.exception
+        assert ctx.tf.state == "failed"
+        assert ctx.tf.block_reason is None
+
+
+@pytest.mark.parametrize("scenario", sorted(STAGE1_SCENARIOS))
+def test_stage1_failure_never_runs_and_reports(scenario):
+    """Stage 1 reports its diagnostic and resolves no pin (the state label,
+    'failed', is pinned by test_stage1_failure_is_state_failed)."""
+    with Context() as ctx:
+        hint = STAGE1_SCENARIOS[scenario](ctx)
+        ctx.compute()
+        assert isinstance(ctx.tf.exception, str) and hint in ctx.tf.exception
+        assert not ctx.tf._workflow_backend._node().pin_states
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "compiled-pins.md §9 D5 / §12: contract ahead of code: a failed "
+        "transformer's .exception carries the class name; Stage-1 diagnostics "
+        "are stored without 'CompiledPinCelltypeError'"
+    ),
+)
+def test_stage1_exception_carries_class_name():
+    with Context() as ctx:
+        _stage1_schema_change(ctx)
+        ctx.compute()
+        assert "CompiledPinCelltypeError" in ctx.tf.exception
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "compiled-pins.md §9 D5: contract ahead of code: a transformer's "
+        ".exception carries the class name; a pre-hash CompiledMixedValueError "
+        "on a bound pin is stored as the bare message"
+    ),
+)
+def test_bound_mixed_value_exception_carries_class_name():
+    """§9 D5 (confirmed 2026-09-26): .exception carries the class name."""
+    with Context() as ctx:
+        ctx.tf = builder("mixed")
+        ctx.src = Cell("mixed")
+        ctx.src.set([1, 2])
+        ctx.tf.pins.x = ctx.src
+        ctx.compute()
+        assert "CompiledMixedValueError" in ctx.tf.exception
+
+
+# ------------------------------------------------------------------
+# §4 reporting after import / restore, and inspection on bound transformers
+
+
+def test_import_incompatible_declaration_warns_as_if_it_had_just_arisen():
+    """§4: after graph import the incompatibility is reported as a
+    CompiledPinCelltypeWarning, as if it had just arisen."""
+    graph = import_modified(_set_celltype("float"))
+    with Context() as ctx:
+        with pytest.warns(CompiledPinCelltypeWarning, match="'x'"):
+            ctx.set_graph(graph)
+
+
+def test_binding_incompatible_builder_reports_on_the_bound_transformer():
+    """§4 (snapshot restore): a standalone builder with an incompatible
+    declaration, bound into a context, is reported the same way."""
+    tf = builder("int")
+    with pytest.warns(CompiledPinCelltypeWarning):
+        tf.schema = SCHEMA.replace("int32}", "float64}", 1)
+    with Context() as ctx:
+        ctx.tf = tf
+        ctx.compute()
+        assert ctx.tf.celltypes.x == "int"
+        assert "incompatible" in ctx.tf.exception
+        assert "incompatible" in repr(ctx.tf.schema_celltypes)
+
+
+def test_bound_schema_celltypes_empty_while_schema_unparsable():
+    """§4: schema_celltypes is empty while the schema is unparsable;
+    declarations are kept as imported, without validation."""
+    graph = import_modified(_bad_schema)
+    with Context() as ctx:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", CompiledPinCelltypeWarning)
+            ctx.set_graph(graph)
+        assert dict(ctx.tf.schema_celltypes) == {}
+        assert ctx.tf.celltypes.x == "int"
+
+
+def test_bound_schema_celltypes_is_derived_and_read_only():
+    """§4: tf.schema_celltypes on a bound transformer is a read-only mapping
+    derived from the schema, not from the declarations."""
+    with Context() as ctx:
+        ctx.tf = builder("binary")
+        view = ctx.tf.schema_celltypes
+        assert dict(view) == {"x": "int"}
+        with pytest.raises(TypeError):
+            view["x"] = "binary"
+        text = repr(ctx.tf)
+        assert "'binary'" in text and "'int'" in text
+
+
+# ------------------------------------------------------------------
+# §5 Stage 2 table, row 1: checksum not deserializable as the pin celltype
+
+ARRAY_SCHEMA = SCHEMA.replace("dtype: int32}", "dtype: float64, shape: [N]}", 1)
+
+
+def _undeserializable_checksum(ctx):
+    tf = Transformer("c", compiled=True)
+    tf.schema = ARRAY_SCHEMA
+    tf.celltypes.x = "binary"
+    tf.code = CODE
+    ctx.tf = tf
+    buf = Buffer(b"not an npy buffer")
+    buf.tempref()
+    ctx.tf.pins.x.set_checksum(buf.get_checksum())
+    ctx.compute()
+
+
+def test_undeserializable_pin_checksum_blocks_with_pin_failure():
+    """§5 row 1: a checksum not deserializable as the pin celltype is a pin
+    without a valid checksum -> blocked/blocked-by-error, failure on the pin."""
+    with Context() as ctx:
+        _undeserializable_checksum(ctx)
+        assert ctx.tf.state == "blocked"
+        assert ctx.tf.block_reason == {"x": "blocked-by-error"}
+        assert ctx.tf.pins.x.state == "failed"
+        assert "'x'" in ctx.tf.pins.x.exception
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "compiled-pins.md §5 (row 1: no valid checksum -> tf.exception None): "
+        "contract ahead of code: the pin's readability failure is copied into "
+        "tf.exception (same mechanism as the §12 conversion-failure gap)"
+    ),
+)
+def test_undeserializable_pin_checksum_leaves_transformer_exception_none():
+    with Context() as ctx:
+        _undeserializable_checksum(ctx)
+        assert ctx.tf.exception is None

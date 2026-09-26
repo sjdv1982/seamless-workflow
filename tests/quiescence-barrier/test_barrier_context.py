@@ -143,7 +143,7 @@ def test_the_barrier_returns_on_a_failed_graph():
     assert quiescent(ctx), states(ctx)
     assert ctx.fail.state == "failed"
     assert ctx.tail.state == "blocked"
-    assert isinstance(ctx.fail.exception, BaseException)
+    assert isinstance(ctx.fail.exception, str)
 
 
 @pytest.mark.a4

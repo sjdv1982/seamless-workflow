@@ -6,6 +6,30 @@ page section in the reason; the gap is a finding, not a test bug.
 
 Node-state/block-reason rules live in ``contracts/node-state-lifecycle.md`` and
 are deliberately not pinned here.
+
+Claims of this page that are pinned in a sibling file rather than here (so they
+are not duplicated):
+
+- anonymous/projection handles (takeover on assignment to a new name,
+  ``StaleWorkflowHandleError`` for the other handles, edge from the symbol,
+  handle-only entries excluded from ``anonymous_nodes``, cross-Context
+  ``DependencyError``, sub-path clearing ``ValueError``, ``as_celltype``
+  ``AuthorityError``): ``test_contract_cells_handles.py`` (cells.md);
+- ``ctx.tf.result = ...`` -> ``ReadOnlyEndpointError`` (xfail) and the method
+  producer forms: ``test_contract_transformer_bound.py``;
+- the empty same-celltype builder detaching a mount (xfail):
+  ``test_contract_attachments.py``;
+- ``miswired`` -> ``NodeError`` on a named barrier:
+  ``test_contract_node_state_lifecycle.py``;
+- ``ReentrantContextError``, barrier timeout withdrawing the predicate without
+  cancelling work: ``test_controller.py``, ``quiescence-barrier/``;
+- ``seamless.close()`` closing Contexts, close failing registered barriers:
+  ``test_controller_lifecycle.py``;
+- ``close()`` letting a shared run survive (xfail):
+  ``test_contract_cancellation_policy.py``.
+
+Not testable until the bound anonymous-cell model lands: removal of an
+anonymous symbol entry being posted to the controller (finalizer only posts).
 """
 
 
@@ -49,6 +73,19 @@ def sleeping(x):
 
 def boom(x):
     raise RuntimeError("boom-marker")
+
+
+def _paths(ctx):
+    """Node paths of the durable graph; get_graph() node order is not contract."""
+
+    return sorted(tuple(node["path"]) for node in ctx.get_graph()["nodes"])
+
+
+def _ahead(section, what_the_code_does):
+    return pytest.mark.xfail(
+        strict=False,
+        reason=f"{DOC} §{section}: contract ahead of code: {what_the_code_does}",
+    )
 
 
 def _wait_for(predicate, timeout=10.0):
@@ -96,7 +133,9 @@ def test_context_requires_an_open_seamless(tmp_path):
 
 
 def test_every_bound_handle_kind_raises_closed_context_error_after_close():
-    """§Constructing and closing / error table: a bound handle used after close raises ClosedContextError."""
+    """§Constructing and closing / error table: a bound handle used after close raises
+    ClosedContextError.  Context-level calls after close are refused (admission is
+    closed), but the page names no exception type for them, so only refusal is pinned."""
 
     ctx = Context()
     ctx.a = 1
@@ -111,11 +150,15 @@ def test_every_bound_handle_kind_raises_closed_context_error_after_close():
         lambda: cell.compute(timeout=1),
         lambda: tf.state,
         lambda: result.value,
-        lambda: ctx.a,
-        lambda: ctx.compute(timeout=1),
-        ctx.prune,
     ):
         with pytest.raises(ClosedContextError):
+            operation()
+
+    def assign():
+        ctx.b = 2
+
+    for operation in (assign, lambda: ctx.compute(timeout=1), ctx.prune, ctx.get_graph):
+        with pytest.raises(Exception):
             operation()
     ctx.close()  # still idempotent
 
@@ -128,7 +171,7 @@ def test_context_manager_exit_closes():
         controller, side = ctx._controller, ctx._side
     assert not controller.thread.is_alive()
     assert not side.thread.is_alive()
-    with pytest.raises(ClosedContextError):
+    with pytest.raises(Exception):  # admission closed; the type is not specified
         ctx.a = 2
 
 
@@ -144,7 +187,7 @@ def test_handles_are_fresh_and_item_access_stringifies(make_context):
     assert ctx["a"].checksum == ctx.a.checksum
     ctx[7] = 3
     assert ctx["7"].value == 3
-    assert [node["path"] for node in ctx.get_graph()["nodes"]] == [["7"], ["a"]]
+    assert _paths(ctx) == [("7",), ("a",)]
 
 
 def test_unknown_path_is_a_namespace_placeholder(make_context):
@@ -155,8 +198,7 @@ def test_unknown_path_is_a_namespace_placeholder(make_context):
     assert not isinstance(view, Cell)
     ctx.foo.bar = 1
     ctx.foo["baz"] = 2
-    paths = [node["path"] for node in ctx.get_graph()["nodes"]]
-    assert paths == [["foo", "bar"], ["foo", "baz"]]
+    assert _paths(ctx) == [("foo", "bar"), ("foo", "baz")]
     assert ctx.foo.bar.value == 1
 
 
@@ -170,7 +212,7 @@ def test_context_assignment_declares_a_namespace_not_a_runtime(make_context):
     ctx.compute(timeout=10)
     assert ctx.y.value == 4
     assert not isinstance(ctx.sub, Context)
-    assert [node["path"] for node in ctx.get_graph()["nodes"]] == [["sub", "x"], ["y"]]
+    assert _paths(ctx) == [("sub", "x"), ("y",)]
 
 
 def test_deleting_a_namespace_deletes_its_subtree_and_stales_handles(make_context):
@@ -182,7 +224,7 @@ def test_deleting_a_namespace_deletes_its_subtree_and_stales_handles(make_contex
     ctx.keep = 3
     handle = ctx.ns.p.q
     del ctx.ns
-    assert [node["path"] for node in ctx.get_graph()["nodes"]] == [["keep"]]
+    assert _paths(ctx) == [("keep",)]
     with pytest.raises(StaleWorkflowHandleError):
         handle.value
 
@@ -195,12 +237,13 @@ def test_mounts_is_reserved_for_assignment_and_graph_nodes(make_context):
         ctx.mounts = 1
     with pytest.raises(AttributeError, match="mounts is reserved"):
         ctx["mounts"] = 1
-    graph = {
-        "__seamless_workflow__": "0.4",
-        "nodes": [{"type": "cell", "path": ["mounts"], "celltype": "int", "value": None}],
-        "connections": [],
-    }
-    with pytest.raises(PathError):
+    # A round-tripped graph (whatever format the Context writes; the 0.5 marker is
+    # pinned separately below) whose single node is renamed to the reserved path.
+    donor = make_context()
+    donor.x = 1
+    graph = donor.get_graph()
+    graph["nodes"][0]["path"] = ["mounts"]
+    with pytest.raises(PathError, match="mounts"):
         ctx.set_graph(graph, mounts=False)
     assert ctx.get_graph()["nodes"] == []
 
@@ -237,11 +280,7 @@ def test_cell_builder_onto_transformer_is_a_node_error(make_context):
     assert ctx.get_graph()["nodes"][0]["type"] == "transformer"
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §What an assignment means: code raises TypeError(PreparedTransformer) "
-    "instead of NodeError for a Transformer builder onto a cell node",
-)
+@_ahead('What an assignment means', 'code raises TypeError(PreparedTransformer) instead of NodeError for a Transformer builder onto a cell node')
 def test_transformer_builder_onto_cell_is_a_node_error(make_context):
     from seamless_transformer import delayed
 
@@ -252,11 +291,7 @@ def test_transformer_builder_onto_cell_is_a_node_error(make_context):
     assert ctx.a.value == 1
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §What an assignment means: code raises TypeError(PreparedTransformer) "
-    "instead of NodeError('Cannot replace a cell node with transformer code')",
-)
+@_ahead('What an assignment means', "code raises TypeError(PreparedTransformer) instead of NodeError('Cannot replace a cell node with transformer code')")
 def test_callable_onto_cell_is_a_node_error(make_context):
     ctx = make_context()
     ctx.a = 1
@@ -265,11 +300,7 @@ def test_callable_onto_cell_is_a_node_error(make_context):
     assert ctx.a.value == 1
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} error table (NodeError: assignment mismatches the node kind): "
-    "a plain value onto a transformer node raises a bare AssertionError from ingress",
-)
+@_ahead('The Context surface, error table (NodeError: an assignment mismatches the node kind)', 'a plain value onto a transformer node raises a bare AssertionError from ingress')
 def test_value_onto_transformer_is_a_node_error(make_context):
     ctx = make_context()
     ctx.tf = add_one
@@ -309,6 +340,62 @@ def test_parallel_edges_into_two_pins_are_not_a_cycle(make_context):
     assert ctx.tf.result.value == 6
 
 
+def test_a_code_string_is_only_code_on_a_transformer(make_context):
+    """§What an assignment means: a str assigned to a new name creates a *cell*
+    holding the string; onto a cell it writes the value, detaching the edge."""
+
+    ctx = make_context()
+    ctx.s = "result = 42"
+    assert isinstance(ctx.s, Cell)
+    assert ctx.s.value == "result = 42"
+    node = next(n for n in ctx.get_graph()["nodes"] if n["path"] == ["s"])
+    assert node["type"] == "cell"
+
+    ctx.src = 5
+    ctx.c = ctx.src
+    ctx.compute(timeout=10)
+    assert ctx.c.value == 5
+    ctx.c = "text"
+    ctx.compute(timeout=10)
+    assert ctx.c.value == "text"
+    assert not [c for c in ctx.get_graph()["connections"] if c["target"] == ["c"]]
+
+
+def test_cycles_are_rejected_at_declaration_time(make_context):
+    """§What an assignment means: an edge that would close a cycle raises
+    DependencyError at declaration, and the graph is left unchanged."""
+
+    from seamless_workflow.errors import DependencyError
+
+    ctx = make_context()
+    ctx.a = 1
+    ctx.b = ctx.a
+    ctx.tf = add_one
+    ctx.tf.pins.x = ctx.b
+    before = ctx.get_graph()
+    with pytest.raises(DependencyError):
+        ctx.a = ctx.b
+    with pytest.raises(DependencyError):
+        ctx.a = ctx.tf
+    assert ctx.get_graph() == before
+    ctx.compute(timeout=30)
+    assert ctx.tf.result.value == 2
+
+
+def test_a_named_handle_belongs_to_its_context(make_context):
+    """§What an assignment means / error table: assigning a handle into a
+    different Context raises DependencyError (anonymous/projection handles:
+    test_contract_cells_handles.py)."""
+
+    from seamless_workflow.errors import DependencyError
+
+    ctx, other = make_context(), make_context()
+    ctx.a = 1
+    with pytest.raises(DependencyError):
+        other.x = ctx.a
+    assert other.get_graph()["nodes"] == []
+
+
 # ----------------------------------------------------------- the controller
 
 
@@ -339,18 +426,57 @@ def test_poisoned_context_refuses_every_operation_except_close(monkeypatch):
     assert not ctx._controller.thread.is_alive()
 
 
-def test_ordinary_reads_never_wait(make_context):
-    """§The controller: bound reads report current availability and return None when unpublished."""
+def test_named_node_reads_never_wait_and_report_none_until_complete(make_context):
+    """§Reads: reads on a *named* node never wait; on a node that is not
+    ``complete`` .checksum/.buffer/.value return None without raising.
+    (Anonymous/projection handle reads evaluate - test_contract_cells_handles.py.)"""
 
     ctx = make_context()
     ctx.tf = sleeping
     ctx.tf.pins.x = 5
+    ctx.out = ctx.tf
+    ctx.compute(timeout=30)
+    assert ctx.out.value == 5
+    ctx.tf.pins.x = 6  # recompute: the old result must not be reported
     assert _wait_for(lambda: ctx.tf.state == "computing")
     start = time.monotonic()
-    assert ctx.tf.result.checksum is None
-    assert ctx.tf.result.value is None
+    for handle in (ctx.tf.result, ctx.out):
+        assert handle.checksum is None
+        assert handle.buffer is None
+        assert handle.value is None
     assert time.monotonic() - start < 1
     assert ctx.tf.state == "computing"
+    assert ctx.out.state == "waiting"
+    # unwired, failed and blocked are not `complete` either
+    ctx.u = Cell(celltype="int")
+    ctx.f = boom
+    ctx.f.pins.x = 1
+    ctx.below = ctx.f
+    ctx.compute(timeout=60)
+    assert (ctx.u.state, ctx.f.state, ctx.below.state) == ("unwired", "failed", "blocked")
+    for handle in (ctx.u, ctx.f.result, ctx.below):
+        assert handle.checksum is None
+        assert handle.buffer is None
+        assert handle.value is None
+
+
+def test_complete_named_node_raises_a_materialization_failure(make_context):
+    """§Reads: on a ``complete`` node .buffer/.value materialize the result
+    checksum, and a failure (CacheMissError for an unreachable buffer) is raised."""
+
+    from seamless import CacheMissError
+
+    ctx = make_context()
+    ctx.i = Cell(celltype="int")
+    # A well-typed int checksum whose buffer is not kept anywhere.
+    absent = Buffer(918273645, "int").get_checksum()
+    ctx.i.set_checksum(absent)
+    assert ctx.i.state == "complete"
+    assert ctx.i.checksum == absent
+    with pytest.raises(CacheMissError):
+        ctx.i.buffer
+    with pytest.raises(CacheMissError):
+        ctx.i.value
 
 
 # ----------------------------------------------------------------- barriers
@@ -399,14 +525,49 @@ def test_context_barrier_returns_none_on_a_failed_graph(make_context):
     assert isinstance(ctx.f.exception, str)
 
 
+def test_named_reading_barrier_returns_the_checksum_or_raises_node_error(make_context):
+    """§Barriers / surface table: node.compute() on a named node returns the node's
+    checksum, and raises NodeError naming the state on `unwired` or `blocked`;
+    the graph barrier (not a named-node barrier) does not raise."""
+
+    ctx = make_context()
+    ctx.a = 1
+    ctx.tf = add_one
+    ctx.tf.pins.x = ctx.a
+    assert ctx.tf.compute(timeout=30) == ctx.tf.result.checksum
+    assert ctx.a.compute(timeout=30) == ctx.a.checksum
+    ctx.loose = add_one  # pin x never connected
+    ctx.below = ctx.loose
+    assert ctx.compute(timeout=30) is None
+    with pytest.raises(NodeError, match="unwired"):
+        ctx.loose.compute(timeout=10)
+    with pytest.raises(NodeError, match="blocked"):
+        ctx.below.compute(timeout=10)
+
+
+@_ahead("Barriers (compute() on a projection handle is not a barrier)",
+        "a bound projection is a view onto the parent node, so its compute() waits on the "
+        "parent's barrier and times out instead of returning None (cells.md-owned gap)")
+def test_projection_handle_compute_does_not_wait_on_the_parent(make_context):
+    def slow_dict(x):
+        import time
+        time.sleep(2)
+        return {"a": x}
+
+    ctx = make_context()
+    ctx.s = slow_dict
+    ctx.s.pins.x = 5
+    ctx.c = ctx.s
+    assert _wait_for(lambda: ctx.c.state == "waiting")
+    start = time.monotonic()
+    assert ctx.c["a"].compute(timeout=0.5) is None  # parent has no checksum yet
+    assert time.monotonic() - start < 0.5
+
+
 # ------------------------------------------------------------------- writes
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §Writes through the Context: whole-checksum writes are not HashType-validated "
-    "at write time; the mismatch only surfaces at a read",
-)
+@_ahead('Writes through the Context', 'whole-checksum writes are not HashType-validated at write time; the mismatch only surfaces at a read')
 def test_whole_checksum_write_is_validated_against_the_celltype(make_context):
     ctx = make_context()
     ctx.i = Cell(celltype="int")
@@ -428,7 +589,8 @@ def test_unresolvable_checksum_write_is_installed_without_resolving(make_context
 
 
 def test_subpath_write_gives_up_after_eight_lost_commits(make_context, monkeypatch):
-    """§Writes through the Context: a losing commit retries at most eight times, then ConcurrentUpdateError."""
+    """§Writes through the Context: after eight attempts in total, all lost, the
+    write raises ConcurrentUpdateError (8 attempts, not 1 + 8 retries)."""
 
     import seamless_workflow.context as module
 
@@ -466,6 +628,26 @@ def test_subpath_write_into_unwired_cell(make_context):
     assert ctx.w.checksum is None
 
 
+def test_subpath_write_waits_while_the_node_is_waiting(make_context):
+    """§Writes through the Context / surface table: if the root has no checksum
+    and the node is `waiting`, a sub-path write waits on a barrier and retries."""
+
+    ctx = make_context()
+    ctx.tf = sleeping
+    ctx.tf.pins.x = 7
+    ctx.j = {"k0": 0}
+    ctx.j["k"] = ctx.tf  # a join: root literal plus a pending sub-path edge
+    assert _wait_for(lambda: ctx.j.state == "waiting")
+    assert ctx.j.checksum is None
+    start = time.monotonic()
+    ctx.j.m = 3  # must neither raise ValueUnavailableError nor lose the write
+    assert time.monotonic() - start > 0.5  # it waited for the join to complete
+    # The commit re-derives the join (transiently `waiting` again), so read after
+    # the barrier.
+    ctx.compute(timeout=30)
+    assert ctx.j.value == {"k0": 0, "k": 7, "m": 3}
+
+
 # --------------------------------------------------------- speculation control
 
 
@@ -500,7 +682,7 @@ def _running_identity(ctx, path):
 
 
 def test_deleting_a_running_node_only_softcancels(make_context, monkeypatch):
-    """§Nodes / §Speculation control: deletion cancels softly; hard cancellation is never issued."""
+    """§Nodes / §Speculation control: deletion softcancels; hard cancellation is never issued."""
 
     recorder = _CancelRecorder(monkeypatch)
     ctx = make_context()
@@ -530,7 +712,9 @@ def test_prune_and_supersession_only_softcancel(make_context, monkeypatch):
 
 
 def test_close_only_softcancels(monkeypatch):
-    """§Constructing and closing / §Speculation control: close cancels memberships, softly."""
+    """§Constructing and closing / §Speculation control: close() softcancels
+    outstanding memberships; it never hard-cancels.  (That a shared run survives
+    close() is pinned, xfail, in test_contract_cancellation_policy.py.)"""
 
     recorder = _CancelRecorder(monkeypatch)
     ctx = Context()
@@ -563,7 +747,7 @@ def test_get_graph_is_durable_and_carries_no_runtime_state(make_context):
 
 
 def test_set_graph_cancels_old_runs_and_never_applies_their_late_results(make_context, monkeypatch):
-    """§Graph serialization: set_graph cancels every run; generations are never reused."""
+    """§Graph serialization: set_graph softcancels every run; generations are never reused."""
 
     recorder = _CancelRecorder(monkeypatch)
     donor = make_context()
@@ -594,22 +778,45 @@ def test_graph_loading_never_executes_code(make_context, tmp_path):
         "def f(x):\n"
         "    return x\n"
     )
-    graph = {
-        "__seamless_workflow__": "0.4",
-        "nodes": [
-            {
-                "type": "transformer",
-                "path": ["tf"],
-                "language": "python",
-                "call_mode": "delayed",
-                "code": code,
-                "pins": {"x": {"celltype": "mixed"}},
-            }
-        ],
-        "connections": [],
-    }
+    # Round-trip a real graph (format-independent), then swap in code with a
+    # module-level side effect.  Pin x stays unwired, so nothing is executed
+    # legitimately either.
+    donor = make_context()
+    donor.tf = ident
+    graph = donor.get_graph()
+    entry = graph["nodes"][0]
+    entry["code"] = code
+    entry["checksum"] = {"code": None}
     ctx = make_context()
     ctx.set_graph(graph, mounts=False)
     assert ctx.get_graph()["nodes"][0]["type"] == "transformer"
     assert ctx.tf.state == "unwired"
     assert not marker.exists()
+
+
+@_ahead("Graph serialization / Implementation status", "get_graph() writes format 0.4 with no anonymous_nodes table")
+def test_get_graph_writes_format_0_5_with_an_anonymous_nodes_table(make_context):
+    ctx = make_context()
+    ctx.a = 1
+    ctx.b = ctx.a
+    graph = ctx.get_graph()
+    assert graph["__seamless_workflow__"] == "0.5"
+    assert graph["anonymous_nodes"] == {}
+
+
+@_ahead("Graph serialization / Implementation status", "set_graph() refuses a 0.5 graph (PathError: unsupported version)")
+def test_set_graph_loads_a_format_0_5_graph(make_context):
+    graph = {
+        "__seamless_workflow__": "0.5",
+        "nodes": [
+            {"type": "cell", "path": ["a"], "celltype": "int", "value": None},
+            {"type": "cell", "path": ["b"], "celltype": "int", "value": None},
+        ],
+        "anonymous_nodes": {},
+        "connections": [{"type": "connection", "source": {"node": ["a"]}, "target": ["b"]}],
+    }
+    ctx = make_context()
+    ctx.set_graph(graph, mounts=False)
+    ctx.a = 5
+    ctx.compute(timeout=10)
+    assert ctx.b.value == 5

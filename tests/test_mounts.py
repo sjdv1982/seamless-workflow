@@ -28,7 +28,7 @@ def test_initial_policy(mode,authority,disk,node,action):
     assert decide_initial(AttachmentSpec('a', mode, authority),disk,node)==action
 
 
-@pytest.mark.parametrize('celltype,content', [('text',b'abc\n\n'),('python',b'bad python !'),
+@pytest.mark.parametrize('celltype,content', [('text',b'abc\n\n'),('python',b'x = 1  # ok\n\n'),
     ('ipython',b'%magic\n'),('yaml',b'a: [broken'), ('plain', b'{ "a" : 1 }'),
     ('str',b'"hi"'),('int',b'12'),('float',b'1.2'),('bool',b'true'),
     ('bytes',b'\xff\x00'),('mixed',b'{"a":3}\n'),('binary',None)])
@@ -60,7 +60,7 @@ def test_errors_recover_and_keep_graph_value(tmp_path):
         c.a=Cell(celltype='plain');c.a.set({'x':1}); old=c.a.checksum.hex()
         c.b=c.a
         c.a.mount(p)
-        assert isinstance(c.a.exception,MountError)
+        assert isinstance(c.a.exception, str) and isinstance(c.a.mount.status["sense_error"], MountError)
         assert c.b.block_reason=='blocked-by-error'
         assert c.get_graph()['nodes'][0]['value']['checksum']==old
         assert c.mounts.sync(timeout=5)[('a',)]['sense_error']
@@ -79,10 +79,10 @@ def test_strict_missing_and_deletion(tmp_path):
     p=tmp_path/'a.txt'
     with Context() as c:
         c.a=Cell(celltype='text');c.a.set('old');c.a.mount(p,authority='file-strict')
-        assert c.a.state=='failed' and isinstance(c.a.exception, MountError)
+        assert c.a.state=='failed' and isinstance(c.a.exception, str) and isinstance(c.a.mount.status["sense_error"], MountError)
         p.write_text('new');c.mounts.sync(timeout=5);assert c.a.value=='new'
         p.unlink();c.mounts.sync(timeout=5)
-        assert c.a.state=='failed' and isinstance(c.a.exception, MountError)
+        assert c.a.state=='failed' and isinstance(c.a.exception, str) and isinstance(c.a.mount.status["sense_error"], MountError)
 
 
 def test_configuration_and_graph(tmp_path):

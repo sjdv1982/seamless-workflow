@@ -37,7 +37,6 @@ def test_conservative_pin_liberal_workflow_and_roundtrip():
         with pytest.warns(CompiledPinCelltypeWarning):
             clone.tf.schema = SCHEMA.replace("int32", "float64")
         clone.compute()
-        assert clone.tf.state == "blocked"
         assert "incompatible" in clone.tf.exception
         assert clone.tf.celltypes.x == "int"
 
@@ -54,7 +53,6 @@ def test_import_optional_rejected_and_bad_schema_blocked():
         entry["schema"] = "broken: ["
         clone.set_graph(graph)
         clone.compute()
-        assert clone.tf.state == "blocked"
         assert clone.tf.celltypes.x == "int"
         assert clone.tf.exception
 
@@ -68,7 +66,6 @@ def test_stage1_precedes_pin_resolution():
         with pytest.warns(CompiledPinCelltypeWarning):
             ctx.tf.celltypes.x = "mixed"
         ctx.compute()
-        assert ctx.tf.state == "blocked"
         assert "explicit" in ctx.tf.exception
         assert not ctx.tf._workflow_backend._node().pin_states
 
@@ -81,7 +78,6 @@ def test_bound_metavars_stage1_and_schema_rebuild():
     with Context() as ctx:
         ctx.tf = tf
         ctx.compute()
-        assert ctx.tf.state == "blocked"
         assert "metavars" in ctx.tf.exception
         ctx.tf.metavars.maxK = 4
         assert ctx.tf.metavars.maxK == 4

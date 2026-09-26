@@ -45,8 +45,8 @@ def _session(ctx, name):
 
 @pytest.mark.xfail(strict=False, reason=(
     "attachments.md §Scope: standalone Cell.mount must raise "
-    "AttributeError('mount is only available for bound workflow cells'); the "
-    "property's AttributeError is swallowed by Cell.__getattr__, which re-raises "
+    "AttributeError('mount is only available for bound workflow cells'); contract ahead "
+    "of code: the property's AttributeError is swallowed by Cell.__getattr__, which re-raises "
     "a bare AttributeError('mount')"))
 def test_scope_standalone_cell_message():
     with pytest.raises(AttributeError, match="only available for bound workflow cells"):
@@ -67,7 +67,7 @@ def test_scope_transformer_result_and_subpath_are_not_mountable(tmp_path):
         assert c.p.mount.spec is None
 
 
-def test_scope_pin_transformer_and_code_have_no_mount(tmp_path):
+def test_scope_pin_and_code_have_no_mount(tmp_path):
     with Context() as c:
         c.tf = add
         c.tf.pins.x = 1
@@ -75,20 +75,29 @@ def test_scope_pin_transformer_and_code_have_no_mount(tmp_path):
         with pytest.raises(AttributeError):
             c.tf.pins.x.mount
         with pytest.raises(AttributeError):
-            c.tf.mount
-        with pytest.raises(AttributeError):
             c.tf.code.mount
 
 
-def test_scope_missing_or_transformer_node_is_node_error(tmp_path):
-    # Not reachable through a public handle (a stale handle fails first), so
-    # pinned at the controller's validation step that every attach passes through.
+@pytest.mark.xfail(strict=False, reason=(
+    "attachments.md §Scope: mounting a transformer node must raise "
+    "NodeError('Mounts require an existing whole cell node'); contract ahead of code: "
+    "the transformer handle has no mount member (AttributeError)"))
+def test_scope_transformer_node_is_node_error(tmp_path):
     with Context() as c:
         c.tf = add
-        spec = AttachmentSpec(str(tmp_path / "x"))
-        for path in (("tf",), ("missing",)):
-            with pytest.raises(NodeError, match="Mounts require an existing whole cell node"):
-                c._controller.call("_mount_validate", path, spec, klass=4)
+        with pytest.raises(NodeError, match="Mounts require an existing whole cell node"):
+            c.tf.mount(tmp_path / "x")
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "attachments.md §Scope: mounting a missing node must raise "
+    "NodeError('Mounts require an existing whole cell node'); contract ahead of code: "
+    "ctx.missing.mount is a MissingView and calling it raises TypeError"))
+def test_scope_missing_node_is_node_error(tmp_path):
+    with Context() as c:
+        with pytest.raises(NodeError, match="Mounts require an existing whole cell node"):
+            c.missing.mount(tmp_path / "x")
+        assert not (tmp_path / "x").exists()
 
 
 def test_scope_already_mounted_is_value_error(tmp_path):
@@ -163,8 +172,6 @@ def test_spec_survives_value_writes_and_config_edits(tmp_path):
         assert c.a.mount.spec == spec
         c.a.scratch = True
         assert c.a.mount.spec == spec
-        c.a = Cell(celltype="plain")  # same-celltype builder: still a cell
-        assert c.a.mount.spec == spec
 
 
 def test_spec_removed_and_session_closed_on_delete(tmp_path):
@@ -173,17 +180,163 @@ def test_spec_removed_and_session_closed_on_delete(tmp_path):
         c.a = Cell(celltype="text")
         c.a.set("a")
         c.a.mount(p, mode="w")
-        reg = _session(c, "a").registration
         del c.a
         c.compute(timeout=10)
         assert ("a",) not in c._mount_sessions
-        assert reg.closing or reg.closed  # cleanup itself runs asynchronously
         c.a = Cell(celltype="text")
         c.a.set("again")
         assert c.a.mount.spec is None
         c.a.mount(p, mode="w")  # the registration was released
         c.mounts.sync(timeout=10)
         assert p.read_text() == "again\n"
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "attachments.md §Attach, detach, close: node deletion detaches 'in exactly the same "
+    "way' as del ctx.a.mount, which waits for the transport's cleanup; contract ahead of "
+    "code: _delete_subtree does not wait for the unregister future, so the conditional "
+    "delete of a persistent=False file usually has not run when del returns"))
+def test_node_deletion_detach_waits_for_transport_cleanup(tmp_path):
+    with Context() as c:
+        for n in range(5):
+            p = tmp_path / f"a{n}.txt"
+            c.a = Cell(celltype="text")
+            c.a.set("a")
+            c.a.mount(p, persistent=False)
+            assert p.exists()
+            del c.a
+            assert not p.exists()
+
+
+def test_unmount_waits_for_transport_cleanup(tmp_path):
+    with Context() as c:
+        for n in range(5):
+            p = tmp_path / f"a{n}.txt"
+            c.a = Cell(celltype="text")
+            c.a.set("a")
+            c.a.mount(p, persistent=False)
+            assert p.exists()
+            del c.a.mount
+            assert not p.exists()
+            del c.a
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "attachments.md §Detach ('an empty builder of the same celltype detaches and clears', "
+    "leaving a persistent resource untouched); contract ahead of code: the spec, session and "
+    "status survive, get_graph() still writes the mount entry, and the cleared cell stays "
+    "attached (Implementation status)"))
+def test_same_celltype_empty_builder_detaches_the_mount(tmp_path):
+    p = tmp_path / "a.txt"
+    with Context() as c:
+        c.a = Cell(celltype="text")
+        c.a.set("value")
+        c.a.mount(p, mode="w")
+        assert p.read_text() == "value\n"
+        c.a = Cell(celltype="text")
+        assert c.a.mount.spec is None
+        assert c.a.mount.status is None
+        assert ("a",) not in c._mount_sessions
+        assert c.get_graph()["nodes"][0].get("mount") is None
+        assert c.a.checksum is None
+        assert p.read_text() == "value\n"  # persistent: detaching leaves the resource
+        c.a = "later"
+        c.compute(timeout=10)
+        assert p.read_text() == "value\n"  # no longer actuated
+        c.b = Cell(celltype="text")
+        c.b.set("b")
+        c.b.mount(p, mode="w")  # the registration was released
+
+
+@pytest.mark.parametrize("mode", ["r", "w", "rw"])
+def test_same_celltype_empty_builder_is_not_refused_clears_and_keeps_file(tmp_path, mode):
+    # attachments.md §Topology (the one exempt assignment) and §Detach: not refused,
+    # the cell is cleared, and a persistent resource is neither rewritten nor deleted.
+    # This half already holds (Implementation status: "The rest already matches").
+    p = tmp_path / "a.txt"
+    p.write_text("value")
+    with Context() as c:
+        c.a = Cell(celltype="text")
+        c.a.set("value")
+        c.a.mount(p, mode=mode)
+        before = p.stat().st_mtime_ns
+        c.a = Cell(celltype="text")
+        assert c.a.checksum is None
+        c.compute(timeout=10)
+        time.sleep(0.3)
+        assert p.exists() and p.read_text().rstrip("\n") == "value"
+        assert p.stat().st_mtime_ns == before
+
+
+def test_subcontext_deletion_detaches_each_attachment(tmp_path):
+    # attachments.md §Detach: deleting a subcontext that contains attached cells
+    # detaches each attachment (the wait is pinned separately below).
+    p1, p2 = tmp_path / "a.txt", tmp_path / "b.txt"
+    with Context() as c:
+        c.sub.a = Cell(celltype="text")
+        c.sub.a.set("a")
+        c.sub.a.mount(p1, mode="w")
+        c.sub.b = Cell(celltype="text")
+        c.sub.b.set("b")
+        c.sub.b.mount(p2, mode="w")
+        del c.sub
+        c.compute(timeout=10)
+        assert not c._mount_sessions
+        c.x = Cell(celltype="text")
+        c.x.set("x")
+        c.x.mount(p1, mode="w")  # the registration was released
+        c.mounts.sync(timeout=10)
+        assert p1.read_text() == "x\n"
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "attachments.md §Detach: deleting a subcontext 'returns only after the transport's "
+    "cleanup has run', so a persistent=False file is gone when del returns; contract ahead "
+    "of code: _delete_subtree does not wait for the unregister future (Implementation status)"))
+def test_subcontext_deletion_waits_for_transport_cleanup(tmp_path):
+    with Context() as c:
+        for n in range(5):
+            p = tmp_path / f"a{n}.txt"
+            c.sub.a = Cell(celltype="text")
+            c.sub.a.set("a")
+            c.sub.a.mount(p, persistent=False)
+            assert p.exists()
+            del c.sub
+            assert not p.exists()
+
+
+def test_transformer_assignment_onto_mounted_cell_is_refused_and_keeps_spec(tmp_path):
+    # attachments.md §Durable spec: assigning a transformer onto a cell node is refused;
+    # the refused assignment leaves the spec in place.  (The exception type is the gap
+    # pinned below.)
+    from seamless.transformer import delayed
+    p = tmp_path / "a.txt"
+    with Context() as c:
+        c.a = Cell(celltype="text")
+        c.a.set("x")
+        c.a.mount(p, mode="w")
+        spec = c.a.mount.spec
+        for value in (add, delayed(add)):
+            with pytest.raises(Exception):
+                c.a = value
+            assert c.a.mount.spec == spec
+            assert c.a.value == "x"
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "attachments.md §Durable spec + workflow-context.md: assigning transformer code or a "
+    "delayed transformer onto a cell node must raise NodeError; contract ahead of code: "
+    "_retain_producer raises TypeError (Implementation status)"))
+def test_transformer_assignment_onto_mounted_cell_is_node_error(tmp_path):
+    from seamless.transformer import delayed
+    with Context() as c:
+        c.a = Cell(celltype="text")
+        c.a.set("x")
+        c.a.mount(tmp_path / "a.txt", mode="w")
+        for value in (add, delayed(add)):
+            with pytest.raises(NodeError):
+                c.a = value
+            assert c.a.mount.spec is not None
 
 
 def test_reattach_and_reload_get_fresh_session_ids(tmp_path):
@@ -365,8 +518,35 @@ def test_sense_and_user_write_have_equal_authority():
         del c.a.mount
 
 
-def test_program_invalid_content_is_sensed_like_a_user_write(tmp_path):
-    source = "def f(:\n"
+@pytest.mark.xfail(strict=False, reason=(
+    "attachments.md §Sense ('only what the celltype's parser checks is rejected': for python "
+    "that includes syntax, so a syntax error in a sensed python value is a sense error, "
+    "matching mounts.md 'there is no mount-local parsing'); contract ahead of code: neither "
+    "ctx.a.set('def (:') nor a mount rejects it at write time -- both leave the cell "
+    "'complete' with the checksum, and ast.parse only runs when .value is read "
+    "(HashTypeValidationError) or when a transformer runs the code. Not yet listed in "
+    "attachments.md's Implementation status"))
+def test_python_syntax_error_in_sensed_value_is_a_sense_error(tmp_path):
+    p = tmp_path / "code.py"
+    p.write_text("def f(:\n")
+    with Context() as c:
+        c.code = Cell(celltype="python")
+        c.code.mount(p, mode="r")
+        assert c.code.state == "failed"
+        assert isinstance(c.code.exception, str)
+        assert c.code.exception.startswith(f"{p}: ")
+        assert isinstance(c.code.mount.status["sense_error"], MountError)
+        assert c.code.mount.error is None
+        # monitoring continues: a valid edit recovers with no user action
+        p.write_text("def f():\n    return 1\n")
+        c.mounts.sync(timeout=10)
+        assert c.code.state == "complete"
+
+
+def test_program_wrong_content_that_parses_is_sensed_like_a_user_write(tmp_path):
+    # attachments.md §Sense: content that parses but is wrong for the program is not
+    # rejected by the mount; it fails where a user write would, in the transformer.
+    source = "def f(x):\n    raise RuntimeError('wrong for the program')\n"
     p = tmp_path / "code.py"
     p.write_text(source)
     with Context() as c:
@@ -377,6 +557,12 @@ def test_program_invalid_content_is_sensed_like_a_user_write(tmp_path):
         assert c.code.state == c.user.state == "complete"
         assert c.code.exception is None
         assert c.code.checksum == c.user.checksum
+        c.tf = ident
+        c.tf.code = c.code
+        c.tf.pins.x = 1
+        c.compute(timeout=30)
+        assert c.tf.state == "failed"
+        assert c.code.state == "complete" and c.code.exception is None
 
 
 # --------------------------------------------------------------------------
@@ -601,8 +787,8 @@ def test_unattached_surface():
         assert c.a.mount.status is None
         assert c.a.mount.error is None
         del c.a.mount  # silent no-op
-        with pytest.raises(Exception):  # bare KeyError today; type not contract
-            c.a.mount.clear_error()
+        assert c.a.mount.spec is None
+        # clear_error() on an unattached cell is undecided (Implementation status): not pinned
 
 
 def test_close_flushes_already_requested_pending_once():
@@ -651,3 +837,269 @@ def test_close_timeout_bounds_an_unacknowledged_delivery():
     c.close(timeout=0.5)
     assert time.monotonic() - start < 10
     assert d.registration.closed
+
+
+# --------------------------------------------------------------------------
+# 2026-09-26 adaptation: rulings (anonymous handles; "any state other than
+# complete" does not deliver, including the miswired family)
+# --------------------------------------------------------------------------
+
+def ident(x):
+    return x
+
+
+def test_scope_projection_handle_is_not_mountable(tmp_path):
+    with Context() as c:
+        c.a = Cell(celltype="mixed")
+        c.a.set({"k": 1})
+        with pytest.raises(AttributeError, match="Only whole Context cell nodes can be mounted"):
+            c.a["k"].mount(tmp_path / "proj")
+        assert c.a.mount.spec is None
+
+
+@pytest.mark.skip(reason=(
+    "attachments.md §Scope: mounting a bound as_celltype handle is 'unspecified -- deferred; "
+    "do not depend on either outcome'. No outcome is contract, so none is pinned (an earlier "
+    "version xfail-pinned AttributeError('Only whole Context cell nodes can be mounted'), which "
+    "is not a ruling). Un-skip and assert once the author rules"))
+def test_scope_as_celltype_handle_mount_is_deferred(tmp_path):
+    with Context() as c:
+        c.a = Cell(celltype="mixed")
+        c.a.set({"k": 1})
+        c.a.as_celltype("plain").mount(tmp_path / "anon")
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "attachments.md §The cut barrier (resolves on a non-complete actuating node), with "
+    "node-state-lifecycle.md: contract ahead of code: the result of a miswired transformer "
+    "stays 'waiting' instead of blocked-by-miswiring, so the barrier never settles. The "
+    "§Actuate half (no delivery from a non-complete node) already holds."))
+def test_miswired_upstream_does_not_actuate_and_barrier_settles(tmp_path):
+    p = tmp_path / "out.txt"
+    with Context() as c:
+        c.src = Cell(celltype="mixed")
+        c.src.set({"a": 1})
+        c.tf = ident
+        c.tf.pins.x = c.src["a"]
+        c.out = c.tf.result
+        c.compute(timeout=30)
+        c.out.mount(p, mode="w")
+        c.mounts.sync(timeout=10)
+        assert p.read_text() == "1\n"
+        before = p.stat().st_mtime_ns
+        c.src.celltype = "plain"  # the pin (mixed) no longer matches the projected source
+        deadline = time.monotonic() + 10
+        while c.tf.state != "miswired" and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert c.tf.state == "miswired"
+        time.sleep(0.5)
+        # attachments.md §Actuate: any state other than complete delivers nothing
+        assert c.out.state != "complete"
+        assert p.read_text() == "1\n" and p.stat().st_mtime_ns == before
+        # node-state side, and the barrier resolves on a non-complete actuating node
+        assert c.out.state == "blocked" and c.out.block_reason == "blocked-by-miswiring"
+        report = c.mounts.sync(timeout=5)
+        assert report[("out",)]["in_sync"] is False and report[("out",)]["error"] is None
+
+
+# --------------------------------------------------------------------------
+# 2026-09-26 coverage pass: statements of attachments.md that had no test
+# --------------------------------------------------------------------------
+
+def test_remedy_mounted_code_cell_connected_to_transformer_code(tmp_path):
+    # attachments.md §Scope: "attach a cell and connect it" is the supported way to
+    # edit transformer code externally.
+    p = tmp_path / "code.py"
+    p.write_text("def f(x):\n    return x + 1\n")
+    with Context() as c:
+        c.code = Cell(celltype="python")
+        c.code.mount(p, mode="r")
+        c.tf = ident
+        c.tf.code = c.code
+        c.tf.pins.x = 1
+        c.compute(timeout=30)
+        assert c.tf.result.value == 2
+        p.write_text("def f(x):\n    return x + 100\n")
+        c.mounts.sync(timeout=10)
+        c.compute(timeout=30)
+        assert c.tf.result.value == 101
+
+
+def test_user_write_clears_the_sense_error():
+    # attachments.md §Sense: "any value write clears the sense error" -- a user
+    # assignment as well as a valid observation.
+    with Context() as c:
+        c.a = Cell(celltype="text")
+        c.a.set("one")
+        d = ManualDriver().attach(c.a, "one", mode="rw")
+        d.observe(rejected="unreadable")
+        c.get_graph()
+        assert c.a.state == "failed" and _status(c, "a")["sense_error"] is not None
+        c.a = "user"
+        assert c.a.state == "complete" and c.a.value == "user"
+        assert c.a.exception is None and _status(c, "a")["sense_error"] is None
+        d.ack(d.deliveries.popleft())
+        c.get_graph()
+        del c.a.mount
+
+
+def test_sense_error_masks_but_keeps_stored_value(tmp_path):
+    # attachments.md §Sense errors fail the cell: published checksum dropped, but
+    # get_graph() still records the last good value.
+    p = tmp_path / "a.json"
+    with Context() as c:
+        c.a = Cell(celltype="plain")
+        c.a.set({"x": 1})
+        good = c.a.checksum.hex()
+        c.a.mount(p, mode="rw")
+        p.write_text("broken")
+        c.mounts.sync(timeout=10)
+        assert c.a.state == "failed"
+        assert not c.a.checksum
+        node = [n for n in c.get_graph()["nodes"] if n["path"] == ["a"]][0]
+        assert node["value"]["checksum"] == good
+
+
+def test_disappearance_does_not_clear_the_node(tmp_path):
+    # attachments.md §Sense: "Disappearance does not clear the node."
+    p = tmp_path / "a.txt"
+    p.write_text("hello")
+    with Context() as c:
+        c.a = Cell(celltype="text")
+        c.a.mount(p, mode="r")
+        cs = c.a.checksum
+        p.unlink()
+        report = c.mounts.sync(timeout=10)
+        assert c.a.checksum == cs and c.a.value == "hello"
+        assert report[("a",)]["state"] == "active"  # still monitoring
+        p.write_text("back")
+        c.mounts.sync(timeout=10)
+        assert c.a.value == "back"
+
+
+def test_waiting_node_does_not_actuate():
+    # attachments.md §Actuate: a node in any state other than complete (here: waiting,
+    # a cell mid-recompute) delivers nothing.
+    with Context() as c:
+        c.src = Cell(celltype="int")
+        c.src.set(1)
+        c.tf = slow_ident
+        c.tf.pins.x = c.src
+        c.out = c.tf.result
+        c.compute(timeout=30)
+        d = ManualDriver().attach(c.out, 1, mode="w")
+        c.src = 2
+        c.get_graph()
+        assert c.out.state != "complete"
+        assert not d.deliveries and not _status(c, "out")["pending"]
+        c.compute(timeout=30)
+        c.get_graph()
+        delivery = d.deliveries.popleft()
+        assert delivery.lease.checksum.resolve("int") == 2
+        d.ack(delivery)
+        c.get_graph()
+        del c.out.mount
+
+
+def test_latest_discipline_replaces_pending_and_releases_its_claim():
+    # attachments.md §Actuate, latest discipline: at most one pending and one in-flight;
+    # a new request replaces the pending one and releases its claim; a series of edits
+    # produces one write of the last value.
+    with Context() as c:
+        c.a = Cell(celltype="text")
+        c.a.set("one")
+        d = ManualDriver().attach(c.a, "one", mode="w")
+        c.a = "two"
+        in_flight = d.deliveries.popleft()
+        c.a = "three"
+        c.get_graph()
+        replaced = _session(c, "a").pending
+        c.a = "four"
+        c.a = "five"
+        c.get_graph()
+        assert replaced.lease.released
+        assert _session(c, "a").in_flight is in_flight
+        assert not d.deliveries
+        d.ack(in_flight)
+        c.get_graph()
+        last = d.deliveries.popleft()
+        assert last.lease.checksum.resolve("text") == "five"
+        assert not d.deliveries
+        d.ack(last)
+        c.get_graph()
+        assert last.lease.released
+
+
+def test_failed_delivery_retries_immediately_on_value_change():
+    # attachments.md §Write failures: retried with backoff "and immediately whenever the
+    # node's value changes".
+    with Context() as c:
+        c.a = Cell(celltype="text")
+        c.a.set("one")
+        d = ManualDriver().attach(c.a, "one", mode="w")
+        c.a = "two"
+        d.ack(d.deliveries.popleft(), outcome="error")
+        c.get_graph()
+        assert _session(c, "a").retry_at > time.monotonic() + 0.5  # backoff not yet due
+        assert not d.deliveries
+        c.a = "three"
+        c.get_graph()
+        delivery = d.deliveries.popleft()
+        assert delivery.lease.checksum.resolve("text") == "three"
+        d.ack(delivery)
+        c.get_graph()
+        assert c.a.mount.error is None
+
+
+def test_delivery_resolves_never_computes_cache_miss_is_a_delivery_error(tmp_path):
+    # attachments.md §A delivery resolves; it never computes: an unresolvable payload is
+    # an ordinary delivery error on the attachment, never on the cell, and the barrier
+    # resolves with it reported (a failed delivery waiting for retry counts as settled).
+    from seamless import Checksum
+    p = tmp_path / "a.txt"
+    with Context() as c:
+        c.a = Cell(celltype="text")
+        c.a.set_checksum(Checksum(bytes(range(32))))
+        c.a.mount(p, mode="w")  # does not raise for the resource's state
+        assert c.a.exception is None
+        assert isinstance(c.a.mount.error, MountError)
+        assert "CacheMissError" in str(c.a.mount.error)
+        report = c.mounts.sync(timeout=10)
+        assert isinstance(report[("a",)]["error"], MountError)
+        assert not p.exists()
+
+
+def test_barrier_resolves_with_a_sense_error(tmp_path):
+    # attachments.md §The cut barrier: resolves rather than raises when a cell has a
+    # sense error; the report says which.
+    p = tmp_path / "a.json"
+    p.write_text("broken")
+    with Context() as c:
+        c.a = Cell(celltype="plain")
+        c.a.mount(p, mode="r")
+        report = c.mounts.sync(timeout=10)
+        assert isinstance(report[("a",)]["sense_error"], MountError)
+
+
+def test_barrier_timeout_raises_withdraws_and_cancels_nothing():
+    # attachments.md §The cut barrier: expiry raises TimeoutError, withdraws the
+    # predicate and cancels nothing.
+    with Context() as c:
+        c.a = Cell(celltype="text")
+        c.a.set("one")
+        d = ManualDriver().attach(c.a, "one", mode="w")
+        c.a = "two"
+        in_flight = d.deliveries[0]
+        with pytest.raises(TimeoutError):
+            c.mounts.sync(timeout=0.3)
+        assert _session(c, "a").in_flight is in_flight  # nothing cancelled
+        d.ack(d.deliveries.popleft())
+        c.get_graph()
+        assert not _status(c, "a")["in_flight"]
+        del c.a.mount
+
+
+def slow_ident(x):
+    import time
+    time.sleep(1.5)
+    return x

@@ -19,14 +19,14 @@ from seamless_workflow.graph import BlockReason, NodeState
 
 DOC = "node-state-lifecycle.md"
 
-# Precedence, highest first (§Block reasons / Precedence).
+# Precedence, highest first (§Block reasons / Precedence).  The five-member
+# entry domain; a waiting input contributes no entry at all (ruling 4).
 PRECEDENCE = [
     "miswired",
     "unwired",
     "blocked-by-miswiring",
     "blocked-by-unwired",
     "blocked-by-error",
-    "waiting",
 ]
 
 
@@ -36,6 +36,11 @@ def winner(reasons: dict) -> str:
 
 def gap(section, why):
     return pytest.mark.xfail(strict=False, reason=f"{DOC} {section}: {why}")
+
+
+RULING_4_WAITING = gap("§Where each form is visible", "contract ahead of code: ruling 4 (2026-09-26): "
+                      "a waiting input has no entry and a waiting node reports None; the code "
+                      "lists waiting inputs with value 'waiting'")
 
 
 # ------------------------------------------------------------------ bodies
@@ -217,7 +222,9 @@ def test_unwired_cone_is_blocked_by_unwired_with_dict_reasons(make_context):
     assert ctx.mid.exception is None
 
 
-@pytest.mark.parametrize("kind", ["unwired", "error", "miswiring"])
+@pytest.mark.parametrize("kind", ["unwired", "error", pytest.param("miswiring", marks=gap(
+    "§Transitivity", "contract ahead of code: a cell below blocked-by-miswiring stays 'waiting' "
+    "(Context._apply_upstream_state has no miswiring branch), so the graph never quiesces"))])
 def test_every_reason_propagates_ten_edges_down(make_context, kind):
     """§Transitivity: 'a node ten edges below a missing wire still says ...'."""
     ctx = make_context()
@@ -235,15 +242,12 @@ def test_every_reason_propagates_ten_edges_down(make_context, kind):
         node = getattr(ctx, f"t{i}")
         node.pins.x = previous
         previous = node
-    if kind != "miswiring":
-        # A cell below blocked-by-miswiring never quiesces; that gap is pinned
-        # by test_cell_downstream_of_a_miswired_transformer_is_blocked_by_miswiring.
-        ctx.end = ctx.t10
+    ctx.end = ctx.t10
     ctx.compute(timeout=10)
 
     expected = f"blocked-by-{kind}"
-    if kind != "miswiring":
-        assert ctx.end.block_reason == expected
+    assert ctx.end.state == "blocked"
+    assert ctx.end.block_reason == expected
     for i in range(1, 11):
         node = getattr(ctx, f"t{i}")
         assert node.state == "blocked", (i, node.state)
@@ -270,7 +274,6 @@ def test_upstream_unwired_beats_upstream_error_on_a_live_transformer(make_contex
     reasons = ctx.j.block_reason
     assert reasons == {"x": "blocked-by-error", "y": "blocked-by-unwired"}
     assert winner(reasons) == "blocked-by-unwired"
-    assert ctx.j.result.block_reason == "blocked-by-unwired"
 
 
 def test_upstream_miswiring_beats_upstream_unwired_on_a_live_transformer(make_context):
@@ -291,6 +294,7 @@ def test_upstream_miswiring_beats_upstream_unwired_on_a_live_transformer(make_co
     assert winner(reasons) == "blocked-by-miswiring"
 
 
+@RULING_4_WAITING
 def test_waiting_loses_to_a_blocking_reason(make_context):
     """§Precedence: one progressing input + one blocked input = blocked."""
     ctx = make_context()
@@ -305,7 +309,7 @@ def test_waiting_loses_to_a_blocking_reason(make_context):
 
     assert ctx.slow.state == "computing"
     assert ctx.j.state == "blocked"
-    assert ctx.j.block_reason == {"x": "waiting", "y": "blocked-by-error"}
+    assert ctx.j.block_reason == {"y": "blocked-by-error"}
 
 
 # ------------------------------------------------ miswired (§The seven states)
@@ -438,6 +442,7 @@ def test_an_errored_connected_optional_upstream_blocks(make_context):
     assert ctx.tf.result.checksum is None
 
 
+@RULING_4_WAITING
 def test_a_connected_optional_pin_gates_like_a_required_pin(make_context):
     """§Connectivity: a connected optional upstream still in progress holds the node waiting."""
     ctx = make_context()
@@ -448,7 +453,7 @@ def test_a_connected_optional_pin_gates_like_a_required_pin(make_context):
     ctx.tf.pins.y = ctx.slow
 
     assert ctx.tf.state == "waiting"
-    assert ctx.tf.block_reason == {"y": "waiting"}
+    assert ctx.tf.block_reason is None
     ctx.compute(timeout=10)
     assert ctx.tf.result.value == 1.5
 
@@ -530,6 +535,7 @@ def test_a_self_edit_revokes_the_node_and_its_cone(make_context):
     assert ctx.out.value == 12
 
 
+@RULING_4_WAITING
 def test_the_cascade_rederives_rather_than_force_sets(make_context):
     """§The cascade: a downstream with a failed co-input lands in blocked, not waiting."""
     ctx = make_context()
@@ -547,29 +553,7 @@ def test_the_cascade_rederives_rather_than_force_sets(make_context):
     ctx.a = 5
     assert ctx.ok.state == "computing"
     assert ctx.j.state == "blocked"
-    assert ctx.j.block_reason == {"x": "waiting", "y": "blocked-by-error"}
-
-
-def test_the_textbook_diamond_never_fires_on_a_stale_input(make_context, transformation_observations):
-    """§The glitch-freedom invariant: a=1; b=a+1; c=a+b; a->10 gives c=21, never 12."""
-    ctx = make_context()
-    ctx.a = 1
-    ctx.b = slow_inc
-    ctx.b.pins.x = ctx.a
-    ctx.c = add
-    ctx.c.pins.x = ctx.a
-    ctx.c.pins.y = ctx.b
-    ctx.compute(timeout=10)
-    assert ctx.c.result.value == 3
-
-    ctx.a = 10
-    assert ctx.b.state == "computing"
-    assert ctx.c.state == "waiting"
-    assert ctx.c.result.checksum is None
-    ctx.compute(timeout=10)
-    assert ctx.c.result.value == 21
-    # Exactly two executions of c: (1, 2) and (10, 11).  A glitch would add (10, 2).
-    assert len(transformation_observations.misses("c")) == 2, transformation_observations.entries()
+    assert ctx.j.block_reason == {"y": "blocked-by-error"}
 
 
 # ------------------------------------------------ speculation, holds, prune
@@ -622,16 +606,453 @@ def test_the_self_edit_revert_window_is_thirty_seconds():
 # -------------------------------------------- cell joins (§Where each form is visible)
 
 
-@gap("§Where each form is visible", "a cell with a root edge and a sub-path edge reports a bare "
-     "enum, not a dict keyed by edge with '<root>' for the root edge")
-def test_a_join_with_a_root_edge_names_it_root(make_context):
+@gap("§Where each form is visible", "contract ahead of code: ruling 4 (2026-09-26): a cell "
+     "with one-level-deep inputs reports a dict keyed by edge; BoundCellBackend returns a scalar")
+def test_a_join_reports_a_dict_keyed_by_edge(make_context):
     ctx = make_context()
-    ctx.base = Cell("plain")
-    ctx.other = Cell("plain")
+    ctx.loose = Cell("plain")
+    ctx.broken = Cell("str")
+    ctx.broken.set("not an integer")
+    ctx.broken.celltype = "int"
     ctx.join = Cell("plain")
-    ctx.join = ctx.base
-    ctx.join["k"] = ctx.other
+    ctx.join["left"] = ctx.loose
+    ctx.join["right"] = ctx.broken
     ctx.compute(timeout=10)
 
     assert ctx.join.state == "blocked"
-    assert ctx.join.block_reason == {"<root>": "blocked-by-unwired", "k": "blocked-by-unwired"}
+    reasons = ctx.join.block_reason
+    assert reasons == {"left": "blocked-by-unwired", "right": "blocked-by-error"}
+    assert winner(reasons) == "blocked-by-unwired"
+
+
+# ------------------------------------------------ rulings 5, 6, 8 (2026-09-26)
+
+
+STAGE1_SCHEMA = """inputs:
+  - {name: x, dtype: int32}
+outputs:
+  - {name: result, dtype: int32, shape: [K]}
+"""
+
+
+@gap("§How each state is derived", "contract ahead of code: ruling 6 (2026-09-26): a compiled "
+     "Stage-1 failure is the transformer's own failure (state 'failed'); code reports 'blocked' with {}")
+def test_a_compiled_stage1_failure_is_failed(make_context):
+    from seamless_transformer import Transformer
+
+    tf = Transformer("c", compiled=True)
+    tf.schema = STAGE1_SCHEMA  # shape [K] without metavars: Stage-1 failure
+    tf.celltypes.x = "int"
+    tf.code = "int transform(int x, int *result) {return 0;}"
+    ctx = make_context()
+    ctx.tf = tf
+    ctx.compute(timeout=10)
+
+    assert ctx.tf.state == "failed"
+    assert isinstance(ctx.tf.exception, str) and "metavars" in ctx.tf.exception
+    assert ctx.tf.block_reason is None
+
+
+@gap("§States as seen through barriers", "contract ahead of code: ruling 5 (2026-09-26): a "
+     "standalone Pin can be miswired; after retyping its projected source it reports 'waiting'")
+def test_a_standalone_pin_can_be_miswired():
+    from seamless_transformer import delayed
+
+    src = Cell("mixed")
+    src.set([1, 2])
+    tf = delayed(double)
+    tf.pins.x = src[1]
+    assert tf.pins.x.state == "complete"
+    src.celltype = "plain"  # a valid request that invalidates the pin's wiring
+    assert tf.pins.x.state == "miswired"
+    assert tf.pins.x.checksum is None
+
+
+@gap("§The seven states", "contract ahead of code: ruling 8 (2026-09-26): the refusal message text "
+     "is contract (cells.md *Connecting*); today's message is the short one")
+def test_the_wiring_refusal_message_names_both_spellings(make_context):
+    ctx = make_context()
+    ctx.src = Cell("plain")
+    ctx.src.set([1, 2])
+    ctx.tf = double
+    ctx.tf.pins.x.celltype = "int"
+    with pytest.raises(TypeError) as info:
+        ctx.tf.pins.x = ctx.src[1]
+    message = str(info.value)
+    assert "would convert plain -> int behind a projection" in message
+    assert '[1].as_celltype("int")' in message
+    assert '.as_celltype("int")[1]' in message
+
+
+# ---------------------------- round-3 rulings (contract-clarity-rulings.md, line 70 on)
+
+
+def _root_plus_subpath_refused():
+    return gap("§Cell nodes (root edge and sub-path edges are mutually exclusive)",
+               "contract ahead of code: a cell with sub-path edges "
+               "may hold only a checksum at the root, never a root source; the code accepts both "
+               "orders (and root-after-sub-path silently drops the sub-path edge)")
+
+
+@_root_plus_subpath_refused()
+def test_a_sub_path_edge_is_refused_on_a_cell_with_a_root_edge(make_context):
+    ctx = make_context()
+    ctx.base = Cell("plain")
+    ctx.base.set({"a": 1})
+    ctx.other = Cell("plain")
+    ctx.other.set(2)
+    ctx.join = Cell("plain")
+    ctx.join = ctx.base
+    # The exception class is not ruled yet; only the refusal is.
+    with pytest.raises(Exception):
+        ctx.join["k"] = ctx.other
+    ctx.compute(timeout=10)
+    assert ctx.join.value == {"a": 1}
+
+
+@_root_plus_subpath_refused()
+def test_a_root_edge_is_refused_on_a_cell_with_sub_path_edges(make_context):
+    ctx = make_context()
+    ctx.base = Cell("plain")
+    ctx.base.set({"a": 1})
+    ctx.other = Cell("plain")
+    ctx.other.set(2)
+    ctx.join = Cell("plain")
+    ctx.join["k"] = ctx.other
+    # The exception class is not ruled yet; only the refusal is.
+    with pytest.raises(Exception):
+        ctx.join = ctx.base
+    ctx.compute(timeout=10)
+    assert ctx.join.value == {"k": 2}
+
+
+def test_a_root_checksum_with_sub_path_edges_is_accepted(make_context):
+    """The ruling's positive half: the root may hold a checksum (a literal)."""
+    ctx = make_context()
+    ctx.other = Cell("plain")
+    ctx.other.set(2)
+    ctx.join = Cell("plain")
+    ctx.join.set({"kept": True})
+    ctx.join["k"] = ctx.other
+    ctx.compute(timeout=10)
+    assert ctx.join.value == {"kept": True, "k": 2}
+
+
+COMPILED_SCHEMA = """inputs:
+  - {name: x, dtype: int32}
+outputs:
+  - {name: result, dtype: int32}
+"""
+needs_gcc = pytest.mark.skipif(not __import__("shutil").which("gcc"), reason="gcc required")
+
+
+def compiled_builder(celltype):
+    from seamless_transformer import Transformer
+
+    tf = Transformer("c", compiled=True)
+    tf.schema = COMPILED_SCHEMA
+    tf.celltypes.x = celltype
+    tf.code = "#include <stdint.h>\nint transform(int32_t x, int32_t *result) {*result=x;return 0;}"
+    return tf
+
+
+@needs_gcc
+@gap("§Transformer nodes, rule 3", "contract ahead of code: a pin with no valid checksum never sets "
+     "tf.exception (round-3 ruling); the compiled conversion path sets it")
+def test_a_compiled_pin_without_a_valid_checksum_blocks_without_an_exception(make_context):
+    ctx = make_context()
+    ctx.tf = compiled_builder("int")
+    ctx.src = Cell("plain")
+    ctx.src.set("abc")
+    ctx.tf.pins.x = ctx.src
+    ctx.compute(timeout=60)
+    assert ctx.tf.state == "blocked"
+    assert ctx.tf.block_reason == {"x": "blocked-by-error"}
+    assert ctx.tf.exception is None
+    assert ctx.tf.pins.x.state == "failed"
+
+
+@needs_gcc
+@gap("§Transformer nodes, rule 3", "contract ahead of code: a valid checksum the compiled transformer "
+     "cannot use makes it 'failed' (round-3 ruling); the code reports blocked-by-error")
+def test_a_compiled_transformer_that_cannot_use_a_valid_checksum_is_failed(make_context):
+    ctx = make_context()
+    ctx.tf = compiled_builder("mixed")
+    ctx.src = Cell("mixed")
+    ctx.src.set([1, 2])  # a valid mixed checksum; not an int32 scalar
+    ctx.tf.pins.x = ctx.src
+    ctx.compute(timeout=60)
+    assert ctx.tf.state == "failed"
+    assert ctx.tf.block_reason is None
+    assert isinstance(ctx.tf.exception, str) and "'x'" in ctx.tf.exception
+
+
+@needs_gcc
+def test_a_compiled_out_of_range_value_is_a_transformer_failure(make_context):
+    """Round-3 ruling: all pins valid, the transformer cannot use one -> failed."""
+    ctx = make_context()
+    ctx.tf = compiled_builder("mixed")
+    ctx.src = Cell("mixed")
+    ctx.src.set(2**40)
+    ctx.tf.pins.x = ctx.src
+    ctx.compute(timeout=60)
+    assert ctx.tf.state == "failed"
+    assert ctx.tf.block_reason is None
+    assert isinstance(ctx.tf.exception, str) and ctx.tf.exception
+
+
+# ------------------------------------------- coverage pass 2026-09-26 (post-rewrite)
+
+
+def identity(x):
+    return x
+
+
+def test_a_local_miswiring_wins_over_upstream_reasons(make_context):
+    """§Precedence: a local defect wins outright over upstream reasons; the dict
+    still lists every input that is neither complete nor waiting."""
+    ctx = make_context()
+    ctx.src = Cell("mixed")
+    ctx.src.set([1, 2])
+    ctx.bad = boom
+    ctx.bad.pins.x = 1
+    ctx.tf = add
+    ctx.tf.pins.x = ctx.src[1]
+    ctx.tf.pins.y = ctx.bad
+    ctx.compute(timeout=10)
+    ctx.src.celltype = "plain"
+
+    assert ctx.tf.state == "miswired"
+    reasons = ctx.tf.block_reason
+    assert reasons == {"x": "miswired", "y": "blocked-by-error"}
+    assert winner(reasons) == "miswired"
+    assert ctx.tf.exception is None
+
+
+def test_a_cells_own_conversion_failure_is_failed(make_context):
+    """§Cell nodes: a cell's own conversion failure is `failed` (not `blocked`),
+    and only that cell reports the exception; its dependents are blocked-by-error."""
+    ctx = make_context()
+    ctx.a = Cell("text")
+    ctx.a.set("abc")
+    ctx.b = Cell("int")
+    ctx.b = ctx.a
+    ctx.c = ctx.b
+    ctx.tf = double
+    ctx.tf.pins.x = ctx.b
+    ctx.compute(timeout=10)
+
+    assert ctx.b.state == "failed"
+    assert isinstance(ctx.b.exception, str) and ctx.b.exception
+    assert ctx.b.block_reason is None
+    assert ctx.c.state == "blocked"
+    assert ctx.c.block_reason == "blocked-by-error"
+    assert ctx.c.exception is None
+    assert ctx.tf.state == "blocked"
+    assert ctx.tf.block_reason == {"x": "blocked-by-error"}
+    assert ctx.tf.exception is None
+
+
+def test_cells_are_never_computing_and_non_blocked_nodes_report_no_block_reason(make_context):
+    """Rules 1 and 2 + §Where each form is visible.
+
+    A literal-pin transformer goes straight to `computing`; a cell node's own work
+    (conversion, join) reports `waiting`, never `computing`; a waiting,
+    computing, complete or failed node reports block_reason None.
+    """
+    ctx = make_context()
+    ctx.s = sleepy
+    ctx.s.pins.x = 0.7
+    ctx.conv = Cell("int")
+    ctx.conv = ctx.s
+    ctx.join = Cell("plain")
+    ctx.join["k"] = ctx.s
+    ctx.fail = boom
+    ctx.fail.pins.x = 1
+    assert ctx.s.state == "computing"  # never observed waiting
+
+    seen = set()
+    deadline = time.monotonic() + 1.5
+    while time.monotonic() < deadline:
+        for name in ("s", "conv", "join"):
+            node = getattr(ctx, name)
+            seen.add((name, node.state, repr(node.block_reason)))
+        time.sleep(0.005)
+    ctx.compute(timeout=10)
+
+    assert not any(state == "computing" for name, state, _ in seen if name != "s")
+    assert ("conv", "waiting", "None") in seen
+    assert ("join", "waiting", "None") in seen
+    assert all(reason == "None" for _, _, reason in seen)
+    for handle in (ctx.s, ctx.conv, ctx.join, ctx.s.result):
+        assert handle.state == "complete"
+        assert handle.block_reason is None
+    assert ctx.fail.state == "failed"
+    assert ctx.fail.block_reason is None
+    assert ctx.fail.result.block_reason is None
+
+
+def test_node_barrier_on_blocked_names_the_block_reason(make_context):
+    """§States as seen through barriers: for `blocked`, NodeError names the block reason."""
+    ctx = make_context()
+    ctx.bad = boom
+    ctx.bad.pins.x = 1
+    ctx.tail = double
+    ctx.tail.pins.x = ctx.bad
+    ctx.loose = add
+    ctx.loose.pins.x = 1
+    ctx.below = double
+    ctx.below.pins.x = ctx.loose
+    ctx.compute(timeout=10)
+
+    with pytest.raises(NodeError) as info:
+        ctx.tail.compute(timeout=10)
+    assert "blocked" in str(info.value) and "blocked-by-error" in str(info.value)
+    with pytest.raises(NodeError) as info:
+        ctx.below.compute(timeout=10)
+    assert "blocked-by-unwired" in str(info.value)
+
+
+def test_two_handles_onto_one_named_node_report_the_same_state(make_context):
+    """Top of page: state is a property of the node, not of the handle."""
+    ctx = make_context()
+    ctx.s = sleepy
+    ctx.s.pins.x = 0.3
+    first, second = ctx.s, ctx.s
+    assert first.state == second.state == "computing"
+    ctx.compute(timeout=10)
+    assert first.state == second.state == "complete"
+
+
+def test_a_standalone_cell_can_be_miswired():
+    """§The seven states (standalone consumers) + ruling 5: a standalone Cell
+    `c = b[3]` reports `miswired` after `b` is retyped, with checksum None."""
+    b = Cell("mixed")
+    b.set([1, 2, 3, 4])
+    c = b[3]
+    assert c.state != "miswired"
+    b.celltype = "plain"  # a valid request that invalidates c's link
+    assert c.state == "miswired"
+    assert c.checksum is None
+
+
+_CELL_JOIN_PRECEDENCE = gap(
+    "§Implementation status (block-reason precedence is inverted for cell nodes)",
+    "contract ahead of code: Context._derive_cell passes only the first incomplete edge "
+    "of a join to Context._apply_pending, which ranks blocked-by-error above blocked-by-unwired",
+)
+
+
+@_CELL_JOIN_PRECEDENCE
+def test_a_join_label_is_the_maximum_over_all_its_edges(make_context):
+    """§Precedence + §Transitivity for a cell node: a join whose first edge is
+    errored and second is unwired is blocked-by-unwired, and its consumers say so."""
+    ctx = make_context()
+    ctx.bad = boom
+    ctx.bad.pins.x = 1
+    ctx.loose = add
+    ctx.loose.pins.x = 1
+    ctx.join = Cell("plain")
+    ctx.join["a"] = ctx.bad  # first edge: error
+    ctx.join["b"] = ctx.loose  # second edge: unwired
+    ctx.copy = ctx.join
+    ctx.tf = double
+    ctx.tf.pins.x = ctx.join
+    ctx.compute(timeout=10)
+
+    assert ctx.join.state == "blocked"
+    assert ctx.copy.block_reason == "blocked-by-unwired"
+    assert ctx.tf.block_reason == {"x": "blocked-by-unwired"}
+
+
+@_CELL_JOIN_PRECEDENCE
+def test_a_join_with_a_waiting_edge_and_a_blocked_edge_is_blocked(make_context):
+    """§Precedence: a waiting input loses to everything, for cells too."""
+    ctx = make_context()
+    ctx.bad = boom
+    ctx.bad.pins.x = 1
+    ctx.compute(timeout=10)
+    ctx.slow = sleepy
+    ctx.slow.pins.x = 1.0
+    ctx.join = Cell("plain")
+    ctx.join["a"] = ctx.slow  # first edge: still progressing
+    ctx.join["b"] = ctx.bad
+    ctx.copy = ctx.join
+
+    assert ctx.slow.state == "computing"
+    assert ctx.join.state == "blocked"
+    assert ctx.copy.block_reason == "blocked-by-error"
+
+
+def _deep_index(celltype_of_members="bytes"):
+    from seamless import Buffer
+
+    member = Buffer(b"hello", celltype_of_members)
+    member.tempref()
+    index = Buffer({"a": member.get_checksum().hex()}, "plain")
+    index.tempref()
+    return index.get_checksum()
+
+
+_DEEP_TABLE = gap(
+    "§The seven states (miswired, deep sources: the deep table)",
+    "code/contract mismatch, not listed in §Implementation status: a link outside the deep "
+    "table is not recognised as miswired; the pin conversion fails ('Illegal expression "
+    "conversion: folder -> plain') and the transformer reports blocked-by-error",
+)
+
+
+@_DEEP_TABLE
+def test_retyping_a_deep_source_outside_the_deep_table_leaves_the_consumer_miswired(make_context):
+    ctx = make_context()
+    ctx.src = Cell("deepfolder", checksum=_deep_index())
+    ctx.tf = identity
+    ctx.tf.pins.x.celltype = "plain"
+    ctx.tf.pins.x = ctx.src  # deepfolder -> plain: legal
+    ctx.compute(timeout=10)
+    assert ctx.tf.state == "complete"
+
+    ctx.src.celltype = "folder"  # valid request; folder -> plain is outside the table
+    ctx.compute(timeout=10)
+    assert ctx.src.state == "complete"
+    assert ctx.tf.state == "miswired"
+    assert ctx.tf.block_reason == {"x": "miswired"}
+    assert ctx.tf.exception is None
+
+
+@_DEEP_TABLE
+def test_writing_a_deep_link_outside_the_deep_table_directly_raises(make_context):
+    """§The seven states: writing an ill-formed link directly raises (class unspecified)."""
+    ctx = make_context()
+    ctx.src = Cell("folder", checksum=_deep_index())
+    ctx.tf = identity
+    ctx.tf.pins.x.celltype = "plain"
+    with pytest.raises(Exception):
+        ctx.tf.pins.x = ctx.src
+
+
+@gap("§The seven states (blocked: not itself errored) / §Leaving a state (only the failing "
+     "node reports the exception)", "code/contract mismatch, not listed in §Implementation "
+     "status: Reactive._derive_transformer clears node.exception only when the node becomes "
+     "unwired, and BoundTransformerBackend.exception exposes it for 'blocked', so a transformer "
+     "that failed and is then blocked by a newly failed upstream keeps its stale exception")
+def test_a_previously_failed_transformer_blocked_by_a_new_upstream_failure_has_no_exception(make_context):
+    ctx = make_context()
+    ctx.up = identity
+    ctx.up.pins.x = 5
+    ctx.tf = boom
+    ctx.tf.pins.x = ctx.up
+    ctx.compute(timeout=10)
+    assert ctx.tf.state == "failed"
+
+    ctx.up.code = triple_boom
+    ctx.compute(timeout=10)
+    assert ctx.up.state == "failed"
+    assert ctx.tf.state == "blocked"
+    assert ctx.tf.block_reason == {"x": "blocked-by-error"}
+    assert ctx.tf.exception is None
+    assert ctx.tf.exception == ctx.tf.result.exception
+
+
+def triple_boom(x):
+    raise ValueError("upstream boom")

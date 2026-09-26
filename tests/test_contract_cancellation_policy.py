@@ -115,10 +115,11 @@ def test_prune_softcancels_and_peer_survives(make_context, tmp_path, hard_cancel
 @pytest.mark.xfail(
     strict=False,
     reason=(
-        "cancellation.md 'The pattern' + 'Policy': Context.close() must only "
-        "lose interest. The shared run's background task lives on the Context "
-        "controller's loop (the first caller's loop); stopping that loop on "
-        "close cancels it, so a peer handle gets ExecutionCanceledError."
+        "cancellation.md §Policy / §The pattern: contract ahead of code: "
+        "Context.close() must only lose interest, but the shared run's "
+        "background task lives on the Context controller's loop (the first "
+        "caller's loop); stopping that loop on close cancels it, so a peer "
+        "handle gets ExecutionCanceledError."
     ),
 )
 def test_close_softcancels_and_peer_survives(make_context, tmp_path, hard_cancels):

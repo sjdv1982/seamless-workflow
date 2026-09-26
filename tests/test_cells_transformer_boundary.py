@@ -1,19 +1,17 @@
-"""Cell/Pin boundary; Transformer-dependent cases intentionally added last.
+"""Cell/Pin boundary, bound: the Pin comes from a Transformer inside a Context.
 
-Contracts: cells.md (CellBase and input rejection), pins.md (A Pin is not a
-source), direct-delayed-and-transformation.md (decorators return builders).
-The task explicitly requires Transformer-building tests to be ahead-of-code
-xfails. Keep these separate from ordinary Cell regressions.
+Contracts: cells.md (CellBase and input rejection: a Pin is never a valid Cell
+input, TypeError naming pin.source; the handle guards live on CellBase, so they
+cover Pins), pins.md (A Pin is not a source). Standalone counterpart:
+seamless-transformer/tests/test_cells_transformer_boundary.py.
+
+These were a blanket module-level xfail from the feature 5 alignment pass; every
+case passes (verified 2026-09-26 with and without --runxfail), so the mark is gone.
 """
 import pytest
 from seamless import Cell
 from seamless.cell_errors import ProjectionError
 from seamless_transformer import delayed
-
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: Transformer-building Cell/Pin boundary tests (explicit feature 5 test-alignment instruction)",
-)
 
 
 def identity(x):

@@ -94,21 +94,20 @@ def test_node_state_and_exception_report_own_failure_only():
     ctx.compute(timeout=10)
 
     assert ctx.fail.state == "failed"
-    assert isinstance(ctx.fail.exception, RuntimeError)
+    # node-state-lifecycle.md: .exception is a string; a failure is an event.
+    assert isinstance(ctx.fail.exception, str)
     error = ctx.fail.exception
-    assert str(error).endswith("RuntimeError: boom\n")
+    assert error.endswith("RuntimeError: boom\n")
     assert ctx.fail.result.state == "failed"
-    result_error = ctx.fail.result.exception
-    assert result_error.failure_id == error.failure_id
-    assert str(result_error) == str(error)
+    assert ctx.fail.result.exception == error
     assert ctx.inc.state == "blocked"
-    assert ctx.inc.block_reason == ["x"]
+    assert ctx.inc.block_reason == {"x": "blocked-by-error"}
     assert ctx.inc.exception is None
 
     ctx.fail.pins.x = 2
     ctx.compute(timeout=10)
-    assert str(ctx.fail.exception) == str(error)
-    assert ctx.fail.exception.failure_id != error.failure_id
+    assert ctx.fail.state == "failed"
+    assert ctx.fail.exception.endswith("RuntimeError: boom\n")
 
 
 def test_node_state_reports_complete_after_explicit_barrier():

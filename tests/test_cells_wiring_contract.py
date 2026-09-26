@@ -38,7 +38,7 @@ def test_heterogeneous_join_refuses_projected_source(make_context):
     ctx.source = Cell("text")
     ctx.source.set("[1,2]")
     ctx.join = Cell("plain")
-    with pytest.raises(TypeError, match="project"):
+    with pytest.raises(TypeError):  # message text: ruling-8 tests in test_contract_cells_bound.py
         ctx.join["left"] = ctx.source[0]
 
 
@@ -135,22 +135,25 @@ def test_miswiring_blocks_dependents_and_recovers(make_context):
     assert ctx.child.value == ctx.dependent.value == "1"
 
 
-@gap("Cell block_reason must enumerate every responsible input")
+@gap("ruling 4 / node-state-lifecycle.md: a join's block_reason is a dict with one entry per input "
+     "that is not complete or waiting (BoundCellBackend.block_reason returns the scalar today)")
 def test_join_reports_all_blocking_inputs(make_context):
     ctx = make_context()
     ctx.unwired = Cell("plain")
     ctx.failed = Cell("str")
     ctx.failed.set("not an integer")
     ctx.failed.celltype = "int"
+    ctx.fine = Cell("plain")
+    ctx.fine.set(1)
     ctx.join = Cell("plain")
     ctx.join["left"] = ctx.unwired
     ctx.join["right"] = ctx.failed
+    ctx.join["done"] = ctx.fine
     ctx.compute(timeout=10)
+    assert ctx.fine.state == "complete"
     assert ctx.join.state == "blocked"
-    reasons = ctx.join.block_reason
-    assert isinstance(reasons, dict)
-    assert sorted(reasons.values()) == ["blocked-by-error", "blocked-by-unwired"]
-    assert len(reasons) == 2
+    # A complete input has no entry; each blocking input has its own.
+    assert ctx.join.block_reason == {"left": "blocked-by-unwired", "right": "blocked-by-error"}
     assert ctx.join.exception is None
 
 
@@ -189,6 +192,8 @@ def test_bound_checksum_reads_do_not_join_active_evaluation(make_context, monkey
         assert not errors
         assert result == [None]
         assert ctx.projected.state == "waiting"
+        # Clarity ruling (2026-09-26): a waiting node reports no block_reason.
+        assert ctx.projected.block_reason is None
     finally:
         release.set()
         if reader.ident is not None:
