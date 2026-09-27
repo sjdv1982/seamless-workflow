@@ -103,6 +103,7 @@ class Node:
     cell_config: CellConfig | None = None
     transformer_config: TransformerConfig | None = None
     cell_root_producer: ConstantProducer | None = None
+    cell_root_expression: object = None
     transformer_pin_producers: dict[str, ConstantProducer] = field(default_factory=dict)
     pin_states: dict[str, tuple] = field(default_factory=dict)
     pin_read_errors: dict[str, tuple] = field(default_factory=dict)
@@ -115,6 +116,10 @@ class Node:
 class Edge:
     source: ViewPath
     target: ViewPath
+    source_celltype: str | None = None
+    source_conversion: bool = False
+    source_conversion_before: bool = False
+    source_conversion_steps: tuple[tuple[int, str], ...] = ()
 
 
 class ContextGraph:

@@ -11,7 +11,7 @@ from seamless.cell_class import _UNSET, append_item_path, append_slice_path
 from seamless_transformer.builder_snapshot import TransformerBuilderSnapshot
 
 from .endpoints import BoundEndpoint
-from .errors import ReadOnlyEndpointError, StaleWorkflowHandleError
+from .errors import AuthorityError, ReadOnlyEndpointError, StaleWorkflowHandleError
 
 
 def _path_string(path: tuple[Any, ...]) -> str:
@@ -25,11 +25,18 @@ def _path_string(path: tuple[Any, ...]) -> str:
 
 
 class BoundCellBackend:
-    def __init__(self, context, node_path: tuple[str, ...], local_path=(), *, readonly=False):
+    def __init__(self, context, node_path: tuple[str, ...], local_path=(), *, readonly=False,
+                 projected_celltype=None, conversion=False, conversion_before=False,
+                 conversion_steps=()):
         self.context = context
         self.node_path = tuple(node_path)
         self.local_path = tuple(local_path)
         self.readonly = bool(readonly)
+        self._handle_id = object()
+        self._projected_celltype = projected_celltype
+        self._conversion = bool(conversion)
+        self._conversion_before = bool(conversion_before)
+        self._conversion_steps = tuple(conversion_steps)
 
     def _node(self):
         self.context._check_public_caller()
@@ -66,6 +73,8 @@ class BoundCellBackend:
         self._node()
         if self.readonly:
             return self.celltype
+        if self.local_path or self._conversion:
+            return self.context._node_snapshot(self.node_path).cell_config.celltype
         return self.context._effective_input_celltype(self.node_path)
 
     @property
@@ -73,13 +82,20 @@ class BoundCellBackend:
         node = self._node()
         if self.readonly:
             return node.transformer_config.celltypes.get("result", "mixed")
-        return node.cell_config.celltype
+        if self._projected_celltype is not None:
+            return self._projected_celltype
+        return self.context._celltype_for_path(self.node_path, self.local_path)
 
     @celltype.setter
     def celltype(self, value):
         self._node()
         if self.readonly:
             raise ReadOnlyEndpointError("Transformer result is read-only")
+        if self.local_path and value != self.celltype:
+            raise TypeError(
+                "Cannot implicitly convert behind a projection; use as_celltype() "
+                "before or after projecting"
+            )
         self.context._set_node_config(self.node_path, "celltype", value)
 
     @property
@@ -105,6 +121,8 @@ class BoundCellBackend:
     @property
     def scratch(self):
         node = self._node()
+        if self.local_path or self._conversion:
+            return False
         if node.cell_config is None:
             # A transformer result follows its transformer's scratch setting.
             return bool(node.transformer_config.scratch)
@@ -119,22 +137,59 @@ class BoundCellBackend:
     @property
     def checksum(self):
         self._node()
-        return self.context._get_checksum(self.node_path, self.local_path)
+        if self.state == "miswired":
+            return None
+        return self.context._get_checksum(
+            self.node_path,
+            self.local_path,
+            _handle_id=self._handle_id,
+            _target_celltype=self._projected_celltype,
+        )
 
     @property
     def buffer(self):
         self._node()
-        return self.context._get_buffer(self.node_path, self.local_path)
+        if self.state == "miswired":
+            return None
+        return self.context._get_buffer(
+            self.node_path,
+            self.local_path,
+            _handle_id=self._handle_id,
+            _target_celltype=self._projected_celltype,
+            _conversion=self._conversion,
+        )
 
     @property
     def value(self):
         self._node()
-        value = self.context._get_value(self.node_path, self.local_path, celltype=self.celltype)
+        if self.state == "miswired":
+            return None
+        value = self.context._get_value(
+            self.node_path,
+            self.local_path,
+            celltype=self.celltype,
+            _handle_id=self._handle_id,
+            _target_celltype=self._projected_celltype,
+        )
         return value.content if self.celltype == "bytes" and hasattr(value, "content") else value
 
     @property
     def state(self):
-        return self._node().state
+        node = self._node()
+        if self.local_path:
+            if self._projected_celltype is not None and not self._conversion:
+                parent_type = self.context._node_snapshot(self.node_path).cell_config.celltype
+                if (parent_type not in {"deepcell", "deepfolder", "folder"}
+                        and self._projected_celltype not in {"deepcell", "deepfolder", "folder"}
+                        and parent_type != self._projected_celltype):
+                    return "miswired"
+            if self.context._projection_error(
+                    self.node_path, self.local_path, self._handle_id) is not None:
+                return "failed"
+            return self.context._projection_state(
+                self.node_path, self.local_path, self._handle_id
+            )
+        return node.state
 
     @property
     def block_reason(self):
@@ -143,12 +198,30 @@ class BoundCellBackend:
     @property
     def exception(self):
         node = self._node()
+        if self.local_path:
+            error = self.context._projection_error(
+                self.node_path, self.local_path, self._handle_id
+            )
+            if error is not None:
+                return str(error)
         return str(node.exception) if node.state == "failed" and node.exception is not None else None
 
     def derive(self, **updates):
         self._node()
         from seamless.cell_class import _UNSET
         ref = updates.pop("_input_ref", _UNSET)
+        if ref is _UNSET and set(updates) == {"celltype"}:
+            conversion_steps = self._conversion_steps + ((len(self.local_path), updates["celltype"]),)
+            return type(self)(
+                self.context,
+                self.node_path,
+                self.local_path,
+                readonly=self.readonly,
+                projected_celltype=updates["celltype"],
+                conversion=True,
+                conversion_before=(self._conversion_before if self._conversion else not self.local_path),
+                conversion_steps=conversion_steps,
+            )
         if ref is _UNSET:
             result = Cell(source=self.build(ref), celltype=self.celltype,
                           validator=self.validator, validator_language=self.validator_language)
@@ -159,20 +232,38 @@ class BoundCellBackend:
                 result = result[component]
             result = result.with_validator(self.validator, language=self.validator_language)
         for key, value in updates.items():
-            setattr(result, key, value)
+            if key == "celltype":
+                result = result.as_celltype(value)
+            else:
+                setattr(result, key, value)
+        result.scratch = self.scratch
         return result
 
     def derive_item(self, key):
         self._node()
-        return type(self)(self.context, self.node_path, self.local_path + (key,), readonly=self.readonly)
+        local = self.local_path + (key,)
+        projected_celltype = self._projected_celltype if self._conversion else self.context._celltype_for_path(self.node_path, local)
+        return type(self)(
+            self.context, self.node_path, local, readonly=self.readonly,
+            projected_celltype=projected_celltype,
+            conversion=self._conversion,
+            conversion_before=self._conversion_before,
+            conversion_steps=self._conversion_steps,
+        )
 
     def derive_slice(self, start=None, stop=None, step=None):
         self._node()
+        local = self.local_path + (slice(start, stop, step),)
+        projected_celltype = self._projected_celltype if self._conversion else self.context._celltype_for_path(self.node_path, local)
         return type(self)(
             self.context,
             self.node_path,
-            self.local_path + (slice(start, stop, step),),
+            local,
             readonly=self.readonly,
+            projected_celltype=projected_celltype,
+            conversion=self._conversion,
+            conversion_before=self._conversion_before,
+            conversion_steps=self._conversion_steps,
         )
 
     def _ensure_writable(self):
@@ -181,6 +272,8 @@ class BoundCellBackend:
             raise ReadOnlyEndpointError(
                 f"Transformer result projection {self.path!r} is read-only"
             )
+        if self._conversion:
+            raise AuthorityError("A converted Cell handle cannot be written")
 
     def write_value(self, value, *, detach=False):
         self._ensure_writable()
@@ -237,19 +330,43 @@ class BoundCellBackend:
 
     def build(self, input_ref):
         self._node()
-        return self.context._build_cell_expression(self.node_path, self.local_path, input_ref)
+        return self.context._build_cell_expression(
+            self.node_path,
+            self.local_path,
+            input_ref,
+            _handle_id=self._handle_id,
+            _target_celltype=self._projected_celltype,
+            _conversion=self._conversion_before,
+            _conversion_steps=self._conversion_steps,
+        )
 
     def compute(self, input_ref, *, timeout=None):
         self._node()
         if input_ref is not _UNSET:
             return self.build(input_ref).compute()
-        return self.context._compute_cell_endpoint(self.node_path, self.local_path, timeout=timeout)
+        return self.context._compute_cell_endpoint(
+            self.node_path,
+            self.local_path,
+            timeout=timeout,
+            _handle_id=self._handle_id,
+            _target_celltype=self._projected_celltype,
+        )
 
     def run(self, input_ref):
         self._node()
         if input_ref is not _UNSET:
             return self.build(input_ref).run()
-        value = self.context._compute_cell_value(self.node_path, self.local_path)
+        value = self.context._compute_cell_value(
+            self.node_path, self.local_path, _handle_id=self._handle_id
+        )
+        if value is None:
+            error = self.context._projection_error(
+                self.node_path, self.local_path, self._handle_id
+            )
+            if error is None and not self.local_path:
+                error = self.context._node_snapshot(self.node_path).exception
+            if error is not None:
+                raise error
         return value.content if self.celltype == "bytes" and hasattr(value, "content") else value
 
     async def compute_async(self, input_ref, *, timeout=None):
@@ -273,6 +390,10 @@ class BoundCellBackend:
 
     def clear_exception(self):
         self._node()
+        if self.local_path:
+            return self.context._clear_projection_error(
+                self.node_path, self.local_path, self._handle_id
+            )
         return self.context._clear_exception(self.node_path)
 
     def _workflow_endpoint(self):
@@ -288,6 +409,10 @@ class BoundCellBackend:
             can_source=True,
             can_target=not self.readonly,
             can_set=not self.readonly,
+            celltype=self.celltype,
+            conversion=self._conversion,
+            conversion_before=self._conversion_before,
+            conversion_steps=self._conversion_steps,
         )
 
     def _endpoint_for_local(self, local):
@@ -302,6 +427,10 @@ class BoundCellBackend:
             True,
             not self.readonly,
             not self.readonly,
+            self.celltype,
+            self._conversion,
+            self._conversion_before,
+            self._conversion_steps,
         )
 
     def capture_source(self):

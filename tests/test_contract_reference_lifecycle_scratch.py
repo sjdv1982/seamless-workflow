@@ -12,9 +12,8 @@ and module claims.
 its current result follows the node's scratch policy. §8: only a non-scratch
 owner publishes, and persistence is a property of who holds.
 
-§10 gaps pinned here (xfail): superseded hold, subcontext copy
-(``_copy_subcontext``), literal claim (``_retain_producer``), pin/code claims and
-module claims of a scratch node. The ruling also covers
+§10 gaps pinned here (xfail): pin/code claims and module claims of a scratch node.
+The ruling also covers
 ``anonymous:<symbol>:current``, which cannot be exercised until anonymous nodes
 exist (see test_contract_reference_lifecycle_anonymous.py).
 """
@@ -92,12 +91,6 @@ def test_node_current_claim_follows_the_cell_scratch_policy(writes, scratch):
         ctx._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §1/§6 {RULING}: contract ahead of code: the superseded role is "
-    "acquired with incref_refholder() (scratch=False), which writes the result and "
-    "clears its scratch status",
-)
 def test_superseded_hold_on_a_scratch_node_neither_publishes_nor_clears_scratch(writes):
     cache = get_buffer_cache()
     ctx = Context()
@@ -118,12 +111,6 @@ def test_superseded_hold_on_a_scratch_node_neither_publishes_nor_clears_scratch(
         ctx._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §1/§6 {RULING}: contract ahead of code: "
-    "Context._copy_subcontext claims the copied current_checksum with "
-    "incref_refholder() (scratch=False) and publishes the scratch node's result",
-)
 def test_subcontext_copy_of_a_scratch_node_does_not_publish(writes):
     ctx = Context()
     try:
@@ -144,12 +131,6 @@ def test_subcontext_copy_of_a_scratch_node_does_not_publish(writes):
         ctx._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §1/§6 {RULING}: contract ahead of code: the cell:<path>:literal "
-    "role is acquired with incref_refholder() (scratch=False) regardless of "
-    "Cell.scratch, so a scratch cell's literal is published",
-)
 def test_a_scratch_cell_literal_claim_does_not_publish(writes):
     ctx = Context()
     try:

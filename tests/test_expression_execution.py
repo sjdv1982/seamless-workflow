@@ -119,7 +119,6 @@ def test_context_projection_dispatches_hashserver_only_input(tmp_path):
 
 @pytest.mark.parametrize("backend", ["jobserver", "daskserver"])
 @pytest.mark.parametrize("mode", ["standalone", "bound"])
-@pytest.mark.xfail(strict=False, reason="cells.md: string exceptions and binding explicit conversion chains are ahead of code")
 def test_missing_input_through_jobserver_fails_and_recovers(tmp_path, mode, backend):
     project = 'expression-missing-recovery-' + uuid.uuid4().hex
     _write_remote_config(tmp_path, backend=backend, project=project)

@@ -567,7 +567,6 @@ def test_projection_handle_compute_does_not_wait_on_the_parent(make_context):
 # ------------------------------------------------------------------- writes
 
 
-@_ahead('Writes through the Context', 'whole-checksum writes are not HashType-validated at write time; the mismatch only surfaces at a read')
 def test_whole_checksum_write_is_validated_against_the_celltype(make_context):
     ctx = make_context()
     ctx.i = Cell(celltype="int")

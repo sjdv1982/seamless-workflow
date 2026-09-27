@@ -48,7 +48,6 @@ def test_handles_are_fresh_objects(make_context):
     assert a.x is not a.x
 
 
-@ahead("Reads, Anonymous and projection handles", "a bound projection's .state reports the parent node's state")
 def test_fresh_handle_state_is_passive_and_local(make_context):
     ctx = make_context()
     _plain(ctx)
@@ -125,7 +124,6 @@ def test_handle_compute_never_waits_on_a_progressing_parent(make_context, monkey
         release.set()
 
 
-@ahead("Reads, Anonymous and projection handles", "a missing bound projection raises ExpressionEvaluationError instead of recording on the handle")
 def test_handle_failure_lives_on_that_handle_only(make_context):
     ctx = make_context()
     _plain(ctx)
@@ -177,7 +175,6 @@ def test_projection_handle_value_writes_are_pathed_parent_writes(make_context, m
     assert ctx.get_graph()["connections"] == []
 
 
-@ahead("Writes through a handle", "sub-path checksum/buffer writes fail with _edit() input_celltype TypeError")
 def test_set_checksum_with_input_celltype_converts_before_insertion(make_context):
     ctx = make_context()
     _plain(ctx)
@@ -191,7 +188,6 @@ def test_set_checksum_with_input_celltype_converts_before_insertion(make_context
         hold.clear()
 
 
-@ahead("Writes through a handle", "sub-path checksum/buffer writes fail with _edit() input_celltype TypeError")
 @pytest.mark.parametrize("form", ["checksum", "set_checksum"])
 def test_unresolvable_checksum_write_raises_cache_miss_and_records_nothing(make_context, form):
     ctx = make_context()
@@ -207,7 +203,6 @@ def test_unresolvable_checksum_write_raises_cache_miss_and_records_nothing(make_
     assert ctx.a.state == "complete"
 
 
-@ahead("Null and None / Writes through a handle", "clearing a sub-path fails with an _edit() TypeError, not the ruled ValueError")
 @pytest.mark.parametrize("form", ["checksum", "buffer", "set_checksum"])
 def test_clearing_a_sub_path_is_refused(make_context, form):
     ctx = make_context()
@@ -250,9 +245,7 @@ def _iadd(x):
 
 @pytest.mark.parametrize("form", [
     "set", "set_buffer", "set_checksum",
-    pytest.param("value", marks=ahead("Writes through a handle", "bound as_celltype returns a standalone snapshot whose declare-family writes detach")),
-    pytest.param("buffer", marks=ahead("Writes through a handle", "bound as_celltype returns a standalone snapshot whose declare-family writes detach")),
-    pytest.param("checksum", marks=ahead("Writes through a handle", "bound as_celltype returns a standalone snapshot whose declare-family writes detach")),
+    "value", "buffer", "checksum",
     "iadd",
 ])
 def test_writes_through_an_as_celltype_handle_raise_authority_error(make_context, form):
@@ -401,7 +394,6 @@ def test_symbol_is_stable_across_value_changes_of_its_source(make_context):
     assert set(ctx.get_graph()["anonymous_nodes"]) == before
 
 
-@ahead("Scratch policy", "a bound projection is a view that reports its parent node's scratch flag")
 @pytest.mark.parametrize("kind", ["item", "attribute", "slice"])
 def test_projection_handle_starts_non_scratch(make_context, kind):
     """§Scratch policy: a projection is a new Cell that owns its own result, so it starts non-scratch."""
@@ -415,7 +407,6 @@ def test_projection_handle_starts_non_scratch(make_context, kind):
 
 # --- Round 8 rulings (register/cells-RULINGS.md) ----------------------------------------
 
-@ahead("Reads, Anonymous and projection handles / Connecting", "a bound projection is a view whose celltype follows the parent; handles are never miswired")
 def test_handle_is_miswired_when_its_parent_is_retyped(make_context):
     """Round 8, ruling 1: an anonymous entry's celltype is fixed at creation, so
     retyping the parent makes a pathed handle miswired rather than silently re-reading."""
@@ -436,7 +427,6 @@ def test_handle_is_miswired_when_its_parent_is_retyped(make_context):
     assert handle.value == ","
 
 
-@ahead("Connecting, Elidable and elided / Fusion", "no anonymous nodes, fusion across edges or elision in a Context")
 @pytest.mark.parametrize("source_celltype, elided", [("mixed", True), ("text", False)])
 def test_conversion_then_path_is_elided_only_when_checksum_preserving(make_context, monkeypatch, source_celltype, elided):
     """Round 8, ruling 2: `ctx.a = ctx.b.as_celltype("plain")[3]` elides the anonymous

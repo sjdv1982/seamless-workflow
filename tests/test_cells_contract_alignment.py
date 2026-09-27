@@ -1,8 +1,7 @@
 """Feature 5 contract cases, paired with the other repository's same-named file.
 
 Core creates standalone Cells; workflow binds roots and derived conversions
-into a real Context. Cases are paired; fixtures and known-gap marks differ.
-Known gaps assert the intended result under non-strict xfail, never the bug.
+into a real Context. Cases are paired at the test-function level.
 """
 import asyncio
 import sys
@@ -13,10 +12,6 @@ from seamless import Buffer, CacheMissError, Cell, Checksum, Expression
 from seamless.checksum.celltypes import celltypes
 from seamless.cell_errors import AuthorityError, ProjectionError
 from seamless.checksum.hash_type_validation import HashTypeValidationError
-
-
-def gap(reason):
-    return pytest.mark.xfail(strict=False, reason="cells.md contract ahead of code: " + reason)
 
 
 @pytest.fixture
@@ -135,7 +130,7 @@ def test_null_is_complete_clear_is_unwired(world, clear_form):
     assert cell.state == "complete"
 
 
-@pytest.mark.parametrize("form", ["value", "buffer", pytest.param("checksum", marks=gap("observed 2026-09-22: bound dummy bytes checksum does not canonicalize empty to null"))])
+@pytest.mark.parametrize("form", ["value", "buffer", "checksum"])
 def test_empty_bytes_canonicalizes_to_null(world, form):
     cell = world.make("bytes")
     buffer = Buffer(b"")
@@ -263,7 +258,6 @@ def test_navigation_links_to_parent_and_fuses_paths(world):
     assert child.build().identity_key == Expression(root.checksum, input_celltype="plain", celltype="plain", path="a.b").identity_key
 
 
-@gap("syntax order is application order; conversion closes and rebases the chain")
 def test_conversion_before_projection_differs_from_projection_before_conversion(world):
     root = world.make("text")
     root.set("[10, 20, 30, 40]")
@@ -290,7 +284,6 @@ def test_projected_source_cannot_implicitly_convert(world, api):
     assert target.value == {"unchanged": True}
 
 
-@gap("retyping a projecting consumer must refuse a conversion behind its path")
 def test_projection_cannot_be_retyped_in_place(world):
     root = world.make("plain")
     root.set({"a": 59})
@@ -300,7 +293,6 @@ def test_projection_cannot_be_retyped_in_place(world):
     assert child.celltype == "plain"
 
 
-@gap("source retyping makes projecting consumers miswired, including standalone")
 def test_source_retype_marks_consumer_miswired(world):
     source = world.make("text")
     source.set("[10, 20]")
@@ -317,7 +309,6 @@ def test_source_retype_marks_consumer_miswired(world):
     assert child.value == ","
 
 
-@gap("binding a Cell whose source is an Expression is currently rejected (Connecting)")
 def test_read_evaluates_upstream_expression(world):
     source = Buffer({"a": 61}, "plain")
     hold = source.tempref()
@@ -352,7 +343,6 @@ def test_failure_is_a_stable_string_and_new_input_recovers(world):
     assert cell.value == 67
 
 
-@gap("buffer and value must re-raise the same recorded evaluation failure (bug 4)")
 def test_buffer_value_report_recorded_failure_consistently(world):
     cell = world.make("str")
     cell.set("not an int")
@@ -368,7 +358,6 @@ def test_buffer_value_report_recorded_failure_consistently(world):
     assert str(errors[0]) == str(errors[1])
 
 
-@gap("bound missing projections must record evaluation failure, not raise (bug 3)")
 def test_missing_projection_compute_reports_failure(world):
     root = world.make("plain")
     root.set({"present": 71})
@@ -380,7 +369,6 @@ def test_missing_projection_compute_reports_failure(world):
     assert missing.state == "failed"
 
 
-@gap("bound public reads must validate and record materialization failures (bug 2)")
 @pytest.mark.parametrize("attr", ["buffer", "value"])
 def test_invalid_result_read_validates_and_records(world, attr):
     source = Buffer(b"not valid JSON")
@@ -396,7 +384,6 @@ def test_invalid_result_read_validates_and_records(world, attr):
         hold.clear()
 
 
-@gap("bound public deserialization must record failure; exception becomes a string")
 def test_deserialization_failure_is_repeatable_after_clear(world):
     source = Buffer(b"def broken(:\n")
     hold = source.tempref()
@@ -457,7 +444,6 @@ def test_snapshot_is_frozen_when_root_input_changes(world):
     assert projected.value == 89
 
 
-@gap("observed 2026-09-22: build/as_celltype on an unwired bound Cell raises ValueError")
 def test_configuration_and_builder_methods_do_not_evaluate(world, monkeypatch):
     root = world.make("plain")
     # An unwired root prevents the Context's independent eager work from racing
@@ -584,8 +570,6 @@ def test_build_aliases_snapshot_the_same_recipe(world):
     assert all(snapshot.run() == 157 for snapshot in snapshots)
 
 
-@gap("§Deep celltypes on a Cell: a bound one-step projection keeps the parent's deep celltype "
-     "instead of the member celltype, so reading it raises 'Illegal deep path ... deepcell -> deepcell'")
 @pytest.mark.parametrize("celltype,member_type,value", [
     ("deepcell", "mixed", {"answer": 163}),
     ("deepfolder", "bytes", b"deep folder member"),
@@ -627,9 +611,6 @@ def test_null_retype_keeps_checksum(world, celltype):
 
 
 # `module` -> `int` is not specified anywhere, so it is pinned neither way.
-@pytest.mark.xfail(strict=False, reason=(
-    "cells.md §Null and None / clarity ruling (null short-circuits only on legal pairs): contract ahead of code: "
-    "the null checksum short-circuits the illegal conversion and the cell reports a complete NULL"))
 @pytest.mark.parametrize("celltype", _NULL_ILLEGAL_TO_INT)
 def test_null_retype_over_an_illegal_pair_fails(world, celltype):
     cell = world.make(celltype)
@@ -642,8 +623,6 @@ def test_null_retype_over_an_illegal_pair_fails(world, celltype):
     assert isinstance(cell.exception, str) and cell.exception
 
 
-@gap("§Connecting, Fusion: checksum-preserving conversion + path must fuse with the converted input_celltype; today a bound as_celltype is a standalone snapshot, so binding the chain "
-     "raises 'Cannot bind a Cell whose input_ref is Expression'")
 def test_preserving_conversion_then_path_fuses(world):
     root = world.make("plain")
     root.set({"a": 173})
@@ -655,8 +634,6 @@ def test_preserving_conversion_then_path_fuses(world):
     assert actual.database_key == expected.database_key
 
 
-@gap("§Connecting, Fusion: reformatting conversion + path must retain the converted buffer as input; today a bound as_celltype is a standalone snapshot, so binding the chain "
-     "raises 'Cannot bind a Cell whose input_ref is Expression'")
 def test_reformatting_conversion_then_path_does_not_fuse(world):
     root = world.make("str")
     root.set("word")
@@ -674,8 +651,6 @@ def test_reformatting_conversion_then_path_does_not_fuse(world):
         hold.clear()
 
 
-@gap("§Connecting, Fusion: two conversions never fuse; text -> plain -> mixed differs from text -> mixed; today a bound as_celltype is a standalone snapshot, so binding the chain "
-     "raises 'Cannot bind a Cell whose input_ref is Expression'")
 def test_two_conversions_keep_the_intermediate_recipe(world):
     root = world.make("text")
     root.set("[1,2]")
@@ -695,8 +670,6 @@ def test_two_conversions_keep_the_intermediate_recipe(world):
         hold.clear()
 
 
-@gap("§Connecting, Fusion / §Deep celltypes on a Cell: a deep step ends the fused run; today a bound "
-     "one-step projection keeps the parent's deep celltype, so the chain raises 'Illegal deep path'")
 def test_deep_step_is_a_fusion_barrier(world):
     member = Buffer({"a": 179}, "mixed")
     indexes = [Buffer({key: member.get_checksum().hex()}, "plain") for key in ("first", "second")]
@@ -717,7 +690,6 @@ def test_deep_step_is_a_fusion_barrier(world):
             hold.clear()
 
 
-@gap("observed 2026-09-22: bound compute raises the deferred-validator failure instead of reporting it")
 def test_deferred_validator_refuses_even_a_cached_recipe(world):
     buffer = Buffer(181, "int")
     hold = buffer.tempref()

@@ -4,7 +4,7 @@ import asyncio
 import copy
 from dataclasses import replace
 from functools import wraps
-from seamless import Buffer, Cell, Checksum
+from seamless import Buffer, CacheMissError, Cell, Checksum, Expression
 from .adapters import checksum_for_value
 from .sidework import Lease, PreparedCell, PreparedTransformer
 from .graph import TransformerConfig
@@ -34,11 +34,29 @@ def _prepare_transformer(ctx, value):
     return PreparedTransformer(cfg, snapshot)
 
 
+def _contains_expression(value):
+    if isinstance(value, Expression):
+        return True
+    if isinstance(value, Cell):
+        return _contains_expression(value._input_ref)
+    return False
+
+
 def _prepare_assignment(ctx, path, value):
     from seamless_transformer.transformer_class import TransformerCore
     ep = _endpoint(value)
     if ep is not None: return ep
     if isinstance(value, Cell):
+        if _contains_expression(value._input_ref):
+            expression = value.build()
+            return PreparedCell(
+                expression.input_celltype,
+                value.celltype,
+                value.validator,
+                value.validator_language,
+                expression,
+                scratch=bool(getattr(value, 'scratch', False)),
+            )
         ref = value._input_ref
         if isinstance(ref, Cell):
             ref = _prepare_assignment(ctx, path, ref)
@@ -90,7 +108,8 @@ async def _wait_async(ctx, path=None, local=(), *, read=False, barrier=False, ti
             await asyncio.wrap_future(ctx._controller.submit('_withdraw_wait', (future,), klass=1))
 
 
-def _edit(ctx, path, local, value=None, *, detach=False, delete=False, operation=None, checksum_rhs=False):
+def _edit(ctx, path, local, value=None, *, detach=False, delete=False, operation=None,
+          checksum_rhs=False, input_celltype=None):
     from .context import _assign_path, _delete_path, _read_path
     import operator
     for attempt in range(8):
@@ -109,9 +128,28 @@ def _edit(ctx, path, local, value=None, *, detach=False, delete=False, operation
             if operation:
                 replacement = getattr(operator, operation)(_read_path(root, local) if local else root, value)
             elif checksum_rhs:
-                replacement = Checksum(value).resolve(lease.celltype)
+                if value is None and local:
+                    raise ValueError("Cannot clear a sub-path with None; use del to remove it")
+                checksum = Checksum(value)
+                resolved = checksum.resolve(
+                    input_celltype or ctx._celltype_for_path(path, local)
+                )
+                replacement = (
+                    checksum
+                    if ctx._node_celltype(path) in {"deepcell", "deepfolder", "folder"}
+                    else resolved
+                )
             else:
                 replacement = value
+                if local:
+                    target_celltype = ctx._celltype_for_path(path, local)
+                    serialized = checksum_for_value(
+                        value, target_celltype, checksum_is_value=True
+                    )
+                    if ctx._node_celltype(path) in {"deepcell", "deepfolder", "folder"}:
+                        replacement = serialized
+                    else:
+                        replacement = serialized.resolve(target_celltype)
             if not local:
                 root = replacement
             elif delete:
@@ -241,31 +279,102 @@ def controller_method(method):
             return _edit(self, *args, detach=True, delete=True)
         elif name in {'_get_value','_get_buffer','_get_checksum'}:
             path = args[0]; local = args[1] if len(args)>1 else ()
+            handle_id = kwargs.get('_handle_id')
             lease = controller.call('_read_snapshot', path, local, klass=4)
             try:
                 checksum = lease.checksum
                 if checksum is not None and local:
                     from .sidework import evaluate_projection
-                    try: checksum = evaluate_projection(checksum, local, lease.celltype, lease.celltype)
-                    except (KeyError, IndexError): checksum = None
+                    try:
+                        checksum = evaluate_projection(
+                            checksum,
+                            local,
+                            lease.celltype,
+                            kwargs.get('_target_celltype') or self._celltype_for_path(path, local),
+                        )
+                    except Exception as exc:
+                        controller.call(
+                            '_record_projection_error', path, tuple(local), exc,
+                            handle_id, klass=2,
+                        )
+                        checksum = None
+                    else:
+                        controller.call(
+                            '_record_projection_success', path, tuple(local),
+                            lease.checksum.hex(), handle_id, klass=2,
+                        )
                 if name == '_get_checksum':
                     if checksum is not None: checksum.tempref()
                     return checksum
-                if checksum is None: return None
-                return checksum.resolve(kwargs.get('celltype') or lease.celltype) if name == '_get_value' else checksum.resolve()
+                if checksum is None:
+                    error = controller.call(
+                        '_projection_error', path, tuple(local), handle_id, klass=4
+                    )
+                    if error is not None:
+                        raise error
+                    node = controller.call('_node_snapshot', path, klass=4)
+                    if node.exception is not None:
+                        raise node.exception
+                    return None
+                try:
+                    if name == '_get_value':
+                        return checksum.resolve(
+                            kwargs.get('celltype') or self._celltype_for_path(path, local)
+                        )
+                    from seamless.checksum.hash_type_validation import validate_deserializable_as
+                    celltype = kwargs.get('_target_celltype') or self._celltype_for_path(path, local)
+                    deep = celltype in {'deepcell', 'deepfolder', 'folder'}
+                    if not deep:
+                        validate_deserializable_as(checksum, celltype)
+                    buffer = checksum.resolve()
+                    if not deep:
+                        validate_deserializable_as(checksum, celltype, buffer=buffer)
+                    return buffer
+                except CacheMissError:
+                    raise
+                except Exception as exc:
+                    controller.call('_record_node_error', path, exc, klass=2)
+                    raise
             finally:
                 lease._release_refholds()
         elif name in {'_compute_cell_endpoint','_compute_cell_value','_compute_node'}:
             path = args[0]; local = args[1] if len(args)>1 else ()
-            lease = _wait(self, path, local, read=True, barrier=True, timeout=kwargs.get('timeout'))
+            handle_id = kwargs.get('_handle_id')
+            lease = _wait(
+                self,
+                path,
+                local,
+                read=True,
+                barrier=name == '_compute_node',
+                timeout=kwargs.get('timeout'),
+            )
             try:
                 if lease.checksum is None: return None
                 if local:
                     from .sidework import evaluate_projection
-                    projected = evaluate_projection(lease.checksum, local, lease.celltype, lease.celltype)
+                    try:
+                        projected = evaluate_projection(
+                            lease.checksum,
+                            local,
+                            lease.celltype,
+                            kwargs.get('_target_celltype') or self._celltype_for_path(path, local),
+                        )
+                    except Exception as exc:
+                        controller.call(
+                            '_record_projection_error', path, tuple(local), exc,
+                            handle_id, klass=2,
+                        )
+                        return None
+                    else:
+                        controller.call(
+                            '_record_projection_success', path, tuple(local),
+                            lease.checksum.hex(), handle_id, klass=2,
+                        )
                 else: projected = lease.checksum
                 if name == '_compute_cell_value' or (name == '_compute_node' and not kwargs.get('checksum')):
-                    return projected.resolve(lease.celltype)
+                    return projected.resolve(
+                        kwargs.get('_target_celltype') or lease.celltype
+                    )
                 projected.tempref()
                 return projected
             finally:

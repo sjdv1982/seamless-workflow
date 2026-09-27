@@ -23,16 +23,7 @@ INVALID_EXPRESSION_CASES = tuple(
 
 def _parameters(cases):
     for witness, case in cases:
-        if case.target_celltype != case.celltype:
-            yield pytest.param(
-                witness, case,
-                marks=pytest.mark.xfail(
-                    strict=False,
-                    reason="cells.md Connecting: binding an Expression-backed conversion child is ahead of code",
-                ),
-            )
-        else:
-            yield witness, case
+        yield witness, case
 
 
 def _cell_from_case(ctx, source_checksum, case):

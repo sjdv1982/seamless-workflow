@@ -24,6 +24,10 @@ class BoundEndpoint:
     can_source: bool = True
     can_target: bool = False
     can_set: bool = False
+    celltype: str | None = None
+    conversion: bool = False
+    conversion_before: bool = False
+    conversion_steps: tuple[tuple[int, str], ...] = ()
 
 
 __all__ = ["BoundEndpoint", "EndpointKind"]

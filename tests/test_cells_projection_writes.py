@@ -1,9 +1,7 @@
 """The six projection writes, bound: pathed read-modify-set writes to the parent.
 
 Paired with seamless-core/tests/test_cells_projection_writes.py, where the same
-rule now holds standalone (cells.md, register/cells-RULINGS.md round 9). The
-documented write bugs are xfailed individually; authority failures never count
-as successful writes.
+rule now holds standalone (cells.md, register/cells-RULINGS.md round 9).
 """
 import pytest
 from seamless import Buffer, Cell
@@ -11,13 +9,6 @@ from seamless.cell_errors import AuthorityError
 
 
 FORMS = ["value", "buffer", "checksum"]
-
-# cells.md *Implementation status*, Writes: one gap behind every bound sub-path buffer/checksum form,
-# so the authority check is never reached either.
-_SUBPATH_CHECKSUM_GAP = pytest.mark.xfail(strict=False, reason=(
-    "cells.md §Writes through a handle: contract ahead of code: a bound sub-path checksum or buffer write "
-    "fails with TypeError: _edit() got an unexpected keyword argument 'input_celltype'"))
-
 
 def write(cell, form, method, value):
     if method:
@@ -28,8 +19,8 @@ def write(cell, form, method, value):
 
 @pytest.mark.parametrize("form", [
     "value",
-    pytest.param("buffer", marks=_SUBPATH_CHECKSUM_GAP),
-    pytest.param("checksum", marks=_SUBPATH_CHECKSUM_GAP),
+    "buffer",
+    "checksum",
 ])
 @pytest.mark.parametrize("method", [False, True])
 def test_projection_write_matrix(make_context, form, method):
@@ -50,8 +41,8 @@ def test_projection_write_matrix(make_context, form, method):
 
 @pytest.mark.parametrize("form", [
     "value",
-    pytest.param("buffer", marks=_SUBPATH_CHECKSUM_GAP),
-    pytest.param("checksum", marks=_SUBPATH_CHECKSUM_GAP),
+    "buffer",
+    "checksum",
 ])
 @pytest.mark.parametrize("method", [False, True])
 def test_projection_write_under_source_is_refused(make_context, form, method):

@@ -25,7 +25,6 @@ def _text_source(ctx, name="b", value="[10, 20, 30, 40]"):
 
 # --- Connecting: the wiring rule on bound assignment --------------------------
 
-@gap("§Connecting: rewiring an existing cell through a projection must not convert (ctx.a = ctx.b[3] is accepted today)")
 def test_rewiring_existing_cell_through_projection_and_conversion_raises(make_context):
     ctx = make_context()
     _text_source(ctx)
@@ -58,7 +57,6 @@ def test_projected_source_is_legal_when_celltypes_match(make_context):
     assert ctx.existing.value == ctx.fresh.value == ","
 
 
-@gap("§Connecting: retyping a node fed through a path must be refused (accepted today)")
 def test_retyping_a_path_fed_node_is_refused(make_context):
     ctx = make_context()
     _text_source(ctx, value="abc")
@@ -81,7 +79,6 @@ def test_retyping_a_source_with_projecting_consumers_is_not_refused(make_context
     assert ctx.b.value == [1, 2]
 
 
-@gap("§Connecting: an ill-formed edge in a loaded graph must leave its target miswired (graph loads and answers ',' today)")
 def test_loaded_edge_that_projects_and_converts_is_miswired(make_context):
     ctx = make_context()
     _text_source(ctx)
@@ -188,7 +185,6 @@ def test_bound_with_derivations_are_standalone_and_navigation_stays_bound(make_c
         hold.clear()
 
 
-@gap("§Connecting / §Work: a bound as_celltype returns a standalone snapshot, not an anonymous handle over the parent's current checksum")
 def test_bound_as_celltype_is_a_live_handle_not_a_snapshot(make_context):
     ctx = make_context()
     ctx.a = Cell("plain")
@@ -224,7 +220,6 @@ def test_bound_as_celltype_starts_non_scratch(make_context):
     assert ctx.s.as_celltype("float").scratch is False
 
 
-@gap("§Scratch policy: with_input()/with_validator() keep the flag; the bound derivation drops it today")
 @pytest.mark.parametrize("derive", ["with_input", "with_validator"])
 def test_bound_modified_copies_keep_the_scratch_flag(make_context, derive):
     ctx = make_context()
@@ -412,8 +407,6 @@ def _deep_ctx(ctx, celltype, members):
     return holds
 
 
-@gap("§Writes through a handle / clarity ruling (writes below a deep parent): a bound sub-path checksum write "
-     "fails with _edit() input_celltype TypeError instead of replacing index[k]")
 @pytest.mark.parametrize("form", ["checksum", "set_checksum"])
 def test_bound_member_checksum_write_replaces_the_index_entry(make_context, form):
     ctx = make_context()
@@ -433,8 +426,6 @@ def test_bound_member_checksum_write_replaces_the_index_entry(make_context, form
             hold.clear()
 
 
-@gap("§Writes through a handle / clarity ruling (writes below a deep parent): the value is inserted "
-     "into the index as a value instead of as its member-celltype checksum")
 @pytest.mark.parametrize("celltype, value", [("deepcell", {"x": 5}), ("folder", b"folder bytes")])
 def test_bound_member_value_write_is_serialized_at_the_member_celltype(make_context, celltype, value):
     ctx = make_context()
@@ -466,9 +457,6 @@ def test_bound_writes_below_a_deep_member_are_illegal(make_context):
             hold.clear()
 
 
-@gap("§Writes through a handle / clarity ruling (writes below a deep parent): a bound buffer write at k "
-     "is validated at the parent's deep celltype instead of the member celltype "
-     "('Deep member ... must be a lowercase checksum')")
 @pytest.mark.parametrize("form", ["buffer", "set_buffer"])
 def test_bound_member_buffer_write_inserts_the_buffer_checksum(make_context, form):
     ctx = make_context()

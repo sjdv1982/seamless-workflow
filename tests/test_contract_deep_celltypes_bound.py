@@ -3,7 +3,7 @@
 - one step below a deep parent carries the member celltype (cells.md, Projections: line 253);
 - checksum/buffer writes through that handle are resolved at the member celltype
   (cells.md, Writes through a handle).
-Known gaps are non-strict xfails that assert the contract, never the bug.
+The bound cases mirror the corresponding standalone deep-celltype contracts.
 """
 import pytest
 
@@ -11,22 +11,6 @@ from seamless import Buffer, CacheMissError, Cell, Checksum
 from seamless.checksum.calculate_checksum import calculate_checksum
 
 DEEP_MEMBER = [("deepcell", "mixed"), ("deepfolder", "bytes"), ("folder", "bytes")]
-
-_BOUND_MEMBER_GAP = pytest.mark.xfail(
-    strict=False,
-    reason="deep-celltypes.md §Implementation status (Bound handles keep the deep celltype): "
-    "contract ahead of code: a bound "
-    "one-step projection of a deep parent keeps the parent's deep celltype, so reading it "
-    "raises 'Illegal deep path ... deepcell -> deepcell'",
-)
-_BOUND_WRITE_GAP = pytest.mark.xfail(
-    strict=False,
-    reason="deep-celltypes.md §Implementation status (Bound writes at k fail or use the wrong "
-    "celltype): contract ahead of code: through ctx.a['k'] the checksum forms raise TypeError (_edit() got an unexpected "
-    "keyword argument 'input_celltype') and the buffer forms are validated at the parent's "
-    "deep celltype instead of the member celltype (ValueError / HashTypeValidationError)",
-)
-
 
 def _held(value, celltype=None):
     buffer = Buffer(value, celltype) if celltype else Buffer(value)
@@ -40,7 +24,6 @@ def _member(celltype, tag):
     return _held(f"member {tag}".encode())
 
 
-@_BOUND_MEMBER_GAP
 @pytest.mark.parametrize("celltype,member", DEEP_MEMBER)
 def test_bound_one_step_projection_carries_the_member_celltype(make_context, celltype, member):
     old = _member(celltype, "old")
@@ -54,7 +37,6 @@ def test_bound_one_step_projection_carries_the_member_celltype(make_context, cel
     assert handle.checksum == old.get_checksum()
 
 
-@_BOUND_WRITE_GAP
 @pytest.mark.parametrize("form", ["checksum", "set_checksum", "buffer", "set_buffer"])
 @pytest.mark.parametrize("celltype,member", DEEP_MEMBER)
 def test_bound_handle_write_below_a_deep_parent_replaces_the_member_checksum(
@@ -76,7 +58,6 @@ def test_bound_handle_write_below_a_deep_parent_replaces_the_member_checksum(
     assert ctx.a.value == {"k": new.get_checksum(), "other": old.get_checksum()}
 
 
-@_BOUND_WRITE_GAP
 @pytest.mark.parametrize("celltype,member", DEEP_MEMBER)
 def test_bound_handle_write_with_absent_buffer_raises_cache_miss_and_records_nothing(
     make_context, celltype, member
@@ -96,11 +77,6 @@ def test_bound_handle_write_with_absent_buffer_raises_cache_miss_and_records_not
 # --- Value writes at k and writes below k ------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="deep-celltypes.md §Implementation status (Bound writes at k fail or use the wrong "
-    "celltype: the value forms do not produce the member checksum): contract ahead of code",
-)
 @pytest.mark.parametrize("celltype,member", DEEP_MEMBER)
 def test_bound_value_write_at_k_inserts_the_member_checksum(make_context, celltype, member):
     old = _member(celltype, "old")

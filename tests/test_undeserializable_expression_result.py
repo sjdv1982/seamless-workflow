@@ -12,7 +12,6 @@ from seamless.checksum.hash_type_validation import HashTypeValidationError
 
 
 @pytest.mark.parametrize("code,celltype", [("x = (", "python"), ("value: [", "yaml")])
-@pytest.mark.xfail(strict=False, reason="contract ahead of code: explicit projection/conversion links and string exceptions")
 def test_bound_projection_fails_and_clear_exception_reproduces(make_context, code, celltype):
     ctx = make_context()
     ctx.a = Cell("plain")
