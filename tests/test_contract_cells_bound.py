@@ -309,8 +309,6 @@ def _pin_identity(x):
     return x
 
 
-@gap("§Connecting / ruling 8: the pin wiring refusal says 'Cannot implicitly convert behind a projection; "
-     "use as_celltype() before or after projecting' instead of the two-spelling message")
 def test_pin_wiring_refusal_message_names_both_spellings(make_context):
     ctx = make_context()
     _text_source(ctx, value="[10, 20]")

@@ -668,8 +668,6 @@ def test_a_standalone_pin_can_be_miswired():
     assert tf.pins.x.checksum is None
 
 
-@gap("§The seven states", "contract ahead of code: ruling 8 (2026-09-26): the refusal message text "
-     "is contract (cells.md *Connecting*); today's message is the short one")
 def test_the_wiring_refusal_message_names_both_spellings(make_context):
     ctx = make_context()
     ctx.src = Cell("plain")

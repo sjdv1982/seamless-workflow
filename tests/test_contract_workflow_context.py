@@ -545,9 +545,6 @@ def test_named_reading_barrier_returns_the_checksum_or_raises_node_error(make_co
         ctx.below.compute(timeout=10)
 
 
-@_ahead("Barriers (compute() on a projection handle is not a barrier)",
-        "a bound projection is a view onto the parent node, so its compute() waits on the "
-        "parent's barrier and times out instead of returning None (cells.md-owned gap)")
 def test_projection_handle_compute_does_not_wait_on_the_parent(make_context):
     def slow_dict(x):
         import time

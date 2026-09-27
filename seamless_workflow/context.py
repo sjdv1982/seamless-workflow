@@ -35,9 +35,11 @@ from .sidework import Lease, PreparedCell, PreparedTransformer, SideLoop, evalua
 PIN_CELLTYPES = {"plain", "mixed", "deepcell", "deepfolder", "folder"}
 
 
-def _projected_source_type_error(source_ep, source_type, target_type, target_path):
+def _projected_source_type_error(source_ep, source_type, target_type, target_path, target_pin=None):
     source_name = "ctx." + ".".join(source_ep.node_path)
     target_name = "ctx." + ".".join(target_path)
+    if target_pin is not None:
+        target_name += f".pins.{target_pin}"
     projection_path = _path_string(source_ep.local_path)
     item = projection_path[1:-1]
     projection = (
@@ -941,7 +943,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         producer = node.transformer_pin_producers.get(pin)
         if edge is not None:
             source_node, _ = self._graph.resolve_existing(edge.source)
-            input_type = self._node_celltype(source_node)
+            input_type = edge.source_celltype or self._node_celltype(source_node)
             source = self._public_source(edge.source)
         else:
             input_type = producer.celltype if producer else None
@@ -1007,16 +1009,19 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if len(target.local_path) != 1:
                 raise PathError("Transformer targets must address a whole pin")
             celltype = self._graph.nodes[target.node_path].transformer_config.celltypes.get(target.local_path[0], 'mixed')
-            if source_ep.local_path and self._node_celltype(source_ep.node_path) != celltype:
-                raise TypeError("Cannot implicitly convert behind a projection; use as_celltype() before or after projecting")
+            source_type = source_ep.celltype or self._node_celltype(source_ep.node_path)
+            if source_ep.local_path and source_type != celltype:
+                raise _projected_source_type_error(
+                    source_ep, source_type, celltype, target.node_path,
+                    target_pin=target.local_path[0],
+                )
         elif target.endpoint_kind == "cell-result" and source_ep.local_path:
             target_node = self._graph.nodes[target.node_path]
             target_type = target_node.cell_config.celltype
             source_type = source_ep.celltype or self._node_celltype(source_ep.node_path)
             if target_type != source_type and not source_ep.conversion:
                 raise _projected_source_type_error(
-                    source_ep, self._node_celltype(source_ep.node_path),
-                    target_type, target.node_path,
+                    source_ep, source_type, target_type, target.node_path,
                 )
         self._add_edge(
             source_ep.node_path + source_ep.local_path,
@@ -1682,6 +1687,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             target_type=self._celltype_for_path(node_path, local),
             scratch=node.cell_config.scratch,
         )[1]
+
+    def _cell_endpoint_parent_state(self, node_path):
+        return self._graph.nodes[node_path].state
 
     def _record_projection_error(self, node_path, local, error, handle_id=None):
         self._projection_errors[(tuple(node_path), tuple(local), handle_id)] = error

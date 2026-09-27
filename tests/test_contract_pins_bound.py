@@ -245,11 +245,6 @@ def test_bound_null_result_rejected_for_non_nullable_celltype():
 # --- Conversion / wiring ---------------------------------------------------
 
 @pytest.mark.parametrize("spelling", ["project-then-convert", "convert-then-project"])
-@pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Conversion at the pin (wiring rule) + Ruling 1 (bound as_celltype "
-    "returns an anonymous cell with a symbol, like a bound path): contract ahead of "
-    "code: ctx.b[3].as_celltype('plain') and ctx.b.as_celltype('plain')[3] are "
-    "refused on a pin (and on a Cell target)"))
 def test_bound_wiring_rule_explicit_spellings_are_accepted(spelling):
     with Context() as ctx:
         ctx.b = Cell("text")
@@ -264,7 +259,9 @@ def test_bound_wiring_rule_explicit_spellings_are_accepted(spelling):
             ctx.tf.pins.value = ctx.b.as_celltype("plain")[3]
         ctx.compute(timeout=10)
         assert ctx.tf.pins.value.input_celltype == ctx.tf.pins.value.celltype == "plain"
-        assert ctx.tf.result.value == 40
+        # The explicit operations keep their order: character projection or list item.
+        expected = "," if spelling == "project-then-convert" else 40
+        assert ctx.tf.result.value == expected
 
 
 # --- Reads -----------------------------------------------------------------
@@ -332,11 +329,6 @@ def test_bound_pin_surface_has_no_cell_only_members():
 
 # --- Rulings of 2026-09-26 (contract-clarity-rulings.md) -------------------
 
-@pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Wiring (the refusal message text is contract, in the cells.md "
-    "§Connecting format): contract ahead of code: the code raises the short "
-    "'Cannot implicitly convert behind a projection; use as_celltype() before or "
-    "after projecting'"))
 def test_bound_wiring_refusal_message_names_both_spellings():
     with Context() as ctx:
         ctx.b = Cell("text")
@@ -401,10 +393,6 @@ def test_bound_wiring_rule_does_not_apply_to_call_time_arguments():
         assert ctx.tf.pins.value.state == "unwired"
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Conversion at the pin (a pin fed through a path has celltype == "
-    "input_celltype) + Ruling 1 / cells-RULINGS symbol-with-path: contract ahead "
-    "of code: bound as_celltype does not yet return an anonymous cell"))
 def test_bound_pin_fed_through_a_symbol_path_cannot_be_retyped():
     with Context() as ctx:
         ctx.b = Cell("text")
@@ -458,12 +446,6 @@ def test_anonymous_bound_handle_into_another_context_raises_dependency_error():
 
 
 @pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
-@pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Null (the drop happens before conversion) as amended by the ruling "
-    "'the null short-circuits only on legal conversion celltype pairs; illegal "
-    "conversions remain illegal' (deep-celltypes.md: plain -> deep is rejected): "
-    "contract ahead of code: a null plain Cell on an optional deep pin is dropped "
-    "and the transformer completes"))
 def test_bound_optional_null_through_an_illegal_conversion_is_not_absence(celltype):
     with Context() as ctx:
         ctx.source = Cell("plain")

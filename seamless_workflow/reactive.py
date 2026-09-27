@@ -52,6 +52,7 @@ class Reactive:
             pending.append(('unwired', 'code'))
         pins = {}
         from seamless.checksum.null import is_null, canonicalize_checksum
+        from seamless.checksum.expression import validate_expression_shape
         from seamless_transformer.transformation_utils import validate_pin_null
         for pin in sorted(cfg.pins):
             edge = incoming.get((pin,))
@@ -63,7 +64,7 @@ class Reactive:
                     unavailable(pin, state)
                     continue
                 source_node, _ = self._graph.resolve_existing(edge.source)
-                input_type = self._node_celltype(source_node)
+                input_type = edge.source_celltype or self._node_celltype(source_node)
             else:
                 producer = node.transformer_pin_producers.get(pin)
                 checksum = producer.checksum if producer else None
@@ -77,6 +78,13 @@ class Reactive:
                 continue
             checksum = canonicalize_checksum(checksum, input_type)
             if is_null(checksum) and pin in cfg.optional_pins:
+                if input_type != output_type:
+                    try:
+                        validate_expression_shape("", input_type, output_type)
+                    except ValueError as exc:
+                        node.pin_states[pin] = ('failed', None, exc)
+                        unavailable(pin, 'failed')
+                        continue
                 node.pin_states[pin] = ('complete', checksum, None)
                 continue
             try:

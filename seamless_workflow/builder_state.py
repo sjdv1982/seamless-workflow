@@ -344,6 +344,10 @@ class BoundCellBackend:
         self._node()
         if input_ref is not _UNSET:
             return self.build(input_ref).compute()
+        if self.local_path:
+            state = self.context._cell_endpoint_parent_state(self.node_path)
+            if state in {"waiting", "computing"}:
+                return None
         return self.context._compute_cell_endpoint(
             self.node_path,
             self.local_path,
