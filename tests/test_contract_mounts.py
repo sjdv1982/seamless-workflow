@@ -9,9 +9,11 @@ Settled: ``Cell.exception`` is a string (register §2 item 5, implemented);
 
 Every entry of mounts.md *Implementation status* is pinned here by an
 ``xfail(strict=False)`` test (NodeError unreachability, the same-celltype builder,
-graph format 0.5). Three further contract-ahead-of-code gaps that mounts.md does
-not list (python syntax check, the standalone-Cell message, node deletion waiting
-for cleanup) are pinned the same way, with the omission named in the reason.
+graph format 0.5). Two further contract-ahead-of-code gaps that mounts.md does
+not list (the standalone-Cell message, node deletion waiting for cleanup) are
+pinned the same way, with the omission named in the reason. Code text is not
+syntax-checked, by mount or by assignment (ruled 2026-09-28); that is pinned by
+ordinary tests.
 """
 import gzip
 import os
@@ -600,49 +602,43 @@ def test_emptied_directory_reads_as_empty_index(tmp_path):
         assert c.a.value == {} and c.a.checksum != Checksum(NULL_CHECKSUM)
 
 
-_SYNTAX_GAP = ("mounts.md *Mountable celltypes* / *Canonical bytes*: code text is checked by the celltype's "
-               "parser, so a python (or yaml) file that fails to parse is `rejected` and becomes a sense "
-               "error, and ctx.a.set('def (:\\n') raises HashTypeValidationError. Contract ahead of code, and "
-               "NOT listed in mounts.md's Implementation status: canon_T skips the parser for all four code "
-               "celltypes and set() serializes without a syntax check, so both leave the cell 'complete'; "
-               "ast.parse only runs when .value is read")
-
-
-@pytest.mark.xfail(strict=False, reason=_SYNTAX_GAP)
-def test_python_assignment_with_syntax_error_raises():
-    # *Canonical bytes*: "ctx.a.set("def (:\n") raises HashTypeValidationError".
-    from seamless.checksum.hash_type_validation import HashTypeValidationError
+def test_python_assignment_with_syntax_error_is_accepted():
+    # *Canonical bytes* (ruled 2026-09-28): an assignment does not check code
+    # syntax, so the cell is complete; the error surfaces downstream.
     with Context() as c:
         c.a = Cell(celltype='python')
-        with pytest.raises(HashTypeValidationError):
-            c.a.set('def (:\n')
+        c.a.set('def (:\n')
+        c.compute(timeout=10)
+        assert c.a.state == 'complete' and c.a.exception is None
+        assert c.a.checksum is not None
 
 
-@pytest.mark.xfail(strict=False, reason=_SYNTAX_GAP)
 @pytest.mark.parametrize('celltype,bad,good', [('python', 'def (:\n', 'x = 1\n'),
                                                ('yaml', 'a: [broken\n', 'a: [1]\n')])
-def test_code_text_syntax_error_is_a_sense_error(tmp_path, celltype, bad, good):
-    # *Canonical bytes*: "a mounted python file with that content is rejected and
-    # becomes a sense error. A syntax error is thus a sense error on the mounted
-    # cell, not something that surfaces only in the transformer that runs the code."
-    # Mounts never give up: fixing the file recovers the cell.
+def test_code_text_syntax_error_is_sensed_as_complete(tmp_path, celltype, bad, good):
+    # *Canonical bytes* (ruled 2026-09-28): a mount checks exactly what an
+    # assignment checks, and for code text that excludes syntax. The broken file
+    # is the cell's value, not a sense error; fixing it is an ordinary change.
     p = tmp_path / 'code'; p.write_text(bad)
     with Context() as c:
         c.a = Cell(celltype=celltype); c.a.mount(p, mode='r')
-        _assert_sense_error(c.a)
-        assert c.a.mount.status['disk_checksum'] == INVALID
-        assert c.a.mount.status['node_checksum'] is None
-        p.write_text(good); c.mounts.sync(timeout=5)
+        c.u = Cell(celltype=celltype); c.u.set(bad)
+        c.compute(timeout=10)
         assert c.a.state == 'complete' and c.a.exception is None
+        assert c.a.checksum == c.u.checksum
+        assert c.a.mount.status['sense_error'] is None
+        p.write_text(good); c.mounts.sync(timeout=5)
+        c.u.set(good); c.compute(timeout=10)
+        assert c.a.state == 'complete' and c.a.checksum == c.u.checksum
 
 
-@pytest.mark.xfail(strict=False, reason=_SYNTAX_GAP)
-def test_canon_t_rejects_unparsable_python():
-    # *Canonical bytes*: canon_T(bytes) = serialize(deserialize(bytes, T), T);
-    # "If deserialization raises, the observation is rejected".
+@pytest.mark.parametrize('celltype,content', [('python', b'def (:\n'), ('yaml', b'a: [broken\n'),
+                                              ('ipython', b'%%magic !!\n')])
+def test_canon_t_does_not_parse_code_text(celltype, content):
+    # *Canonical bytes* (ruled 2026-09-28): for code text canon_T is the strict
+    # UTF-8 decode and newline normalization only; it runs no syntax check.
     from seamless.checksum.canonical import canon_T
-    with pytest.raises(ValueError):
-        canon_T(b'def (:\n', 'python')
+    assert canon_T(content, celltype) == content
 
 
 @pytest.mark.parametrize('celltype,content', [('python', 'def (:\n'), ('yaml', 'a: [broken\n'),

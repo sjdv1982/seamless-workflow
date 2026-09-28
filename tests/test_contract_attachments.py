@@ -518,29 +518,33 @@ def test_sense_and_user_write_have_equal_authority():
         del c.a.mount
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "attachments.md §Sense ('only what the celltype's parser checks is rejected': for python "
-    "that includes syntax, so a syntax error in a sensed python value is a sense error, "
-    "matching mounts.md 'there is no mount-local parsing'); contract ahead of code: neither "
-    "ctx.a.set('def (:') nor a mount rejects it at write time -- both leave the cell "
-    "'complete' with the checksum, and ast.parse only runs when .value is read "
-    "(HashTypeValidationError) or when a transformer runs the code. Not yet listed in "
-    "attachments.md's Implementation status"))
-def test_python_syntax_error_in_sensed_value_is_a_sense_error(tmp_path):
+def test_python_syntax_error_in_sensed_value_fails_downstream(tmp_path):
+    # attachments.md §Sense (ruled 2026-09-28): a mount checks what an assignment
+    # checks, and for code text that excludes syntax. A syntax error is not a
+    # sense error: the cell is complete, and the SyntaxError is the failure of
+    # the transformer that runs the code.
     p = tmp_path / "code.py"
     p.write_text("def f(:\n")
     with Context() as c:
         c.code = Cell(celltype="python")
         c.code.mount(p, mode="r")
-        assert c.code.state == "failed"
-        assert isinstance(c.code.exception, str)
-        assert c.code.exception.startswith(f"{p}: ")
-        assert isinstance(c.code.mount.status["sense_error"], MountError)
-        assert c.code.mount.error is None
-        # monitoring continues: a valid edit recovers with no user action
-        p.write_text("def f():\n    return 1\n")
-        c.mounts.sync(timeout=10)
+        c.compute(timeout=10)
         assert c.code.state == "complete"
+        assert c.code.exception is None
+        assert c.code.mount.status["sense_error"] is None
+        assert c.code.mount.error is None
+        c.tf = ident
+        c.tf.code = c.code
+        c.tf.pins.x = 1
+        c.compute(timeout=30)
+        assert c.tf.state == "failed"
+        assert "syntax" in c.tf.exception.lower()
+        assert c.code.state == "complete" and c.code.exception is None
+        # A fixed file is an ordinary change.
+        p.write_text("def f(x):\n    return x\n")
+        c.mounts.sync(timeout=10)
+        c.compute(timeout=30)
+        assert c.tf.state == "complete"
 
 
 def test_program_wrong_content_that_parses_is_sensed_like_a_user_write(tmp_path):
