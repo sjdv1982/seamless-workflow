@@ -1486,13 +1486,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             )
                             if checksum is None:
                                 raise KeyError(_path_string(local))
-                            try:
-                                await asyncio.to_thread(
-                                    value_for_checksum, checksum, target
-                                )
-                            except CacheMissError:
-                                # The result is valid; only this reader lacks its buffer.
-                                pass
                         except asyncio.CancelledError:
                             softcancel_expression(
                                 (cs.hex(), _path_string(local), ct, target), key

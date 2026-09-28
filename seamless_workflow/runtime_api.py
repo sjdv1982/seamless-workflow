@@ -21,9 +21,12 @@ class RuntimeAPI:
         # for its computation; compute/computation supply that explicit wait.
         return Lease(self._get_checksum(path, ()), self._node_celltype(path))
 
-    def _install_wait(self, path=None, local=(), *, read=False, barrier=False):
+    def _install_wait(self, path=None, local=(), *, read=False, barrier=False,
+                      return_none_on_incomplete=False):
         future = Future()
-        self._barriers[future] = (path, tuple(local), read, barrier)
+        self._barriers[future] = (
+            path, tuple(local), read, barrier, return_none_on_incomplete
+        )
         self._check_barriers()
         return future
 
@@ -41,7 +44,7 @@ class RuntimeAPI:
                     future.set_result(result)
                     self._barriers.pop(future, None)
                 continue
-            path, local, read, barrier = predicate
+            path, local, read, barrier, return_none_on_incomplete = predicate
             if future.done():
                 self._barriers.pop(future, None)
                 continue
@@ -55,7 +58,10 @@ class RuntimeAPI:
             if read and barrier:
                 node = self._graph.nodes[path]
                 if node.state in {'miswired','unwired','blocked','failed'}:
-                    future.set_exception(copy.deepcopy(node.exception) if node.state == 'failed' else NodeError(f'Node is {node.state}: {node.block_reason}'))
+                    if return_none_on_incomplete:
+                        future.set_result(None)
+                    else:
+                        future.set_exception(copy.deepcopy(node.exception) if node.state == 'failed' else NodeError(f'Node is {node.state}: {node.block_reason}'))
                     self._barriers.pop(future, None)
                     continue
             if read:

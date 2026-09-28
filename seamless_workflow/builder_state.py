@@ -397,7 +397,17 @@ class BoundCellBackend:
         if input_ref is not _UNSET:
             return await self.build(input_ref).compute_async()
         from .ingress import _wait_async
-        lease = await _wait_async(self.context, self.node_path, self.local_path, read=True, barrier=True, timeout=timeout)
+        lease = await _wait_async(
+            self.context,
+            self.node_path,
+            self.local_path,
+            read=True,
+            barrier=True,
+            timeout=timeout,
+            return_none_on_incomplete=True,
+        )
+        if lease is None:
+            return None
         try:
             checksum = lease.checksum
             if checksum is not None and self.local_path:
@@ -495,13 +505,6 @@ class BoundPinBackend:
                 return buffer
             value = checksum.resolve(lease.celltype)
             return value.content if lease.celltype == 'bytes' and hasattr(value, 'content') else value
-        except Exception as exc:
-            from seamless import CacheMissError
-            if field in {'buffer', 'value'} and lease.checksum is not None and not isinstance(exc, CacheMissError):
-                from .errors import execution_error
-                identity = (lease.checksum.hex(), input_type, lease.celltype)
-                self.context._record_pin_read_error(self.node_path, self.pin, identity, execution_error(exc))
-            raise
         finally:
             lease._release_refholds()
 

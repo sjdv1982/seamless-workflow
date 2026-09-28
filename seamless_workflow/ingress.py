@@ -82,8 +82,13 @@ def _prepare_assignment(ctx, path, value):
     return checksum_for_value(value, celltype, checksum_is_value=True)
 
 
-def _wait(ctx, path=None, local=(), *, read=False, barrier=False, timeout=None):
-    future = ctx._controller.call('_install_wait', path, local, read=read, barrier=barrier, klass=1 if barrier else 4)
+def _wait(ctx, path=None, local=(), *, read=False, barrier=False, timeout=None,
+          return_none_on_incomplete=False):
+    future = ctx._controller.call(
+        '_install_wait', path, local, read=read, barrier=barrier,
+        return_none_on_incomplete=return_none_on_incomplete,
+        klass=1 if barrier else 4,
+    )
     try:
         return future.result(timeout)
     finally:
@@ -91,8 +96,15 @@ def _wait(ctx, path=None, local=(), *, read=False, barrier=False, timeout=None):
             ctx._controller.call('_withdraw_wait', future, klass=1)
 
 
-async def _wait_async(ctx, path=None, local=(), *, read=False, barrier=False, timeout=None):
-    installed = ctx._controller.submit('_install_wait', (path, local), {'read':read, 'barrier':barrier}, klass=1 if barrier else 4)
+async def _wait_async(ctx, path=None, local=(), *, read=False, barrier=False,
+                      timeout=None, return_none_on_incomplete=False):
+    installed = ctx._controller.submit(
+        '_install_wait', (path, local), {
+            'read': read,
+            'barrier': barrier,
+            'return_none_on_incomplete': return_none_on_incomplete,
+        }, klass=1 if barrier else 4,
+    )
     try:
         future = await asyncio.shield(asyncio.wrap_future(installed))
     except asyncio.CancelledError:
@@ -269,6 +281,16 @@ def controller_method(method):
                 cfg = self._node_snapshot(path).cell_config
                 if kwargs.get('checksum_rhs'):
                     value = None if value is None else Checksum(value)
+                    celltype = kwargs.get('input_celltype') or cfg.celltype
+                    if value is not None and celltype not in {
+                        'deepcell', 'deepfolder', 'folder', 'module'
+                    }:
+                        from seamless.checksum.hash_type_validation import (
+                            validate_deserializable_as,
+                        )
+                        validate_deserializable_as(
+                            value, celltype
+                        )
                 else:
                     value = checksum_for_value(value, cfg.celltype, checksum_is_value=True)
                 if value is not None:
@@ -314,30 +336,28 @@ def controller_method(method):
                     return checksum
                 if checksum is None:
                     return None
-                try:
-                    if name == '_get_value':
-                        return checksum.resolve(
-                            kwargs.get('celltype') or self._celltype_for_path(path, local)
-                        )
-                    from seamless.checksum.hash_type_validation import validate_deserializable_as
-                    celltype = kwargs.get('_target_celltype') or self._celltype_for_path(path, local)
-                    deep = celltype in {'deepcell', 'deepfolder', 'folder'}
-                    if not deep:
-                        validate_deserializable_as(checksum, celltype)
-                    buffer = checksum.resolve()
-                    if not deep:
-                        validate_deserializable_as(checksum, celltype, buffer=buffer)
-                    return buffer
-                except CacheMissError:
-                    raise
-                except Exception as exc:
-                    controller.call('_record_node_error', path, exc, klass=2)
-                    raise
+                if name == '_get_value':
+                    return checksum.resolve(
+                        kwargs.get('celltype') or self._celltype_for_path(path, local)
+                    )
+                from seamless.checksum.hash_type_validation import validate_deserializable_as
+                celltype = kwargs.get('_target_celltype') or self._celltype_for_path(path, local)
+                deep = celltype in {'deepcell', 'deepfolder', 'folder'}
+                if not deep:
+                    validate_deserializable_as(checksum, celltype)
+                buffer = checksum.resolve()
+                if not deep:
+                    validate_deserializable_as(checksum, celltype, buffer=buffer)
+                return buffer
             finally:
                 lease._release_refholds()
         elif name in {'_compute_cell_endpoint','_compute_cell_value','_compute_node'}:
             path = args[0]; local = args[1] if len(args)>1 else ()
             handle_id = kwargs.get('_handle_id')
+            return_none_on_incomplete = (
+                name == '_compute_cell_endpoint'
+                or (name == '_compute_node' and kwargs.get('checksum'))
+            )
             lease = _wait(
                 self,
                 path,
@@ -345,7 +365,10 @@ def controller_method(method):
                 read=True,
                 barrier=True,
                 timeout=kwargs.get('timeout'),
+                return_none_on_incomplete=return_none_on_incomplete,
             )
+            if lease is None:
+                return None
             try:
                 if lease.checksum is None: return None
                 if local:
