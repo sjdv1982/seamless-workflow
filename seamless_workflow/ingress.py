@@ -283,14 +283,20 @@ def controller_method(method):
             lease = controller.call('_read_snapshot', path, local, klass=4)
             try:
                 checksum = lease.checksum
-                if checksum is not None and local:
+                target_celltype = (
+                    kwargs.get('_target_celltype')
+                    or self._celltype_for_path(path, local)
+                )
+                if checksum is not None and (
+                    local or target_celltype != lease.celltype
+                ):
                     from .sidework import evaluate_projection
                     try:
                         checksum = evaluate_projection(
                             checksum,
                             local,
                             lease.celltype,
-                            kwargs.get('_target_celltype') or self._celltype_for_path(path, local),
+                            target_celltype,
                         )
                     except Exception as exc:
                         controller.call(

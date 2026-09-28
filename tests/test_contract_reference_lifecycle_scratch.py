@@ -149,12 +149,6 @@ def _suffix(word):
     return word + "-out"
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §1/§6 {RULING}: contract ahead of code: the transformer:<path>:pin "
-    "and transformer:<path>:code roles are acquired with incref_refholder() "
-    "(scratch=False) regardless of the transformer's scratch, so they publish",
-)
 def test_a_scratch_transformer_pin_and_code_claims_do_not_publish(writes):
     from seamless.transformer import delayed
 
@@ -180,13 +174,6 @@ def test_a_scratch_transformer_pin_and_code_claims_do_not_publish(writes):
         ctx._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=f"{DOC} §1/§6/§10 {RULING}: contract ahead of code: the "
-    "transformer:<path>:module:<name> role is acquired with incref_refholder() "
-    "(scratch=False, context.py:637) regardless of the transformer's scratch, so a "
-    "locally present module buffer is published",
-)
 def test_a_scratch_transformer_module_claim_does_not_publish(writes):
     from seamless.transformer import delayed
 

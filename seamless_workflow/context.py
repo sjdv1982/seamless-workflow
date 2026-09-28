@@ -671,7 +671,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 staged_checksums.append(checksum)
 
             new_code_checksum = normalize_checksum(cfg.code_checksum)
-            new_code_checksum.incref_refholder()
+            new_code_checksum.incref_refholder(scratch=None)
             staged_checksums.append(new_code_checksum)
 
             new_module_refs = {}
@@ -679,17 +679,18 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 if not isinstance(module, Checksum):
                     continue
                 checksum = normalize_checksum(module)
-                checksum.incref_refholder()
+                scratch = bool(cfg.scratch)
+                checksum.incref_refholder(scratch=scratch)
                 staged_checksums.append(checksum)
-                new_module_refs[(path, module_name)] = checksum
+                new_module_refs[(path, module_name)] = (checksum, scratch)
 
             # Publish the fully acquired replacement as one semantic state.
             node.transformer_config = cfg
             node.transformer_pin_producers = new_producers
             self._code_refholds[path] = new_code_checksum
             self._module_refholds = {
-                role: checksum
-                for role, checksum in self._module_refholds.items()
+                role: claim
+                for role, claim in self._module_refholds.items()
                 if role[0] != path
             }
             self._module_refholds.update(new_module_refs)
@@ -706,7 +707,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             old_code_checksum = old_code_refholds.get(path)
             if old_code_checksum is not None:
                 old_code_checksum.decref_refholder()
-            for role, checksum in old_module_refholds.items():
+            for role, (checksum, _scratch) in old_module_refholds.items():
                 if role[0] == path:
                     checksum.decref_refholder()
 
@@ -866,14 +867,17 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if checksum is None:
             return
         checksum = normalize_checksum(checksum)
-        checksum.incref_refholder()
+        # A code checksum is configuration held for a possible run, not an
+        # owner claim.  Keep it alive without publishing it merely because a
+        # transformer was added to a Context.
+        checksum.incref_refholder(scratch=None)
         self._code_refholds[tuple(path)] = checksum
 
     def _replace_code_checksum(self, path, checksum):
         old = self._code_refholds.get(tuple(path))
         new = None if checksum is None else normalize_checksum(checksum)
         if new is not None:
-            new.incref_refholder()
+            new.incref_refholder(scratch=None)
             self._code_refholds[tuple(path)] = new
         else:
             self._code_refholds.pop(tuple(path), None)
@@ -892,14 +896,19 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 continue
             for module_name, module in node.transformer_config.modules.items():
                 if isinstance(module, Checksum):
-                    active[(path, module_name)] = normalize_checksum(module)
+                    active[(path, module_name)] = (
+                        normalize_checksum(module),
+                        bool(node.transformer_config.scratch),
+                    )
         old_refholds = self._module_refholds
         acquired = []
         try:
-            for role, checksum in active.items():
+            for role, (checksum, scratch) in active.items():
                 old = old_refholds.get(role)
-                if old is None or old != checksum:
-                    checksum.incref_refholder()
+                old_checksum = old[0] if old is not None else None
+                old_scratch = old[1] if old is not None else None
+                if old_checksum is None or old_checksum != checksum or old_scratch != scratch:
+                    checksum.incref_refholder(scratch=scratch)
                     acquired.append(checksum)
         except Exception:
             for checksum in reversed(acquired):
@@ -910,8 +919,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         # then release roles that are absent or replaced.  Overwriting the map
         # first loses the old checksum and strands its refholder reference.
         self._module_refholds = active
-        for role, checksum in old_refholds.items():
-            if active.get(role) != checksum:
+        for role, (checksum, scratch) in old_refholds.items():
+            if active.get(role) != (checksum, scratch):
                 checksum.decref_refholder()
 
     def _delete_transformer_pin(self, node_path, pin):
@@ -2065,17 +2074,27 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         # Acquire the staged durable graph before releasing any live roles.
         claims = []
         for path, node in graph.nodes.items():
-            if node.cell_root_producer is not None: claims.append(node.cell_root_producer.checksum)
-            claims.extend(p.checksum for p in node.transformer_pin_producers.values())
+            if node.cell_root_producer is not None:
+                claims.append((node.cell_root_producer.checksum, self._node_scratch(node)))
+            claims.extend(
+                (producer.checksum, self._node_scratch(node))
+                for producer in node.transformer_pin_producers.values()
+            )
             if node.kind == "transformer":
                 cfg = node.transformer_config
-                if cfg.code_checksum is not None: claims.append(cfg.code_checksum)
-                claims.extend(v for v in cfg.modules.values() if isinstance(v, Checksum))
+                if cfg.code_checksum is not None:
+                    # A configured code checksum is not a result publication.
+                    claims.append((cfg.code_checksum, None))
+                claims.extend(
+                    (value, bool(cfg.scratch))
+                    for value in cfg.modules.values()
+                    if isinstance(value, Checksum)
+                )
         acquired = []
         try:
-            for cs in claims:
-                cs.incref_refholder()
-                acquired.append(cs)
+            for checksum, scratch in claims:
+                checksum.incref_refholder(scratch=scratch)
+                acquired.append(checksum)
         except Exception:
             for cs in acquired: cs.decref_refholder()
             raise
@@ -2096,8 +2115,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._refholds_released = False
         self._code_refholds = {p:n.transformer_config.code_checksum for p,n in graph.nodes.items()
                               if n.kind == "transformer" and n.transformer_config.code_checksum is not None}
-        self._module_refholds = {(p,k):v for p,n in graph.nodes.items() if n.kind == "transformer"
-                                for k,v in n.transformer_config.modules.items() if isinstance(v, Checksum)}
+        self._module_refholds = {
+            (path, name): (normalize_checksum(module), bool(node.transformer_config.scratch))
+            for path, node in graph.nodes.items()
+            if node.kind == "transformer"
+            for name, module in node.transformer_config.modules.items()
+            if isinstance(module, Checksum)
+        }
         self._superseded_refholds = {}
         self._revisions = {p:self._revisions.get(p,0)+1 for p in graph.nodes}
         self._derive_all()

@@ -8,9 +8,10 @@ from seamless.reference_lifecycle import register_refholder, safe_release_refhol
 
 
 class Lease:
-    def __init__(self, checksum, celltype='mixed'):
+    def __init__(self, checksum, celltype='mixed', *, role='snapshot'):
         self.checksum = checksum
         self.celltype = celltype
+        self.role = role
         self.released = False
         if checksum is not None:
             # A lease is a snapshot or in-flight claim, not an owner: it keeps
@@ -19,7 +20,7 @@ class Lease:
         register_refholder(self)
 
     def _refheld_checksums(self):
-        return () if self.released or self.checksum is None else ((self.checksum, 'snapshot'),)
+        return () if self.released or self.checksum is None else ((self.checksum, self.role),)
 
     def _release_refholds(self):
         if self.released:
@@ -75,7 +76,14 @@ class SideLoop:
         return asyncio.run_coroutine_threadsafe(coroutine, self.loop)
 
     def close(self):
-        self.loop.call_soon_threadsafe(self.loop.stop)
+        def stop_when_idle():
+            pending = [task for task in asyncio.all_tasks(self.loop) if not task.done()]
+            if pending:
+                self.loop.call_later(0.01, stop_when_idle)
+            else:
+                self.loop.stop()
+
+        self.loop.call_soon_threadsafe(stop_when_idle)
         self.thread.join()
 
 

@@ -37,6 +37,25 @@ class BoundCellBackend:
         self._conversion = bool(conversion)
         self._conversion_before = bool(conversion_before)
         self._conversion_steps = tuple(conversion_steps)
+        self._result_lease = None
+
+    def _hold_result(self, checksum):
+        lease = self._result_lease
+        if lease is not None and checksum is not None and lease.checksum == checksum:
+            return checksum
+        if lease is not None:
+            lease._release_refholds()
+            self._result_lease = None
+        needs_result_claim = bool(
+            self.local_path
+            or self._conversion
+            or self._conversion_before
+            or self._conversion_steps
+        )
+        if checksum is not None and needs_result_claim:
+            from .sidework import Lease
+            self._result_lease = Lease(checksum, role="result")
+        return checksum
 
     def _node(self):
         self.context._check_public_caller()
@@ -138,13 +157,14 @@ class BoundCellBackend:
     def checksum(self):
         self._node()
         if self.state == "miswired":
-            return None
-        return self.context._get_checksum(
+            return self._hold_result(None)
+        checksum = self.context._get_checksum(
             self.node_path,
             self.local_path,
             _handle_id=self._handle_id,
             _target_celltype=self._projected_celltype,
         )
+        return self._hold_result(checksum)
 
     @property
     def buffer(self):

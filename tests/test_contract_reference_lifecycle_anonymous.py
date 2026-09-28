@@ -73,6 +73,17 @@ def _text_source(ctx):
     return payload
 
 
+def _yaml_source(ctx):
+    payload = {"k": f"anonymous-{uuid.uuid4().hex}"}
+    # Core deliberately does not reinterpret arbitrary text as plain JSON.
+    # YAML is a supported serialized source for a plain mapping conversion.
+    import yaml
+    ctx.b = Cell("yaml")
+    ctx.b.set(yaml.safe_dump(payload))
+    ctx.compute(timeout=10)
+    return payload
+
+
 def _handle_result_claims(checksum):
     """Claims on ``checksum`` that are not the Context's own."""
     return [
@@ -82,22 +93,16 @@ def _handle_result_claims(checksum):
     ]
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=AHEAD + SNAPSHOT_GAP + "a handle's claim on what it pulled must be "
-    "scratch-neutral, but the snapshot Cell's result claim follows Cell.scratch "
-    "(non-scratch by default), so it publishes",
-)
 def test_handle_holds_a_scratch_neutral_result_claim(writes):
     cache = get_buffer_cache()
     ctx = Context()
     try:
-        payload = _text_source(ctx)
+        payload = _yaml_source(ctx)
         expected = Buffer(payload, "plain").get_checksum()
         cache.mark_scratch(expected)
         handle = ctx.b.as_celltype("plain")
         pulled = handle.checksum
-        assert pulled == expected, "text -> plain must convert"
+        assert pulled == expected, "yaml -> plain must convert"
         assert [role for _, role in _handle_result_claims(pulled)].count("result") >= 1
         assert pulled not in writes, "a handle's result claim published"
         assert cache.is_scratch_ref(pulled) is True, "a handle's claim cleared scratch"
@@ -105,20 +110,15 @@ def test_handle_holds_a_scratch_neutral_result_claim(writes):
         ctx._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=AHEAD + SNAPSHOT_GAP + "the handle's result claim must end when the "
-    "handle dies",
-)
 def test_handle_result_claim_is_released_when_the_handle_dies():
     cache = get_buffer_cache()
     ctx = Context()
     try:
-        payload = _text_source(ctx)
+        payload = _yaml_source(ctx)
         expected = Buffer(payload, "plain").get_checksum()
         handle = ctx.b.as_celltype("plain")
         pulled = handle.checksum
-        assert pulled == expected, "text -> plain must convert"
+        assert pulled == expected, "yaml -> plain must convert"
         assert _handle_result_claims(pulled)
         del handle
         gc.collect()
@@ -160,7 +160,6 @@ PROJECTION_GAP = (
 )
 
 
-@pytest.mark.xfail(strict=False, reason=AHEAD + PROJECTION_GAP)
 def test_projection_handle_pull_acquires_a_neutral_result_claim(writes):
     cache = get_buffer_cache()
     ctx = Context()
@@ -179,7 +178,6 @@ def test_projection_handle_pull_acquires_a_neutral_result_claim(writes):
         ctx._release_refholds()
 
 
-@pytest.mark.xfail(strict=False, reason=AHEAD + PROJECTION_GAP)
 def test_projection_handle_claim_is_released_when_the_handle_dies():
     cache = get_buffer_cache()
     ctx = Context()
