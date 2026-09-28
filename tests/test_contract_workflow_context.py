@@ -19,8 +19,8 @@ are not duplicated):
   producer forms: ``test_contract_transformer_bound.py``;
 - the empty same-celltype builder detaching a mount (xfail):
   ``test_contract_attachments.py``;
-- ``miswired`` -> ``NodeError`` on a named barrier:
-  ``test_contract_node_state_lifecycle.py``;
+- ``miswired`` -> ``None`` from a named barrier and ``NodeError`` from
+  ``run()``: ``test_contract_node_state_lifecycle.py``;
 - ``ReentrantContextError``, barrier timeout withdrawing the predicate without
   cancelling work: ``test_controller.py``, ``quiescence-barrier/``;
 - ``seamless.close()`` closing Contexts, close failing registered barriers:
@@ -499,15 +499,17 @@ def test_barrier_on_node_deleted_while_waiting_raises_stale(make_context):
         handle.compute(timeout=5)
 
 
-def test_reading_barrier_raises_the_nodes_own_recorded_exception(make_context):
-    """§Barriers: a reading barrier on a failed node raises the node's own recorded exception."""
+def test_reading_barrier_reports_a_failure_and_run_raises_it(make_context):
+    """§Barriers (ruled 2026-09-28): a reading barrier on a failed node returns
+    None; run() re-raises the node's own recorded exception."""
 
     ctx = make_context()
     ctx.f = boom
     ctx.f.pins.x = 1
-    with pytest.raises(Exception) as info:
-        ctx.f.compute(timeout=60)
+    assert ctx.f.compute(timeout=60) is None
     assert ctx.f.state == "failed"
+    with pytest.raises(Exception) as info:
+        ctx.f.run()
     assert "boom-marker" in str(info.value)
     assert str(info.value) == ctx.f.exception
 
@@ -525,10 +527,10 @@ def test_context_barrier_returns_none_on_a_failed_graph(make_context):
     assert isinstance(ctx.f.exception, str)
 
 
-def test_named_reading_barrier_returns_the_checksum_or_raises_node_error(make_context):
-    """§Barriers / surface table: node.compute() on a named node returns the node's
-    checksum, and raises NodeError naming the state on `unwired` or `blocked`;
-    the graph barrier (not a named-node barrier) does not raise."""
+def test_named_barrier_returns_the_checksum_or_none_and_run_raises_node_error(make_context):
+    """§Barriers / surface table (ruled 2026-09-28): node.compute() on a named
+    node returns the node's checksum, or None on `unwired` or `blocked`; run()
+    raises NodeError naming the state. The graph barrier does not raise either."""
 
     ctx = make_context()
     ctx.a = 1
@@ -539,10 +541,12 @@ def test_named_reading_barrier_returns_the_checksum_or_raises_node_error(make_co
     ctx.loose = add_one  # pin x never connected
     ctx.below = ctx.loose
     assert ctx.compute(timeout=30) is None
+    assert ctx.loose.compute(timeout=10) is None
+    assert ctx.below.compute(timeout=10) is None
     with pytest.raises(NodeError, match="unwired"):
-        ctx.loose.compute(timeout=10)
+        ctx.loose.run()
     with pytest.raises(NodeError, match="blocked"):
-        ctx.below.compute(timeout=10)
+        ctx.below.run()
 
 
 def test_projection_handle_compute_does_not_wait_on_the_parent(make_context):
@@ -572,6 +576,31 @@ def test_whole_checksum_write_is_validated_against_the_celltype(make_context):
     with pytest.raises(Exception):
         ctx.i.set_checksum(checksum)
     assert ctx.i.checksum is None
+
+
+@pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
+def test_whole_checksum_write_accepts_a_valid_deep_index(make_context, celltype):
+    """§Writes through the Context: the HashType check must not refuse a valid
+    deep index. HashType has no deep celltypes; the only checksum-level check
+    for one is the mapped `plain` (deep-celltypes.md)."""
+
+    member = Buffer(1, "plain")
+    member_hold = member.tempref()
+    index = Buffer({"k": member.get_checksum().hex()}, "plain")
+    index_hold = index.tempref()
+    try:
+        ctx = make_context()
+        ctx.by_buffer = Cell(celltype)
+        ctx.by_buffer.set_buffer(index)  # classifies the index buffer
+        ctx.by_checksum = Cell(celltype)
+        ctx.by_checksum.set_checksum(index.get_checksum())
+        ctx.compute(timeout=10)
+        for cell in (ctx.by_buffer, ctx.by_checksum):
+            assert cell.state == "complete"
+            assert cell.checksum == index.get_checksum()
+    finally:
+        index_hold.clear()
+        member_hold.clear()
 
 
 def test_unresolvable_checksum_write_is_installed_without_resolving(make_context):

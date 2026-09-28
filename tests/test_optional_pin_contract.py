@@ -86,7 +86,10 @@ def test_pin_projection_wiring_and_mixed_block_reasons():
         assert ctx.tf.block_reason == {'a': 'miswired', 'b': 'unwired'}
 
 
-def test_bound_pin_materialization_error_and_clear(monkeypatch):
+def test_bound_pin_materialization_error_is_raised_and_not_recorded(monkeypatch):
+    # pins.md §Pin state (ruled 2026-09-28): a failure to materialize a pin's
+    # existing result is raised on every read and never recorded, so the pin
+    # stays complete and the transformer is not blocked by a read.
     from seamless import Checksum
     with Context() as ctx:
         ctx.tf = defaults
@@ -97,11 +100,12 @@ def test_bound_pin_materialization_error_and_clear(monkeypatch):
         def fail(checksum, *args, **kwargs):
             raise ValueError('cannot decode pin')
         monkeypatch.setattr(Checksum, 'resolve', fail)
-        with pytest.raises(ValueError, match='cannot decode pin'):
-            pin.buffer
-        assert pin.exception == 'cannot decode pin'
-        assert ctx.tf.block_reason == {'a': 'blocked-by-error'}
+        for _ in range(2):
+            with pytest.raises(ValueError, match='cannot decode pin'):
+                pin.buffer
+            assert pin.exception is None
+            assert pin.state == 'complete'
+        assert ctx.tf.state == 'complete'
+        assert ctx.tf.block_reason is None
         monkeypatch.setattr(Checksum, 'resolve', original)
-        pin.clear_exception()
-        ctx.compute()
-        assert pin.exception is None and pin.value == 3
+        assert pin.value == 3

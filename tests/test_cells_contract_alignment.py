@@ -343,19 +343,24 @@ def test_failure_is_a_stable_string_and_new_input_recovers(world):
     assert cell.value == 67
 
 
-def test_buffer_value_report_recorded_failure_consistently(world):
+def test_a_recorded_failure_reads_as_none_and_only_run_raises(world):
+    # cells.md §Failures, "How a failure is delivered" (ruled 2026-09-28).
     cell = world.make("str")
     cell.set("not an int")
     cell.celltype = "int"
     world.settle(cell)
     assert cell.state == "failed"
-    errors = []
-    for attr in ("buffer", "value"):
-        with pytest.raises(Exception) as caught:
-            getattr(cell, attr)
-        errors.append(caught.value)
-    assert type(errors[0]) is type(errors[1])
-    assert str(errors[0]) == str(errors[1])
+    error = cell.exception
+    assert isinstance(error, str) and error
+    assert cell.checksum is None
+    assert cell.buffer is None
+    assert cell.value is None
+    assert cell.compute() is None
+    with pytest.raises(Exception) as caught:
+        cell.run()
+    assert str(caught.value) == error
+    assert cell.state == "failed"
+    assert cell.exception == error
 
 
 def test_missing_projection_compute_reports_failure(world):
@@ -367,35 +372,50 @@ def test_missing_projection_compute_reports_failure(world):
     assert missing.checksum is None
     assert missing.exception is not None
     assert missing.state == "failed"
+    # The handle's failure is its own, and is delivered like a Cell's.
+    assert missing.buffer is None
+    assert missing.value is None
+    with pytest.raises(Exception):
+        missing.run()
 
 
 @pytest.mark.parametrize("attr", ["buffer", "value"])
-def test_invalid_result_read_validates_and_records(world, attr):
+def test_invalid_result_read_raises_every_time_and_records_nothing(world, attr):
+    # cells.md §`.buffer` and `.value` (ruled 2026-09-28): a failure to
+    # materialize a result that exists is raised and never recorded.
     source = Buffer(b"not valid JSON")
     hold = source.tempref()
     try:
         cell = world.make("plain", checksum=source.get_checksum())
+        world.settle(cell)
+        for _ in range(2):
+            with pytest.raises(HashTypeValidationError):
+                getattr(cell, attr)
+            assert cell.exception is None
+            assert cell.state == "complete"
+            assert cell.checksum == source.get_checksum()
         with pytest.raises(HashTypeValidationError):
-            getattr(cell, attr)
-        assert cell.exception is not None
-        assert cell.state == "failed"
-        assert cell.checksum is None
+            cell.run()
     finally:
         hold.clear()
 
 
-def test_deserialization_failure_is_repeatable_after_clear(world):
+def test_deserialization_failure_is_raised_by_every_read_and_never_recorded(world):
+    # HashType cannot disprove a syntax error, so .buffer returns the bytes and
+    # only .value fails: on every read, with no clear_exception() in between.
     source = Buffer(b"def broken(:\n")
     hold = source.tempref()
     try:
         cell = world.make("python", checksum=source.get_checksum())
-        assert cell.buffer.content == source.content
+        world.settle(cell)
         for _ in range(2):
+            assert cell.buffer.content == source.content
             with pytest.raises(HashTypeValidationError):
                 _ = cell.value
-            assert isinstance(cell.exception, str)
-            assert cell.state == "failed"
-            cell.clear_exception()
+            assert cell.exception is None
+            assert cell.state == "complete"
+        with pytest.raises(HashTypeValidationError):
+            cell.run()
     finally:
         hold.clear()
 

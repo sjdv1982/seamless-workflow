@@ -400,9 +400,13 @@ are §26.3 of the design document.
 ## Open questions for whoever implements the phases
 
 1. **Does the node-local barrier raise or return on a `blocked`/`unwired` node?**
-   §24.4 settles the Context-wide form as *returns*.  The node-local form raises
-   `NodeError` today; `test_barrier_node.py` pins that so the answer is chosen
-   rather than drifted into.
+   *Answered 2026-09-28: it returns.* `compute()` returns `None` for a node
+   that settles in any state but `complete`, `failed` included, and `run()` is
+   the form that raises: the recorded exception on `failed`, `NodeError`
+   otherwise (`contracts/node-state-lifecycle.md`, *States as seen through
+   barriers and handles*; `contracts/cells.md`, *Failures*).
+   `test_barrier_node.py` pins the answer; the code still raises from
+   `compute()`.
 2. **`computation` is a name that has to be claimed.**  On a bound `Cell`,
    attribute access is sub-path projection, so `ctx.a.computation` currently
    resolves to a projection of `a`'s value and `ctx.a.computation()` builds an

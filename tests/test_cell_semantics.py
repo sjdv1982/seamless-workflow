@@ -111,7 +111,7 @@ def test_failed_own_conversion_reports_exception(make_context):
 
 
 @pytest.mark.parametrize('form', ['buffer', 'set_buffer'])
-def test_buffer_validation_is_eager_checksum_validation_is_deferred(make_context, form):
+def test_buffer_and_checksum_writes_are_validated_eagerly(make_context, form):
     ctx = make_context()
     ctx.a = Cell('int'); ctx.a.set(3)
     invalid = Buffer(b'not an int')
@@ -119,9 +119,12 @@ def test_buffer_validation_is_eager_checksum_validation_is_deferred(make_context
         if form == 'buffer': ctx.a.buffer = invalid
         else: ctx.a.set_buffer(invalid)
     assert ctx.a.value == 3
-    ctx.a.checksum = invalid.get_checksum()
-    # A checksum declaration neither resolves nor validates its bytes.
-    assert ctx.a.checksum == invalid.get_checksum()
+    # workflow-context.md, *Writes through the Context*: a whole-checksum write
+    # is validated with HashType metadata, without resolving the buffer. The
+    # rejected buffer has been classified, so its checksum is refused too.
+    with pytest.raises(HashTypeValidationError):
+        ctx.a.checksum = invalid.get_checksum()
+    assert ctx.a.value == 3
 
 
 @pytest.mark.parametrize('version', ['0.2', '0.3'])

@@ -56,23 +56,27 @@ def test_a_node_barrier_on_a_settled_cell_returns_its_checksum():
 
 
 @pytest.mark.now
-def test_a_node_barrier_raises_on_unwired_and_blocked_nodes():
-    """Current behaviour, pinned so that no phase changes it by accident.
+def test_a_node_barrier_returns_none_on_unwired_and_blocked_nodes():
+    """The node-local barrier reports, as the Context-wide one does (§24.4).
 
-    Note this differs from the Context-wide barrier, which §24.4 settles as
-    *returns*.  Whether the node-local form should raise or return is recorded
-    as an open question in this suite's README; the test exists so the answer is
-    chosen rather than drifted into.
+    Ruled 2026-09-28 (node-state-lifecycle.md, *States as seen through barriers
+    and handles*): ``compute()`` returns ``None`` for a node that settles in any
+    state but ``complete``, and ``run()`` is the form that raises ``NodeError``.
+    This answers the open question in this suite's README.
     """
 
     ctx = Context()
     ctx.tf = double  # no pin: unwired
     ctx.out = ctx.tf
 
+    assert ctx.tf.compute() is None
+    assert ctx.tf.state == "unwired"
+    assert ctx.out.compute() is None
+    assert ctx.out.state == "blocked"
     with pytest.raises(NodeError):
-        ctx.tf.compute()
+        ctx.tf.run()
     with pytest.raises(NodeError):
-        ctx.out.compute()
+        ctx.out.run()
 
 
 @pytest.mark.a4
@@ -155,8 +159,9 @@ def test_failed_target_barrier_still_waits_for_pending_upstream_sibling():
     ctx = Context()
     ctx.failed = fails
     ctx.failed.pins.x = 1
-    with pytest.raises(RuntimeError):
-        ctx.failed.compute(timeout=10)
+    # A barrier reports the outcome and does not raise it (ruled 2026-09-28).
+    assert ctx.failed.compute(timeout=10) is None
+    assert ctx.failed.state == 'failed'
     ctx.slow = slow_add
     ctx.slow.pins.x = 10
     ctx.slow.pins.y = 20
@@ -169,7 +174,10 @@ def test_failed_target_barrier_still_waits_for_pending_upstream_sibling():
     assert ctx.slow.state == 'computing'
     with pytest.raises(TimeoutError):
         ctx.join.compute(timeout=.01)
-    # Once the remaining upstream work settles, the node error is delivered.
+    # Once the remaining upstream work settles, the barrier returns; run() is
+    # what delivers the node error.
     ctx.slow.compute(timeout=10)
+    assert ctx.join.compute(timeout=10) is None
+    assert ctx.join.state == 'blocked'
     with pytest.raises(NodeError):
-        ctx.join.compute(timeout=10)
+        ctx.join.run()

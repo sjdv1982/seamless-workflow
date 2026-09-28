@@ -351,34 +351,37 @@ def test_cell_downstream_of_a_miswired_transformer_is_blocked_by_miswiring(make_
     assert ctx.out.block_reason == "blocked-by-miswiring"
 
 
-@gap("§States as seen through barriers", "node barrier on a miswired node raises "
+@gap("§States as seen through barriers", "run() on a miswired node raises "
      "'Node is miswired: None', without the repair description naming the edge")
-def test_node_barrier_on_miswired_names_the_edge(make_context):
+def test_run_on_miswired_names_the_edge(make_context):
     ctx = make_context()
     miswired_transformer(ctx)
     with pytest.raises(NodeError) as info:
-        ctx.mis.compute(timeout=10)
+        ctx.mis.run()
     message = str(info.value)
     assert "miswired" in message
     assert "x" in message and "plain" in message and "mixed" in message
 
 
-def test_node_barrier_on_miswired_raises_node_error(make_context):
-    """§States as seen through barriers: miswired -> NodeError naming the state."""
+def test_node_barrier_on_miswired_returns_none_and_run_raises_node_error(make_context):
+    """§States as seen through barriers (ruled 2026-09-28): the barrier reports
+    miswired as None; run() raises NodeError naming the state."""
     ctx = make_context()
     miswired_transformer(ctx)
+    assert ctx.mis.compute(timeout=10) is None
+    assert ctx.mis.state == "miswired"
     with pytest.raises(NodeError, match="miswired"):
-        ctx.mis.compute(timeout=10)
+        ctx.mis.run()
 
 
 @gap("§States as seen through barriers", "NodeError for an unwired transformer reads "
      "'Node is unwired: None' and does not name the missing pin")
-def test_node_barrier_on_unwired_transformer_names_the_missing_pin(make_context):
+def test_run_on_unwired_transformer_names_the_missing_pin(make_context):
     ctx = make_context()
     ctx.tf = add
     ctx.tf.pins.x = 1
     with pytest.raises(NodeError) as info:
-        ctx.tf.compute(timeout=10)
+        ctx.tf.run()
     assert "unwired" in str(info.value)
     assert "y" in str(info.value)
 
@@ -890,8 +893,9 @@ def test_cells_are_never_computing_and_non_blocked_nodes_report_no_block_reason(
     assert ctx.fail.result.block_reason is None
 
 
-def test_node_barrier_on_blocked_names_the_block_reason(make_context):
-    """§States as seen through barriers: for `blocked`, NodeError names the block reason."""
+def test_node_barrier_on_blocked_returns_none_and_run_names_the_block_reason(make_context):
+    """§States as seen through barriers (ruled 2026-09-28): the barrier reports
+    `blocked` as None; run() raises NodeError naming the block reason."""
     ctx = make_context()
     ctx.bad = boom
     ctx.bad.pins.x = 1
@@ -903,11 +907,13 @@ def test_node_barrier_on_blocked_names_the_block_reason(make_context):
     ctx.below.pins.x = ctx.loose
     ctx.compute(timeout=10)
 
+    assert ctx.tail.compute(timeout=10) is None
+    assert ctx.below.compute(timeout=10) is None
     with pytest.raises(NodeError) as info:
-        ctx.tail.compute(timeout=10)
+        ctx.tail.run()
     assert "blocked" in str(info.value) and "blocked-by-error" in str(info.value)
     with pytest.raises(NodeError) as info:
-        ctx.below.compute(timeout=10)
+        ctx.below.run()
     assert "blocked-by-unwired" in str(info.value)
 
 

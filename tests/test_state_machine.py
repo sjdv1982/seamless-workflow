@@ -50,8 +50,10 @@ def test_failed_upstream_blocks_downstream_with_error_reason():
     inc_node = ctx._graph.nodes[("inc",)]
     assert inc_node.state == "blocked"
     assert inc_node.block_reason == "blocked-by-error"
+    # The barrier reports the blocked node; run() raises (ruled 2026-09-28).
+    assert ctx.inc.compute() is None
     with pytest.raises(NodeError):
-        ctx.inc.compute()
+        ctx.inc.run()
 
 
 def test_clear_exception_noop_and_successful_rederive_after_edit():
