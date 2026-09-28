@@ -103,7 +103,9 @@ def test_context_projection_dispatches_hashserver_only_input(tmp_path):
             args, kwargs = dispatches[0]
             assert Checksum(args[0]) == source_checksum
             assert args[1:] == ("value", "plain", "plain")
-            assert kwargs == {}
+            # A bound non-scratch Cell dispatches under its own scratch
+            # policy, and the dispatch always carries it explicitly.
+            assert kwargs == {"scratch": False}, kwargs
         finally:
             if "ctx" in locals():
                 ctx.close()

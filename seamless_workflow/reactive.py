@@ -175,12 +175,12 @@ class Reactive:
         self._runtime.current_runs[path] = record
         self._replace_current_checksum(path, None)
         node.state, node.block_reason, node.exception = 'computing', None, None
-        snapshot = self._snapshot_transformer(path, concrete_args=pins, concrete_code=code)
-        snapshot = replace(snapshot, signature=None)
-        leases = snapshot.leases
+        frozen = self._freeze_transformer(path, concrete_args=pins, concrete_code=code)
+        frozen = replace(frozen, signature=None)
+        leases = frozen.leases
         owner = weakref.ref(self)
         side = self._side
-        async def execute(snapshot=snapshot, leases=leases):
+        async def execute(frozen=frozen, leases=leases):
             from seamless_transformer.transformer_class import PythonBashBaseTransformer
             tf = None
             completion = None
@@ -196,7 +196,7 @@ class Reactive:
                         if isinstance(item, Lease): item._release_refholds()
             try:
                 builder = PythonBashBaseTransformer.__new__(PythonBashBaseTransformer)
-                tf = builder._build_from_snapshot(snapshot)
+                tf = builder._build_from_frozen(frozen)
                 tf_checksum = await tf.construction()
                 if tf_checksum is None:
                     if isinstance(tf.exception, Exception):

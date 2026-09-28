@@ -65,7 +65,7 @@ skips rather than failing for an environmental reason.
 | `node-transition/` | §14.1 — eligibility is not delivery; invalidation; failure and unwired propagation; cache hits |
 | `quiescence-barrier/` | §14.2 and §27 — `ctx.compute()`, `ctx.a.compute()`, their async forms, the `timeout` contract, and the legacy pump |
 | `latency/` | §15 A0 — the test "that makes the whole defect self-evident", and the re-execution measurement through the observation log |
-| `correctness/` | [MOD-15] non-Python and envelope correctness; [MOD-3] expression regression net; [MOD-16] expression lifetime; diamonds |
+| `correctness/` | [MOD-15] non-Python and envelope correctness; [MOD-3] expression regression net; expression lifetime (the lifecycle contract's one rule for owners, superseding [MOD-16]); diamonds |
 
 ## Status and phase expectations
 
@@ -92,7 +92,7 @@ Measured against the current implementation, one process per file:
 | `correctness/test_correctness_environment.py` | 3 | 2 | 1 | A4 |
 | `correctness/test_correctness_no_code.py` | 4 | 0 | 4 | A1 |
 | `correctness/test_correctness_expressions.py` | 11 | 10 | 1 | A3 |
-| `correctness/test_correctness_expression_lifetime.py` | 2 | 0 | 2 | A1 ([MOD-16]) |
+| `correctness/test_correctness_expression_lifetime.py` | 2 | 0 | 2 | A1 (supersedes [MOD-16]) |
 | `correctness/test_correctness_fanin.py` | 8 | 2 | 6 | A2 |
 | **total** | **108** | **32** | **76** | |
 
@@ -318,9 +318,10 @@ This is the test-suite half of A0.  Still outstanding from §15 A0:
 * the one-branch fix of **[MOD-15]** (stop reporting `complete` for a node with
   no executable code).  `correctness/test_correctness_no_code.py` is its
   acceptance test and is red;
-* the **[MOD-16]** fix making `Expression` claim its `input_ref`.  Its lifetime
-  test is now here — `correctness/test_correctness_expression_lifetime.py`, red —
-  so only the fix is outstanding;
+* ~~the **[MOD-16]** fix making `Expression` claim its `input_ref`~~ — superseded
+  2026-09-28 by the lifecycle contract (§6/§7, *One rule for owners*): an
+  Expression's inputs are tempref-only.
+  `correctness/test_correctness_expression_lifetime.py` now pins that rule;
 * the semantic decisions **[MOD-2]**, **[MOD-4]**, **[MOD-7]** (**[MOD-1]** is
   already decided, and **[MOD-17]** vs §14.2 is settled by §27).
 

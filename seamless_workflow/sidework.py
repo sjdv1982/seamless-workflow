@@ -36,7 +36,7 @@ class Lease:
 @dataclass(frozen=True)
 class PreparedTransformer:
     config: object
-    snapshot: object
+    frozen: object
 
 
 @dataclass(frozen=True)

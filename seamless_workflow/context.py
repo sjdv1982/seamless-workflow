@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from seamless import Buffer, CacheMissError, Cell, Checksum, Expression
-from seamless_transformer.builder_snapshot import TransformerBuilderSnapshot
+from seamless_transformer.frozen_transformer import FrozenTransformer
 
 from .adapters import buffer_for_checksum, checksum_for_value, normalize_checksum, value_for_checksum
 from .builder_state import BoundCellBackend, BoundTransformerBackend, _path_string
@@ -547,8 +547,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             object.__setattr__(cell, "_workflow_backend", BoundCellBackend(self, path))
             cell._release_refholds()
 
-    def _transformer_config_from_snapshot(self, snapshot, *, direct=False):
-        codebuf = snapshot.codebuf
+    def _transformer_config_from_frozen(self, frozen, *, direct=False):
+        codebuf = frozen.codebuf
         code_checksum = (
             None
             if codebuf is None
@@ -559,27 +559,27 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         cfg = TransformerConfig(
             code=codebuf,
             code_checksum=code_checksum,
-            language=snapshot.language,
-            callable=snapshot.callable,
-            pins=set(snapshot.celltypes) - {"result"},
-            celltypes=copy.deepcopy(snapshot.celltypes),
-            optional_pins=set(snapshot.optional_pins),
-            modules=copy.deepcopy(snapshot.modules),
-            globals=copy.deepcopy(snapshot.globals),
-            meta=copy.deepcopy(snapshot.meta),
-            environment=copy.deepcopy(snapshot.environment),
-            scratch=snapshot.scratch,
-            local=snapshot.local,
-            direct_print=snapshot.direct_print,
-            call_mode="direct" if direct else snapshot.call_mode,
-            schema=snapshot.schema, compilation=copy.deepcopy(snapshot.compilation),
-            objects=copy.deepcopy(snapshot.objects), header=snapshot.header,
+            language=frozen.language,
+            callable=frozen.callable,
+            pins=set(frozen.celltypes) - {"result"},
+            celltypes=copy.deepcopy(frozen.celltypes),
+            optional_pins=set(frozen.optional_pins),
+            modules=copy.deepcopy(frozen.modules),
+            globals=copy.deepcopy(frozen.globals),
+            meta=copy.deepcopy(frozen.meta),
+            environment=copy.deepcopy(frozen.environment),
+            scratch=frozen.scratch,
+            local=frozen.local,
+            direct_print=frozen.direct_print,
+            call_mode="direct" if direct else frozen.call_mode,
+            schema=frozen.schema, compilation=copy.deepcopy(frozen.compilation),
+            objects=copy.deepcopy(frozen.objects), header=frozen.header,
         )
-        cfg.pins.update(snapshot.args)
+        cfg.pins.update(frozen.args)
         cfg.celltypes.setdefault("result", "mixed")
         from .configuration import fingerprint
         fingerprint(cfg)
-        return cfg, snapshot
+        return cfg, frozen
 
     def _transformer_config_from_code(self, code):
         if isinstance(code, TransformerConfig):
@@ -621,12 +621,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _create_transformer_from_builder(self, path, transformer):
         try:
-            cfg, snapshot = transformer.config, transformer.snapshot
+            cfg, frozen = transformer.config, transformer.frozen
             self._graph.nodes[path] = Node(kind="transformer", transformer_config=cfg)
             self._retain_code_checksum(path, cfg.code_checksum)
-            for pin, value in snapshot.args.items():
+            for pin, value in frozen.args.items():
                 self._set_transformer_pin(path, pin, value,
-                    input_celltype=snapshot.input_celltypes.get(pin))
+                    input_celltype=frozen.input_celltypes.get(pin))
 
         except Exception:
             self._delete_subtree(path)
@@ -634,7 +634,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _replace_transformer_from_builder(self, path, transformer):
         node = self._graph.nodes[path]
-        cfg, snapshot = transformer.config, transformer.snapshot
+        cfg, frozen = transformer.config, transformer.frozen
         if cfg.signature_parameters() is None:
             cfg.pins.update(node.transformer_config.pins)
         removed_pins = node.transformer_config.pins - cfg.pins
@@ -642,7 +642,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         old_code_refholds = self._code_refholds.copy()
         old_module_refholds = self._module_refholds.copy()
         # Validate every replacement edge before acquiring/publishing configuration.
-        for pin, value in snapshot.args.items():
+        for pin, value in frozen.args.items():
             ep = self._endpoint(value)
             if ep is not None:
                 source = self._source_path(value)
@@ -653,19 +653,19 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
         new_producers = {
             pin: producer for pin, producer in old_producers.items()
-            if pin in cfg.pins and pin not in snapshot.args
+            if pin in cfg.pins and pin not in frozen.args
         }
         staged_checksums = []
         published = False
         try:
             # Acquire all replacement state before touching the old semantic
             # fields.  This makes a failed conversion leave the old node live.
-            for pin, value in snapshot.args.items():
+            for pin, value in frozen.args.items():
                 if self._endpoint(value) is not None:
                     continue
                 checksum = checksum_for_value(value, cfg.celltypes.get(pin, "mixed"))
                 new_producers[pin] = self._retain_producer(
-                    checksum, snapshot.input_celltypes.get(pin) or cfg.celltypes.get(pin, "mixed"),
+                    checksum, frozen.input_celltypes.get(pin) or cfg.celltypes.get(pin, "mixed"),
                     scratch=cfg.scratch,
                 )
                 staged_checksums.append(checksum)
@@ -700,7 +700,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             for pin, producer in old_producers.items():
                 if new_producers.get(pin) is not producer:
                     self._release_producer(producer, path + (pin,))
-            for pin in removed_pins | set(snapshot.args):
+            for pin in removed_pins | set(frozen.args):
                 self._remove_edges_targeting(path, (pin,), descendants=True)
             self._remove_edges_targeting(path, ("code",), descendants=True)
             self._revisions[path] = self._revisions.get(path, 0) + 1
@@ -711,7 +711,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 if role[0] == path:
                     checksum.decref_refholder()
 
-            for pin, value in snapshot.args.items():
+            for pin, value in frozen.args.items():
                 if self._endpoint(value) is not None:
                     self._set_transformer_pin(path, pin, value)
             self._derive_all()
@@ -2198,7 +2198,7 @@ async def _computation(self, timeout=None):
 
 for _name, _method in {**vars(AttachmentRuntime), **vars(Reactive), **vars(RuntimeAPI), **vars(Context)}.items():
     if callable(_method) and not _name.startswith("__") and _name not in {
-        "close", "_after_turn", "_check_public_caller", "_transformer_config_from_code", "_transformer_config_from_snapshot"
+        "close", "_after_turn", "_check_public_caller", "_transformer_config_from_code", "_transformer_config_from_frozen"
     }:
         setattr(Context, _name, controller_method(_method))
 Context.compute = _compute

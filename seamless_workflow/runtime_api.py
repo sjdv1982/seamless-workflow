@@ -70,8 +70,8 @@ class RuntimeAPI:
             future.set_result(result)
             self._barriers.pop(future, None)
 
-    def _snapshot_transformer(self, path, *, concrete_args=None, concrete_code=None):
-        from seamless_transformer.builder_snapshot import TransformerBuilderSnapshot
+    def _freeze_transformer(self, path, *, concrete_args=None, concrete_code=None):
+        from seamless_transformer.frozen_transformer import FrozenTransformer
         from .builder_state import _path_string
         import inspect
         from seamless_transformer.optional_pins import pin_signature
@@ -87,10 +87,22 @@ class RuntimeAPI:
         for pin in cfg.pins if concrete_args is None else ():
             edge = self._incoming_edge(path, (pin,))
             if edge is not None:
+                if pin in cfg.optional_pins:
+                    from seamless.checksum.null import canonicalize_checksum, is_null
+                    state, checksum = self._source_state(edge)
+                    if state == 'complete' and checksum is not None:
+                        source_node, _ = self._graph.resolve_existing(edge.source)
+                        input_type = edge.source_celltype or self._node_celltype(source_node)
+                        if is_null(canonicalize_checksum(checksum, input_type)):
+                            continue
                 source = self._build_source_expression(edge.source)
                 args[pin] = Expression(source, celltype=cfg.celltypes.get(pin, 'mixed'))
             elif pin in node.transformer_pin_producers:
                 producer = node.transformer_pin_producers[pin]
+                if pin in cfg.optional_pins and producer.checksum is not None:
+                    from seamless.checksum.null import canonicalize_checksum, is_null
+                    if is_null(canonicalize_checksum(producer.checksum, producer.celltype)):
+                        continue
                 args[pin] = Expression(producer.checksum, input_celltype=producer.celltype,
                                        celltype=cfg.celltypes.get(pin, 'mixed'))
         code = concrete_code if concrete_code is not None else cfg.code_checksum
@@ -102,7 +114,7 @@ class RuntimeAPI:
         claims = [code, *cfg.modules.values()]
         if concrete_args is not None: claims.extend(args.values())
         leases = tuple(Lease(cs) for cs in claims if isinstance(cs, Checksum))
-        return TransformerBuilderSnapshot(
+        return FrozenTransformer(
             codebuf=code, language=cfg.language, celltypes=copy.deepcopy(cfg.celltypes),
             optional_pins=frozenset(cfg.optional_pins), args=args,
             modules=copy.deepcopy(cfg.modules), globals=copy.deepcopy(cfg.globals),

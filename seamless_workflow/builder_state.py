@@ -8,7 +8,7 @@ from typing import Any
 
 from seamless import Cell, Checksum
 from seamless.cell_class import _UNSET, append_item_path, append_slice_path
-from seamless_transformer.builder_snapshot import TransformerBuilderSnapshot
+from seamless_transformer.frozen_transformer import FrozenTransformer
 
 from .endpoints import BoundEndpoint
 from .errors import AuthorityError, ReadOnlyEndpointError, StaleWorkflowHandleError
@@ -528,14 +528,14 @@ class BoundPinBackend:
         self._node()
         if input_ref is not _UNSET:
             raise TypeError('Pin.build does not accept a replacement input')
-        snapshot = self.context._snapshot_transformer(self.node_path)
+        frozen = self.context._freeze_transformer(self.node_path)
         try:
-            expression = snapshot.args.get(self.pin)
+            expression = frozen.args.get(self.pin)
             if expression is None:
                 return Expression(None, celltype=self.celltype)
             return expression
         finally:
-            for lease in snapshot.leases: lease._release_refholds()
+            for lease in frozen.leases: lease._release_refholds()
 
     def compute(self, input_ref=_UNSET, *, timeout=None):
         if input_ref is not _UNSET: raise TypeError('Pin.compute does not accept a replacement input')
@@ -762,8 +762,8 @@ class BoundTransformerBackend:
         self._node()
         self.context._delete_transformer_pin(self.node_path, pin)
 
-    def snapshot_for_call(self):
-        return self.context._snapshot_transformer(self.node_path)
+    def freeze(self):
+        return self.context._freeze_transformer(self.node_path)
 
     def _workflow_endpoint(self):
         self._node()

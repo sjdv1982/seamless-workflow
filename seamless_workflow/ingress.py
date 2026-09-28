@@ -26,12 +26,12 @@ def _prepare_transformer(ctx, value):
     from seamless_transformer.transformer_class import TransformerCore
     if not isinstance(value, TransformerCore):
         value = delayed(value)
-    snapshot = value._snapshot_for_call()
-    args = {pin: _endpoint(arg) or checksum_for_value(arg, snapshot.celltypes.get(pin, 'mixed'))
-            for pin, arg in snapshot.args.items()}
-    snapshot = replace(snapshot, args=args)
-    cfg, snapshot = ctx._transformer_config_from_snapshot(snapshot)
-    return PreparedTransformer(cfg, snapshot)
+    frozen = value._freeze()
+    args = {pin: _endpoint(arg) or checksum_for_value(arg, frozen.celltypes.get(pin, 'mixed'))
+            for pin, arg in frozen.args.items()}
+    frozen = replace(frozen, args=args)
+    cfg, frozen = ctx._transformer_config_from_frozen(frozen)
+    return PreparedTransformer(cfg, frozen)
 
 
 def _contains_expression(value):
@@ -191,7 +191,7 @@ def controller_method(method):
             if isinstance(value, Checksum): leases.append(Lease(value))
             if isinstance(value, PreparedCell) and isinstance(value._input_ref, Checksum): leases.append(Lease(value._input_ref))
             if isinstance(value, PreparedTransformer):
-                leases.extend(Lease(v) for v in value.snapshot.args.values() if isinstance(v, Checksum))
+                leases.extend(Lease(v) for v in value.frozen.args.values() if isinstance(v, Checksum))
         elif name in {'_replace_transformer_from_builder','_create_transformer_from_builder'}:
             path, original = args
             args = (path, _prepare_transformer(self, original))
@@ -391,7 +391,7 @@ def controller_method(method):
             return load_graph(self, args[0], **kwargs)
         try:
             reads = {'get_graph', '_node_snapshot', '_lookup', '_child_names', '_incoming_edge',
-                     '_pin_snapshot', '_public_source', '_public_cell_source', '_effective_input_celltype', '_snapshot_transformer', '_build_cell_expression',
+                     '_pin_snapshot', '_public_source', '_public_cell_source', '_effective_input_celltype', '_freeze_transformer', '_build_cell_expression',
                      '_build_source_expression', '_capture_endpoint', '_refheld_checksums'}
             klass = 4 if name in reads else (1 if name in {'prune', '_clear_exception'} else 2)
             result = controller.call(name, *args, klass=klass, **kwargs)

@@ -112,19 +112,69 @@ def test_internal_notification_failure_fails_waiters_and_poison_is_visible(monke
     assert not ctx._side.thread.is_alive()
 
 
-def test_escaped_cell_and_transformer_snapshots_survive_close():
-    from seamless import Cell
-    from seamless_transformer.transformer_class import PythonBashBaseTransformer
+def _guard_remote(monkeypatch):
+    try:
+        import seamless_remote.buffer_remote as buffer_remote
+    except ImportError:
+        return
+
+    async def missing(checksum):
+        return None
+
+    monkeypatch.setattr(buffer_remote, "get_buffer", missing)
+
+
+def _assert_unresolvable(checksum):
+    from seamless import CacheMissError
+    try:
+        checksum.resolve()
+    except CacheMissError:
+        return
+    pytest.fail(
+        "the input is still resolvable although nothing claims it: something "
+        "retains the buffer outside the claim system"
+    )
+
+
+# An owner claims what it is given directly from construction, and a dependency
+# only when it resolves it (checksum-reference-lifecycle.md §6/§7).  A build off
+# a bound node takes its inputs as Expressions over node checksums, so after
+# close() nothing claims them and, without a hashserver, they are gone.
+
+def test_an_escaped_transformation_does_not_own_its_pin_inputs(monkeypatch):
+    from uuid import uuid4
+    from seamless_transformer.transformation_class import TransformationError
     from helpers.reference_lifecycle import force_expiry
     ctx = Context()
-    ctx.a = {'token': 'escaped ownership'}
-    captured = Cell(source=ctx.a.build())
+    ctx.a = {'token': f'escaped-transformation-{uuid4().hex}'}
     ctx.tf = sleeping
     ctx.tf.pins.x = ctx.a
-    snapshot = ctx.tf._snapshot_for_call()
+    transformation = ctx.tf.build()
     checksum = ctx.a.checksum
     ctx.close()
+    assert checksum not in collect_refholder_claims([transformation])
+    assert get_buffer_cache().reference_snapshot().get(checksum, (0,))[0] == 0
+    _guard_remote(monkeypatch)
     force_expiry(checksum)
-    assert captured.run() == {'token': 'escaped ownership'}
-    tf = PythonBashBaseTransformer.__new__(PythonBashBaseTransformer)._build_from_snapshot(snapshot)
-    assert tf.run() == {'token': 'escaped ownership'}
+    _assert_unresolvable(checksum)
+    with pytest.raises(TransformationError):
+        transformation.run()
+    assert checksum.hex() in str(transformation.exception)
+
+
+def test_an_escaped_cell_does_not_own_its_source_input(monkeypatch):
+    from uuid import uuid4
+    from seamless import Cell, CacheMissError
+    from helpers.reference_lifecycle import force_expiry
+    ctx = Context()
+    ctx.a = {'token': f'escaped-cell-{uuid4().hex}'}
+    captured = Cell(source=ctx.a.build())
+    checksum = ctx.a.checksum
+    ctx.close()
+    assert checksum not in collect_refholder_claims([captured])
+    assert get_buffer_cache().reference_snapshot().get(checksum, (0,))[0] == 0
+    _guard_remote(monkeypatch)
+    force_expiry(checksum)
+    _assert_unresolvable(checksum)
+    with pytest.raises(CacheMissError):
+        captured.run()
