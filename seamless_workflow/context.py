@@ -764,13 +764,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._validate_write(node_path, local, detach)
             if local:
                 raise RuntimeError("Sub-path values must be prepared outside the controller")
-            if checksum_rhs and value is not None:
-                try:
-                    value.resolve(input_celltype or node.cell_config.celltype)
-                except CacheMissError:
-                    # An absent checksum is a valid lazy write; validation is
-                    # deferred until its buffer becomes available.
-                    pass
             self._set_cell_root_with_edges(node_path, value, input_celltype or node.cell_config.celltype, clear_edges=detach)
         self._derive_all()
 
@@ -1559,6 +1552,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         root_type = self._node_celltype(source_node)
         source_type = edge.source_celltype or root_type
         target_type = root_type
+        if (source_local and not edge.source_conversion
+                and source_type != self._celltype_for_path(source_node, source_local)):
+            return "miswired", None
         if target_node.kind == "cell":
             target_type = target_node.cell_config.celltype
         elif target_node.kind == "transformer" and target_local != ("code",):
@@ -1730,9 +1726,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def _get_value(self, node_path, local=(), *, celltype=None):
         checksum = self._get_checksum(node_path, local)
         if checksum is None:
-            node = self._graph.nodes[node_path]
-            if node.exception is not None:
-                raise node.exception
             return None
         node = self._graph.nodes[node_path]
         if celltype is None:
@@ -1750,9 +1743,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def _get_buffer(self, node_path, local=()):
         checksum = self._get_checksum(node_path, local)
         if checksum is None:
-            node = self._graph.nodes[node_path]
-            if node.exception is not None:
-                raise node.exception
             return None
         node = self._graph.nodes[node_path]
         celltype = self._celltype_for_path(node_path, local)

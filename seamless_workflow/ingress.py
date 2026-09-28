@@ -313,14 +313,6 @@ def controller_method(method):
                     if checksum is not None: checksum.tempref()
                     return checksum
                 if checksum is None:
-                    error = controller.call(
-                        '_projection_error', path, tuple(local), handle_id, klass=4
-                    )
-                    if error is not None:
-                        raise error
-                    node = controller.call('_node_snapshot', path, klass=4)
-                    if node.exception is not None:
-                        raise node.exception
                     return None
                 try:
                     if name == '_get_value':
@@ -351,7 +343,7 @@ def controller_method(method):
                 path,
                 local,
                 read=True,
-                barrier=name == '_compute_node',
+                barrier=True,
                 timeout=kwargs.get('timeout'),
             )
             try:
