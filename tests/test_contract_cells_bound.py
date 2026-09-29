@@ -1,8 +1,8 @@
 """Bound Cell rules from contracts/cells.md not pinned by the existing suites.
 
 Companion of test_cells_contract_alignment.py / test_cells_wiring_contract.py
-(feature 5 alignment pass, 2026-09-22); this file only adds what that pass
-missed. Known gaps assert the intended result under non-strict xfail.
+(feature 5 alignment pass, 2026-09-22); this file adds bound-cell contract
+cases not covered by those suites.
 """
 import copy
 import re
@@ -10,11 +10,6 @@ import re
 import pytest
 
 from seamless import Buffer, Cell, Checksum
-
-
-def gap(reason):
-    section, _, why = reason.partition(": ")
-    return pytest.mark.xfail(strict=False, reason=f"cells.md {section}: contract ahead of code: {why}")
 
 
 def _text_source(ctx, name="b", value="[10, 20, 30, 40]"):
@@ -121,7 +116,6 @@ def _rename(value, old, new):
     return value
 
 
-@gap("§Connecting: anonymous_nodes / graph 0.5 not implemented; a user cell and a symbol of one name must not collide")
 def test_user_cell_named_like_a_symbol_does_not_collide(make_context):
     graph, symbol = _anonymous_graph(make_context)
     graph = _rename(graph, symbol, "abcde")
@@ -138,7 +132,6 @@ def test_user_cell_named_like_a_symbol_does_not_collide(make_context):
     assert set(restored.get_graph()["anonymous_nodes"]) == {"abcde"}
 
 
-@gap("§Connecting: set_graph must check the wiring invariant on anonymous_nodes entries (not implemented)")
 def test_set_graph_checks_the_invariant_on_symbol_table_entries(make_context):
     graph, symbol = _anonymous_graph(make_context)
     entry = graph["anonymous_nodes"][symbol]
@@ -329,8 +322,6 @@ def test_pin_wiring_refusal_message_names_both_spellings(make_context):
 
 # --- Clarity rulings, 2026-09-26 -------------------------------------------------------------
 
-@gap("§Cell-level joins: a root edge plus a sub-path edge on one cell must be refused "
-     "(with sub-path edges the root may hold only a checksum); the code accepts both edges")
 def test_root_edge_plus_sub_path_edge_is_refused(make_context):
     ctx = make_context()
     ctx.base = Cell("plain")
@@ -356,7 +347,6 @@ def test_literal_root_plus_sub_path_edges_is_a_legal_join(make_context):
     assert ctx.join.value == {"a": 1, "k": 2}
 
 
-@gap("§Connecting / ruling 8: a join target with a projected, converting source is not refused at all")
 def test_join_refusal_message_names_both_spellings(make_context):
     ctx = make_context()
     _text_source(ctx, name="t", value="[10, 20]")
@@ -377,8 +367,6 @@ def test_join_refusal_message_names_both_spellings(make_context):
     assert ctx.get_graph()["connections"] == []
 
 
-@gap("§Celltypes / clarity ruling: `ctx.a = Cell(celltype=same)` on a mounted cell clears the mount and the cell; "
-     "today the cell is cleared but the mount stays active (status 'active', retype still refused)")
 def test_reassigning_a_mounted_cell_clears_the_mount_and_the_cell(make_context, tmp_path):
     ctx = make_context()
     ctx.m = Cell("text")
@@ -525,8 +513,6 @@ def test_bound_authority_ancestor_covered_and_sibling(make_context):
 
 # --- Cell-level joins -----------------------------------------------------------------------------
 
-@gap("§State and block_reason / §Cell-level joins: Context._apply_pending considers only the first "
-     "incomplete edge, so a still-progressing first member hides a failed second member (join stays 'waiting')")
 def test_join_with_a_progressing_and_a_failed_member_is_blocked(make_context, monkeypatch):
     import asyncio
     from threading import Event

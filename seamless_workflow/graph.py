@@ -110,6 +110,7 @@ class Node:
     current_checksum: Checksum | None = None
     exception: BaseException | None = None
     mount: object = None
+    mount_inactive: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,7 @@ class Edge:
     source_conversion: bool = False
     source_conversion_before: bool = False
     source_conversion_steps: tuple[tuple[int, str], ...] = ()
+    source_miswired: bool = False
 
 
 class ContextGraph:
@@ -129,6 +131,7 @@ class ContextGraph:
         self.incoming: dict[NodePath, set[int]] = {}
         self.outgoing: dict[NodePath, set[int]] = {}
         self.namespaces: set[NodePath] = set()
+        self.anonymous_symbol_by_recipe: dict[tuple, str] = {}
 
     def rebuild_indexes(self) -> None:
         self.incoming = {path: set() for path in self.nodes}

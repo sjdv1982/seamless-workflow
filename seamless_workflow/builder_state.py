@@ -11,7 +11,7 @@ from seamless.cell_class import _UNSET, append_item_path, append_slice_path
 from seamless_transformer.frozen_transformer import FrozenTransformer
 
 from .endpoints import BoundEndpoint
-from .errors import AuthorityError, ReadOnlyEndpointError, StaleWorkflowHandleError
+from .errors import AuthorityError, DependencyError, ReadOnlyEndpointError, StaleWorkflowHandleError
 
 
 def _path_string(path: tuple[Any, ...]) -> str:
@@ -38,6 +38,16 @@ class BoundCellBackend:
         self._conversion_before = bool(conversion_before)
         self._conversion_steps = tuple(conversion_steps)
         self._result_lease = None
+        self._stale = False
+        self._anonymous_recipe = None
+        if self._conversion and not self.local_path:
+            self._anonymous_recipe = (
+                self.node_path,
+                self._projected_celltype,
+                self._conversion_steps,
+            )
+            from weakref import WeakSet
+            context._anonymous_handle_backends.setdefault(self._anonymous_recipe, WeakSet()).add(self)
 
     def _hold_result(self, checksum):
         lease = self._result_lease
@@ -58,6 +68,8 @@ class BoundCellBackend:
         return checksum
 
     def _node(self):
+        if self._stale:
+            raise StaleWorkflowHandleError("Anonymous handle was transferred to a named cell")
         self.context._check_public_caller()
         try:
             node = self.context._node_snapshot(self.node_path)
@@ -92,7 +104,9 @@ class BoundCellBackend:
         self._node()
         if self.readonly:
             return self.celltype
-        if self.local_path or self._conversion:
+        if self.local_path:
+            return self.context._input_celltype_for_path(self.node_path, self.local_path)
+        if self._conversion:
             return self.context._node_snapshot(self.node_path).cell_config.celltype
         return self.context._effective_input_celltype(self.node_path)
 
@@ -380,6 +394,10 @@ class BoundCellBackend:
         self._node()
         if input_ref is not _UNSET:
             return self.build(input_ref).run()
+        if self.local_path and self.context._cell_endpoint_parent_state(self.node_path) in {
+            "waiting", "computing", "unwired"
+        }:
+            return None
         value = self.context._compute_cell_value(
             self.node_path, self.local_path, _handle_id=self._handle_id
         )
@@ -447,7 +465,15 @@ class BoundCellBackend:
             conversion=self._conversion,
             conversion_before=self._conversion_before,
             conversion_steps=self._conversion_steps,
+            handle_id=self._handle_id,
         )
+
+
+    def _workflow_validate_source(self):
+        if self.local_path or self._conversion:
+            raise DependencyError(
+                "An anonymous or projected workflow handle cannot be used as a standalone source"
+            )
 
     def _endpoint_for_local(self, local):
         kind = "transformer-result" if self.readonly else (
@@ -465,6 +491,7 @@ class BoundCellBackend:
             self._conversion,
             self._conversion_before,
             self._conversion_steps,
+            self._handle_id,
         )
 
     def capture_source(self):

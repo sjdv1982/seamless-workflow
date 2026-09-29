@@ -35,9 +35,18 @@ from .sidework import Lease, PreparedCell, PreparedTransformer, SideLoop, evalua
 PIN_CELLTYPES = {"plain", "mixed", "deepcell", "deepfolder", "folder"}
 
 
-def _projected_source_type_error(source_ep, source_type, target_type, target_path, target_pin=None):
+def _projected_source_type_error(
+    source_ep, source_type, target_type, target_path, target_pin=None, target_local=()
+):
     source_name = "ctx." + ".".join(source_ep.node_path)
     target_name = "ctx." + ".".join(target_path)
+    if target_local:
+        component = target_local[0]
+        if isinstance(component, str):
+            import json
+            target_name += f"[{json.dumps(component)}]"
+        else:
+            target_name += f"[{component}]"
     if target_pin is not None:
         target_name += f".pins.{target_pin}"
     projection_path = _path_string(source_ep.local_path)
@@ -75,6 +84,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         object.__setattr__(self, "_expression_execution", expression_execution)
         object.__setattr__(self, "top_id", uuid4().hex)
         object.__setattr__(self, "_graph", ContextGraph())
+        object.__setattr__(self, "_anonymous_handle_backends", {})
         object.__setattr__(self, "_runtime", ContextRuntime())
         object.__setattr__(self, "_refholds_released", False)
         object.__setattr__(self, "_code_refholds", {})
@@ -407,6 +417,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         elif self._is_bound_source(value):
             self._create_cell(path, celltype=self._source_celltype(value))
             self._add_endpoint_edge(value, self._cell_endpoint(path))
+            self._adopt_anonymous_handle(value, path)
         elif isinstance(value, (Cell, PreparedCell)):
             self._create_cell_from_builder(path, value)
         elif isinstance(value, (TransformerCore, PreparedTransformer)):
@@ -417,6 +428,54 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._create_cell(path)
             self._cell_operation(path, (), value, detach=True)
         self._derive_all()
+
+    def _adopt_anonymous_handle(self, value, path):
+        backend = getattr(value, "_workflow_backend", None)
+        if backend is None and isinstance(value, BoundEndpoint) and value.handle_id is not None:
+            for siblings in self._anonymous_handle_backends.values():
+                backend = next(
+                    (candidate for candidate in siblings
+                     if candidate._handle_id is value.handle_id),
+                    None,
+                )
+                if backend is not None:
+                    break
+        recipe = getattr(backend, "_anonymous_recipe", None)
+        if recipe is None or backend.local_path:
+            return
+        source_node, target_type, conversion_steps = recipe
+        if any(
+            edge.target != tuple(path)
+            and edge.source_conversion
+            and self._graph.resolve_existing(edge.source)[0] == source_node
+            and edge.source_conversion_steps == conversion_steps
+            and edge.source_celltype == target_type
+            for edge in self._graph.edges
+        ):
+            return
+        siblings = self._anonymous_handle_backends.pop(recipe, ())
+        for sibling in tuple(siblings):
+            if sibling is not backend:
+                sibling._stale = True
+        incoming = self._incoming_for(tuple(path)).get(())
+        if incoming is not None:
+            from dataclasses import replace
+            source_node, _ = self._graph.resolve_existing(incoming.source)
+            replacement = replace(
+                incoming,
+                source_celltype=self._node_celltype(source_node),
+                source_conversion=False,
+                source_conversion_before=False,
+                source_conversion_steps=(),
+            )
+            self._graph.edges[self._graph.edges.index(incoming)] = replacement
+        backend.node_path = tuple(path)
+        backend.local_path = ()
+        backend._projected_celltype = None
+        backend._conversion = False
+        backend._conversion_before = False
+        backend._conversion_steps = ()
+        backend._anonymous_recipe = None
 
     def _delete(self, path):
         path = tuple(path)
@@ -488,6 +547,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         node = self._graph.nodes[path]
         if node.mount and cell.celltype != node.cell_config.celltype:
             raise ValueError("Mounted celltype cannot change; unmount first")
+        if node.mount is not None:
+            self._mount_detach(path, delete=False, derive=False)
+            node.mount = None
+            node.mount_inactive = True
         session = self._mount_sessions.get(path)
         input_ref = cell._input_ref
         new_config = CellConfig(
@@ -1007,6 +1070,14 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 raise PathError("Cell connection targets are limited to one point component")
             if self._graph.nodes[target.node_path].cell_config.celltype not in PIN_CELLTYPES:
                 raise PathError("Cell subvalue connections require a container-capable Cell")
+            if source_ep.local_path:
+                target_type = self._graph.nodes[target.node_path].cell_config.celltype
+                source_type = source_ep.celltype or self._node_celltype(source_ep.node_path)
+                if target_type != source_type and not source_ep.conversion:
+                    raise _projected_source_type_error(
+                        source_ep, source_type, target_type, target.node_path,
+                        target_local=target.local_path,
+                    )
         elif target.endpoint_kind == "transformer-input":
             if len(target.local_path) != 1:
                 raise PathError("Transformer targets must address a whole pin")
@@ -1051,6 +1122,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                   source_conversion_steps=()):
         source_node, _ = self._graph.resolve_existing(tuple(source))
         target_node, target_local = self._graph.resolve_existing(tuple(target))
+        target_config = self._graph.nodes[target_node].cell_config
+        if target_config is not None:
+            incoming = self._incoming_for(target_node)
+            if target_local and () in incoming:
+                raise DependencyError("A root connection cannot be combined with sub-path connections")
+            if not target_local and any(local for local in incoming):
+                raise DependencyError("A root connection cannot be combined with sub-path connections")
         mount = self._graph.nodes[target_node].mount
         if mount and "r" in mount.mode:
             raise AuthorityError("Sensing mount is the producer; unmount first")
@@ -1290,7 +1368,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if edge is not None:
                 source_path, source_local = self._graph.resolve_existing(edge.source)
                 source_node = self._graph.nodes[source_path]
-                if (source_local and source_node.state == "complete"
+                if (source_local and not edge.source_miswired and source_node.state == "complete"
                         and not edge.source_conversion_before and not edge.source_conversion):
                     if (cfg.celltype not in {"deepcell", "deepfolder", "folder"}
                             and self._node_celltype(source_path) != cfg.celltype
@@ -1298,9 +1376,15 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                         self._replace_current_checksum(path, None)
                         node.state, node.block_reason, node.exception = "miswired", None, None
                         return
+                    source_checksum = source_node.current_checksum
+                    projection_path = source_local
+                    input_type = self._node_celltype(source_path)
+                    fused = self._fused_projection_source(source_path, source_local)
+                    if fused is not None:
+                        source_checksum, input_type, projection_path = fused
                     state, checksum, error = self._projection(
-                        source_node.current_checksum, source_local,
-                        self._node_celltype(source_path), cfg.celltype,
+                        source_checksum, projection_path,
+                        input_type, cfg.celltype,
                         cfg.validator, cfg.validator_language, scratch=cfg.scratch,
                     )
                     self._replace_current_checksum(path, checksum)
@@ -1355,13 +1439,31 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             node.state, node.block_reason, node.exception = state, None, error
             return
         inputs = []
+        pending = []
         for local, edge in incoming.items():
             state, checksum = self._source_state(edge)
             if state != "complete":
-                self._apply_pending(node, [edge])
-                return
+                pending.append(edge)
+                continue
             source, _ = self._graph.resolve_existing(edge.source)
-            inputs.append((local, checksum, self._node_celltype(source)))
+            source_type = edge.source_celltype or self._node_celltype(source)
+            _, source_local = self._graph.resolve_existing(edge.source)
+            if not source_local and not edge.source_conversion and source_type != cfg.celltype:
+                state, checksum, error = self._projection(
+                    checksum, (), source_type, cfg.celltype, scratch=cfg.scratch
+                )
+                if state != "complete":
+                    if state == "failed" and error is not None:
+                        self._replace_current_checksum(path, None)
+                        node.state, node.block_reason, node.exception = "failed", None, error
+                        return
+                    pending.append(edge)
+                    continue
+                source_type = cfg.celltype
+            inputs.append((local, checksum, source_type))
+        if pending:
+            self._apply_pending(node, pending, join=len(incoming) > 1)
+            return
         root = producer.checksum if producer else None
         root_type = producer.celltype if producer else cfg.celltype
         key = ("merge", root.hex() if root is not None else None, root_type,
@@ -1378,11 +1480,16 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         return endpoint.celltype or self._node_celltype(endpoint.node_path)
 
     def _effective_input_celltype(self, path):
+        return self._input_celltype_for_path(path, ())
+
+    def _input_celltype_for_path(self, path, local):
         node = self._graph.nodes[path]
-        edge = self._incoming_for(path).get(())
-        if edge is not None:
-            source, _ = self._graph.resolve_existing(edge.source)
-            return self._node_celltype(source)
+        incoming = self._incoming_for(path)
+        for length in range(len(local), -1, -1):
+            edge = incoming.get(tuple(local[:length]))
+            if edge is not None:
+                source, _ = self._graph.resolve_existing(edge.source)
+                return edge.source_celltype or self._node_celltype(source)
         producer = node.cell_root_producer
         return producer.celltype if producer is not None else None
 
@@ -1436,6 +1543,18 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         materialized and written by the executing side.
         """
         target_type = target_type or celltype
+        Expression(
+            checksum,
+            path=_path_string(tuple(local)),
+            input_celltype=celltype,
+            celltype=target_type,
+            validator=validator,
+            validator_language=validator_language,
+        )
+        if not local and validator is None and celltype == "text" and target_type == "mixed":
+            from .adapters import checksum_for_value
+            value = checksum.resolve("mixed")
+            return "complete", checksum_for_value(value, "mixed", checksum_is_value=True), None
         # Python slices are represented as strings in the content key.
         key = ("expression", checksum.hex(), _path_string(local), celltype, target_type,
                validator.hex() if isinstance(validator, Checksum) else validator, validator_language,
@@ -1538,6 +1657,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _source_state(self, edge):
         self._edge_errors.pop(edge.target, None)
+        if edge.source_miswired:
+            return "blocked-by-miswiring", None
         source_node, source_local = self._graph.resolve_existing(edge.source)
         node = self._graph.nodes[source_node]
         target_path, target_local = self._graph.resolve_existing(edge.target)
@@ -1587,9 +1708,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             input_celltype=current_type,
                             celltype=converted_type,
                         )
-                    state, checksum, error = self._projection(
-                        checksum, segment, current_type, converted_type,
-                    )
+                    if elided:
+                        state, error = "complete", None
+                    else:
+                        state, checksum, error = self._projection(
+                            checksum, segment, current_type, converted_type,
+                        )
                     if state != "complete":
                         if error is not None:
                             self._edge_errors[edge.target] = error
@@ -1604,9 +1728,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             input_celltype=current_type,
                             celltype=converted_type,
                         )
-                    state, checksum, error = self._projection(
-                        checksum, (), current_type, converted_type,
-                    )
+                    if elided:
+                        state, error = "complete", None
+                    else:
+                        state, checksum, error = self._projection(
+                            checksum, (), current_type, converted_type,
+                        )
                     if state != "complete":
                         if error is not None:
                             self._edge_errors[edge.target] = error
@@ -1630,16 +1757,33 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             return self._projection(node.current_checksum, source_local, self._node_celltype(source_node))[:2]
         return "complete", node.current_checksum
 
-    def _apply_pending(self, node, edges):
+    def _apply_pending(self, node, edges, *, join=False):
         states = [self._source_state(edge)[0] for edge in edges]
-        if "miswired" in states or "blocked-by-miswiring" in states:
-            node.state, node.block_reason = "blocked", "blocked-by-miswiring"
-        elif "failed" in states:
-            node.state, node.block_reason = "blocked", "blocked-by-error"
-        elif any(state in {"blocked", "unwired"} for state in states):
-            node.state, node.block_reason = "blocked", "blocked-by-unwired"
+        reason_for = {
+            "miswired": "blocked-by-miswiring",
+            "blocked-by-miswiring": "blocked-by-miswiring",
+            "failed": "blocked-by-error",
+            "blocked": "blocked-by-unwired",
+            "unwired": "blocked-by-unwired",
+        }
+        reasons = {}
+        scalar_reason = None
+        for edge, state in zip(edges, states):
+            reason = reason_for.get(state)
+            if reason is None:
+                continue
+            if join:
+                _, local = self._graph.resolve_existing(edge.target)
+                if local:
+                    reasons[local[0]] = reason
+            else:
+                scalar_reason = reason
+        if join:
+            node.block_reason = reasons or None
+            node.state = "blocked" if reasons else "waiting"
         else:
-            node.state, node.block_reason = "waiting", None
+            node.block_reason = scalar_reason
+            node.state = "blocked" if scalar_reason is not None else "waiting"
         self._replace_current_checksum(
             next(path for path, candidate in self._graph.nodes.items() if candidate is node),
             None,
@@ -1656,6 +1800,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         elif state == "failed":
             self._replace_current_checksum(next(path for path, candidate in self._graph.nodes.items() if candidate is node), None)
             node.state, node.block_reason = "blocked", "blocked-by-error"
+        elif state in {"miswired", "blocked-by-miswiring"}:
+            self._replace_current_checksum(next(path for path, candidate in self._graph.nodes.items() if candidate is node), None)
+            node.state, node.block_reason = "blocked", "blocked-by-miswiring"
         elif state in {"blocked", "unwired"}:
             self._replace_current_checksum(next(path for path, candidate in self._graph.nodes.items() if candidate is node), None)
             node.state, node.block_reason = "blocked", "blocked-by-unwired"
@@ -1858,6 +2005,15 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             celltype=celltype,
                         )
                     if source_local:
+                        fused = self._fused_projection_source(source_path, source_local)
+                        if fused is not None:
+                            checksum, input_type, fused_path = fused
+                            return Expression(
+                                checksum,
+                                path=_path_string(fused_path),
+                                input_celltype=input_type,
+                                celltype=celltype,
+                            )
                         return Expression(
                             checksum,
                             path=_path_string(source_local),
@@ -1954,10 +2110,37 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             celltype=self._celltype_for_path(node_path, local),
         )
 
+    def _fused_projection_source(self, node_path, local):
+        node_path = tuple(node_path)
+        path = tuple(local)
+        visited = set()
+        while node_path not in visited:
+            visited.add(node_path)
+            node = self._graph.nodes[node_path]
+            edge = self._incoming_for(node_path).get(())
+            if edge is None:
+                producer = node.cell_root_producer
+                if producer is None:
+                    return None
+                return producer.checksum, producer.celltype, path
+            if edge.source_conversion or edge.source_conversion_steps:
+                return None
+            source_path, source_local = self._graph.resolve_existing(edge.source)
+            source_type = edge.source_celltype or self._celltype_for_path(source_path, source_local)
+            if source_type != self._node_celltype(node_path):
+                return None
+            path = tuple(source_local) + path
+            node_path = source_path
+        return None
+
     def _capture_endpoint(self, endpoint):
         node = self._graph.nodes.get(endpoint.node_path)
         if node is None:
             raise StaleWorkflowHandleError(f"Endpoint {endpoint.node_path!r} is stale")
+        if endpoint.local_path or endpoint.conversion:
+            raise DependencyError(
+                "An anonymous or projected workflow handle cannot be captured as a standalone source"
+            )
         if node.state == "waiting": raise NotImplementedError("Capturing waiting workflow sources requires future-wired E/T")
         if node.state in {"unwired", "blocked"}: raise ValueError(f"Cannot capture workflow source in state {node.state!r}")
         checksum = self._get_checksum(endpoint.node_path, ())
@@ -2051,7 +2234,74 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if runtime:
                 entry["runtime"] = {"state": node.state, "block_reason": node.block_reason, "checksum": node.current_checksum.hex() if node.current_checksum else None, "exception": type(node.exception).__name__ if node.exception else None, "run": self._runtime_graph_entry(path)}
             nodes.append(entry)
-        return {"__seamless_workflow__": "0.4", "nodes": nodes, "connections": [{"type": "connection", "source": list(e.source), "target": list(e.target)} for e in sorted(self._graph.edges, key=lambda e: (e.source, e.target))], "params": {}}
+        import hashlib
+        connections = []
+        anonymous_nodes = {}
+        symbols = self._graph.anonymous_symbol_by_recipe
+        used_symbols = {symbol: recipe for recipe, symbol in symbols.items()}
+
+        def symbol_for(recipe):
+            symbol = symbols.get(recipe)
+            if symbol is None:
+                base = hashlib.sha1(repr(recipe).encode("utf-8")).hexdigest()[:5]
+                symbol = base
+                suffix = 1
+                while symbol in used_symbols and used_symbols[symbol] != recipe:
+                    symbol = f"{base}-{suffix}"
+                    suffix += 1
+                symbols[recipe] = symbol
+                used_symbols[symbol] = recipe
+            return symbol
+
+        for edge in sorted(self._graph.edges, key=lambda e: (e.source, e.target)):
+            connection = {"type": "connection", "target": list(edge.target)}
+            if not edge.source_conversion:
+                target_node, _ = self._graph.resolve_existing(edge.target)
+                if self._graph.nodes[target_node].kind == "cell":
+                    source_node, source_local = self._graph.resolve_existing(edge.source)
+                    connection["source"] = {"node": list(source_node)}
+                    if source_local:
+                        connection["source_path"] = list(source_local)
+                else:
+                    connection["source"] = list(edge.source)
+            else:
+                source_node, source_local = self._graph.resolve_existing(edge.source)
+                steps = edge.source_conversion_steps
+                if not steps:
+                    position = 0 if edge.source_conversion_before else len(source_local)
+                    steps = ((position, edge.source_celltype or self._node_celltype(source_node)),)
+                position, converted_type = steps[0]
+                position = min(max(position, 0), len(source_local))
+                if position == 0:
+                    anonymous_path = ()
+                    anonymous_celltype = converted_type
+                    connection_path = source_local
+                    convert_after = None
+                else:
+                    anonymous_path = source_local[:position]
+                    anonymous_celltype = self._celltype_for_path(source_node, anonymous_path)
+                    connection_path = source_local[position:]
+                    convert_after = converted_type
+                recipe = (source_node, anonymous_celltype, tuple(anonymous_path))
+                symbol = symbol_for(recipe)
+                anonymous_nodes[symbol] = {
+                    "source": {"node": list(source_node)},
+                    "celltype": anonymous_celltype,
+                    "path": _path_string(tuple(anonymous_path)),
+                }
+                connection["source"] = {"symbol": symbol}
+                if connection_path:
+                    connection["source_path"] = list(connection_path)
+                if convert_after is not None:
+                    connection["source_conversion_after"] = convert_after
+            connections.append(connection)
+        return {
+            "__seamless_workflow__": "0.5",
+            "nodes": nodes,
+            "anonymous_nodes": {key: anonymous_nodes[key] for key in sorted(anonymous_nodes)},
+            "connections": connections,
+            "params": {},
+        }
 
     def set_graph(self, graph, *, mount_prepared=()):
         # Acquire the staged durable graph before releasing any live roles.

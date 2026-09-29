@@ -2,18 +2,13 @@
 
 Written against the 2026-09-25 revision of contracts/cells.md (rulings rounds
 1-7, register/cells-RULINGS.md), on points where both candidate revisions
-agree. Most of the model is contract ahead of code; such tests are non-strict
-xfails that assert the intended result.
+agree.
 """
 import pytest
 
 from seamless import Buffer, Cell
 from seamless.cell_errors import AuthorityError
 from seamless import CacheMissError
-
-
-def ahead(section, why):
-    return pytest.mark.xfail(strict=False, reason=f"cells.md §{section}: contract ahead of code: {why}")
 
 
 def _plain(ctx, name="a", value=None):
@@ -61,16 +56,11 @@ def test_fresh_handle_state_is_passive_and_local(make_context):
     assert ctx.a["x"].state == "waiting"
 
 
-_UNWIRED_PARENT_NODE_ERROR = ahead(
-    "Reads, Anonymous and projection handles",
-    "over an unwired parent, compute()/run() on a bound projection raise NodeError instead of returning None")
-
-
 @pytest.mark.parametrize("operation", [
     "checksum",
-    pytest.param("compute", marks=_UNWIRED_PARENT_NODE_ERROR),
-    pytest.param("compute-timeout", marks=_UNWIRED_PARENT_NODE_ERROR),
-    pytest.param("run", marks=_UNWIRED_PARENT_NODE_ERROR),
+    "compute",
+    "compute-timeout",
+    "run",
 ])
 def test_handle_without_parent_checksum_returns_none_without_raising(make_context, operation):
     ctx = make_context()
@@ -91,8 +81,6 @@ def test_handle_without_parent_checksum_returns_none_without_raising(make_contex
     assert handle.state in ("waiting", "unwired")
 
 
-@ahead("Reads, Anonymous and projection handles", "compute() on a bound projection waits on the parent "
-       "node's barrier instead of returning None while the parent has no checksum")
 def test_handle_compute_never_waits_on_a_progressing_parent(make_context, monkeypatch):
     import asyncio
     import time
@@ -262,7 +250,6 @@ def test_writes_through_an_as_celltype_handle_raise_authority_error(make_context
 
 # --- Binding and assignment of handles -------------------------------------------------
 
-@ahead("Binding", "Cell(source=<handle>) is accepted instead of raising DependencyError")
 @pytest.mark.parametrize("kind", ["projection", "as_celltype"])
 def test_anonymous_handle_cannot_be_a_standalone_source(make_context, kind):
     """Clarity ruling (2026-09-26): capture of an anonymous/projection handle raises DependencyError."""
@@ -281,12 +268,7 @@ def test_named_bound_node_remains_a_valid_standalone_source(make_context):
     assert Cell(source=ctx.a).value == {"x": 1, "y": [1, 2]}
 
 
-@pytest.mark.parametrize("kind", [
-    "projection",
-    pytest.param("as_celltype", marks=ahead(
-        "Binding", "a bound as_celltype is a standalone snapshot: assigning it anywhere raises "
-                   "TypeError('Cannot bind a Cell whose input_ref is Expression')")),
-])
+@pytest.mark.parametrize("kind", ["projection", "as_celltype"])
 def test_anonymous_handle_cannot_be_assigned_into_another_context(make_context, kind):
     """Clarity ruling (2026-09-26): cross-Context assignment of a handle raises DependencyError, as for named nodes."""
     from seamless_workflow.errors import DependencyError
@@ -302,7 +284,6 @@ def test_anonymous_handle_cannot_be_assigned_into_another_context(make_context, 
     assert ctx.own.value == (1 if kind == "projection" else {"x": 1, "y": [1, 2]})
 
 
-@ahead("Connecting, Assigning an anonymous handle", "no anonymous nodes, symbols or renaming")
 def test_assigning_to_a_new_name_takes_the_anonymous_node_over(make_context):
     from seamless_workflow.errors import StaleWorkflowHandleError
     ctx = make_context()
@@ -328,7 +309,6 @@ def test_assigning_to_a_new_name_takes_the_anonymous_node_over(make_context):
     assert any(edge["target"] == ["d"] and edge["source"] == {"node": ["a"]} for edge in edges)
 
 
-@ahead("Connecting, Assigning an anonymous handle", "no anonymous nodes, symbols or renaming")
 def test_assigning_to_an_existing_name_adds_an_edge_from_the_symbol(make_context):
     ctx = make_context()
     ctx.b = Cell("text")
@@ -350,7 +330,6 @@ def test_assigning_to_an_existing_name_adds_an_edge_from_the_symbol(make_context
     assert x.celltype == "plain"
 
 
-@ahead("Connecting, The handle and the node / anonymous_nodes", "no anonymous_nodes table in get_graph()")
 def test_handle_only_entries_are_excluded_from_the_graph(make_context):
     ctx = make_context()
     ctx.b = Cell("text")
@@ -362,7 +341,6 @@ def test_handle_only_entries_are_excluded_from_the_graph(make_context):
     assert held.celltype == "plain"
 
 
-@ahead("Connecting, Symbols / anonymous_nodes", "no anonymous_nodes table in get_graph()")
 def test_same_recipe_shares_one_symbol_and_entries_use_tagged_refs(make_context):
     ctx = make_context()
     ctx.b = Cell("text")
@@ -380,7 +358,6 @@ def test_same_recipe_shares_one_symbol_and_entries_use_tagged_refs(make_context)
     assert targets == [["p"], ["q"]]
 
 
-@ahead("Connecting, Symbols", "no anonymous nodes or symbols")
 def test_symbol_is_stable_across_value_changes_of_its_source(make_context):
     ctx = make_context()
     ctx.b = Cell("text")

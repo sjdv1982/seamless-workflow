@@ -64,6 +64,7 @@ class AttachmentRuntime:
             celltype = self._mount_validate(path, spec)
             if celltype != registration.celltype: raise ValueError('Celltype changed during mount preparation')
             node = self._graph.nodes[path]
+            node.mount_inactive = False
             checksum = node.current_checksum.hex() if node.state == 'complete' and node.current_checksum else None
             session = MountSession(registration.session_id, path, spec, registration, celltype,
                                    observation.checksum, observation.fingerprint,
@@ -264,7 +265,9 @@ class AttachmentRuntime:
 
     def _mount_status(self, path):
         session = self._mount_sessions.get(path)
-        if session is None: return None
+        if session is None:
+            node = self._graph.nodes[path]
+            return {"state": "inactive"} if node.mount_inactive else None
         node = self._graph.nodes[path]
         checksum = node.current_checksum.hex() if node.state == 'complete' and node.current_checksum else None
         from seamless.checksum.null import NULL_CHECKSUM

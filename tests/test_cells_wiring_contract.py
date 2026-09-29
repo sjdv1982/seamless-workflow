@@ -11,11 +11,6 @@ from seamless import Buffer, Cell, Expression
 from seamless.checksum import expression as expression_module
 
 
-def gap(reason):
-    return pytest.mark.xfail(strict=False, reason="cells.md contract ahead of code: " + reason)
-
-
-@gap("heterogeneous join members convert rather than embedding source values (Appendix F.2a)")
 @pytest.mark.parametrize("join_type", ["plain", "mixed"])
 def test_join_member_conversion_matches_root_connection(make_context, join_type):
     ctx = make_context()
@@ -32,7 +27,6 @@ def test_join_member_conversion_matches_root_connection(make_context, join_type)
     assert ctx.join.checksum == Buffer({"kept": True, "left": [1, 2]}, join_type).get_checksum()
 
 
-@gap("join conversion cannot share a link with a source projection")
 def test_heterogeneous_join_refuses_projected_source(make_context):
     ctx = make_context()
     ctx.source = Cell("text")
@@ -42,7 +36,6 @@ def test_heterogeneous_join_refuses_projected_source(make_context):
         ctx.join["left"] = ctx.source[0]
 
 
-@gap("input_celltype must use the same path lookup as source")
 def test_join_member_input_type_follows_its_source(make_context):
     ctx = make_context()
     ctx.source = Cell("text")
@@ -58,7 +51,6 @@ def test_join_member_input_type_follows_its_source(make_context):
     assert member.source.checksum == ctx.source.checksum
 
 
-@gap("graph format 0.5 stores anonymous nodes separately (Appendix F.2a)")
 def test_graph_version_and_named_nodes(make_context):
     ctx = make_context()
     ctx.named = Cell("plain")
@@ -69,7 +61,6 @@ def test_graph_version_and_named_nodes(make_context):
     assert len(graph["nodes"]) == 1
 
 
-@gap("anonymous chains, symbols, and fusion are not implemented")
 def test_anonymous_nodes_roundtrip_with_stable_symbols(make_context):
     ctx = make_context()
     ctx.source = Cell("text")
@@ -98,7 +89,6 @@ def test_anonymous_nodes_roundtrip_with_stable_symbols(make_context):
     assert restored.get_graph()["anonymous_nodes"] == {}
 
 
-@gap("named and anonymous chains must build the same maximal fused Expression")
 def test_named_and_anonymous_intermediates_fuse_identically(make_context):
     ctx = make_context()
     ctx.source = Cell("plain")
@@ -115,7 +105,6 @@ def test_named_and_anonymous_intermediates_fuse_identically(make_context):
     assert ctx.anonymous_result.build().identity_key == expected.identity_key
 
 
-@gap("miswired consumers and per-edge blocked-by-miswiring reasons")
 def test_miswiring_blocks_dependents_and_recovers(make_context):
     ctx = make_context()
     ctx.source = Cell("text")
@@ -135,8 +124,6 @@ def test_miswiring_blocks_dependents_and_recovers(make_context):
     assert ctx.child.value == ctx.dependent.value == "1"
 
 
-@gap("ruling 4 / node-state-lifecycle.md: a join's block_reason is a dict with one entry per input "
-     "that is not complete or waiting (BoundCellBackend.block_reason returns the scalar today)")
 def test_join_reports_all_blocking_inputs(make_context):
     ctx = make_context()
     ctx.unwired = Cell("plain")
@@ -221,7 +208,6 @@ def test_projection_handle_checksum_pulls_over_the_parent_checksum(make_context)
     assert projected.value == 113
 
 
-@gap("elision must suppress Expression construction for anonymous fusible intermediates")
 @pytest.mark.parametrize("named", [False, True])
 def test_only_anonymous_fusible_intermediates_are_elided(make_context, monkeypatch, named):
     ctx = make_context()
@@ -250,7 +236,6 @@ def test_only_anonymous_fusible_intermediates_are_elided(make_context, monkeypat
         assert ctx.mid.value == {"b": 167}
 
 
-@gap("0.5 loaders must preserve stored collision suffixes rather than mint symbols again")
 def test_stored_collision_suffixes_survive_graph_load(make_context):
     ctx = make_context()
     ctx.first = Cell("text")
