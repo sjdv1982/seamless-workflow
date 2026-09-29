@@ -1,8 +1,7 @@
 """Contract coverage for ``seamless/docs/agent/contracts/workflow-context.md``.
 
-Each test names the section of the contract page it pins.  Rules the page
-states but the code does not (yet) honour are ``xfail(strict=False)`` with the
-page section in the reason; the gap is a finding, not a test bug.
+Each test names the section of the contract page it pins. Contract
+assertions run directly so implementation gaps fail visibly.
 
 Node-state/block-reason rules live in ``contracts/node-state-lifecycle.md`` and
 are deliberately not pinned here.
@@ -17,7 +16,7 @@ are not duplicated):
   ``AuthorityError``): ``test_contract_cells_handles.py`` (cells.md);
 - ``ctx.tf.result = ...`` -> ``ReadOnlyEndpointError`` and the method
   producer forms: ``test_contract_transformer_bound.py``;
-- the empty same-celltype builder detaching a mount (xfail):
+- the empty same-celltype builder detaching a mount:
   ``test_contract_attachments.py``;
 - ``miswired`` -> ``None`` from a named barrier and ``NodeError`` from
   ``run()``: ``test_contract_node_state_lifecycle.py``;
@@ -25,7 +24,7 @@ are not duplicated):
   cancelling work: ``test_controller.py``, ``quiescence-barrier/``;
 - ``seamless.close()`` closing Contexts, close failing registered barriers:
   ``test_controller_lifecycle.py``;
-- ``close()`` letting a shared run survive (xfail):
+- ``close()`` letting a shared run survive:
   ``test_contract_cancellation_policy.py``.
 
 Not testable until the bound anonymous-cell model lands: removal of an
