@@ -154,6 +154,14 @@ def prepare_graph(data):
             source_path = tuple(entry.get("source_path", ()))
             if set(source_ref) == {"node"}:
                 source = tuple(source_ref["node"]) + source_path
+                steps = entry.get("source_conversion_steps")
+                if steps:
+                    source_conversion_steps = tuple(
+                        (int(position), celltype) for position, celltype in steps
+                    )
+                    source_conversion = True
+                    source_conversion_before = source_conversion_steps[0][0] == 0
+                    source_celltype = source_conversion_steps[-1][1]
             elif set(source_ref) == {"symbol"}:
                 symbol = source_ref["symbol"]
                 try:

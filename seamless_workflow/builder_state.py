@@ -825,7 +825,11 @@ class BoundTransformerBackend:
         async def run():
             return self.run()
 
-        return asyncio.create_task(run())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return run()
+        return loop.create_task(run())
     def prune(self): self._node(); return self.context.prune(self.node_path)
     def clear_exception(self): self._node(); return self.context._clear_exception(self.node_path)
 

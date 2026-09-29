@@ -2,9 +2,9 @@
 import asyncio
 import copy
 from dataclasses import replace
-from time import time
 import weakref
 from seamless import Checksum
+from . import scheduler as _scheduler
 from .scheduler import RunRecord, ExceptionInfo
 from .sidework import Lease
 from .errors import WorkflowExecutionError
@@ -63,8 +63,15 @@ class Reactive:
                     node.pin_states[pin] = ('blocked' if state in {'failed', 'blocked', 'unwired', 'blocked-by-miswiring'} else state, None, None)
                     unavailable(pin, state)
                     continue
-                source_node, _ = self._graph.resolve_existing(edge.source)
-                input_type = edge.source_celltype or self._node_celltype(source_node)
+                source_node, source_local = self._graph.resolve_existing(edge.source)
+                if source_local:
+                    input_type = edge.source_celltype or self._celltype_for_path(
+                        source_node, source_local
+                    )
+                elif edge.source_conversion:
+                    input_type = edge.source_celltype or self._node_celltype(source_node)
+                else:
+                    input_type = self._node_celltype(source_node)
             else:
                 producer = node.transformer_pin_producers.get(pin)
                 checksum = producer.checksum if producer else None
@@ -271,7 +278,11 @@ class Reactive:
         self._runtime.supersede(path)
         if current.phase == 'superseded':
             deadline = current.hold_deadline
-            delay = max(0, min(300, deadline-time())) if deadline is not None else 300
+            delay = (
+                max(0, min(300, deadline - _scheduler.time()))
+                if deadline is not None
+                else 300
+            )
             controller = self._controller
             # A timer holds the weak-owning controller, never its Context.
             self._effects.append(lambda: controller.loop.call_later(delay, controller.notify,
@@ -288,7 +299,11 @@ class Reactive:
     def _expire_run(self, path, generation):
         queue = self._runtime.superseded_runs.get(path, ())
         for record in tuple(queue):
-            if record.generation == generation and record.hold_deadline is not None and record.hold_deadline <= time():
+            if (
+                record.generation == generation
+                and record.hold_deadline is not None
+                and record.hold_deadline <= _scheduler.time()
+            ):
                 queue.remove(record)
                 record.phase = 'cancelled'
                 if record.et is not None: self._effects.append(record.et.cancel)

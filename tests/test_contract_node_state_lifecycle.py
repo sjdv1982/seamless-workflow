@@ -1,8 +1,7 @@
 """Contract tests for ``contracts/node-state-lifecycle.md`` (feature 10).
 
-Each test names the section of the contract page it pins.  Gaps where the code
-is behind the contract are ``xfail(strict=False)`` with the section in the
-reason.  One pytest process per file (see run-tests.sh).
+Each test names the section of the contract page it pins.  One pytest process
+per file (see run-tests.sh).
 """
 
 from __future__ import annotations
@@ -17,8 +16,6 @@ from seamless_workflow.errors import NodeError
 from seamless_workflow.graph import BlockReason, NodeState
 
 
-DOC = "node-state-lifecycle.md"
-
 # Precedence, highest first (§Block reasons / Precedence).  The five-member
 # entry domain; a waiting input contributes no entry at all (ruling 4).
 PRECEDENCE = [
@@ -32,15 +29,6 @@ PRECEDENCE = [
 
 def winner(reasons: dict) -> str:
     return min(reasons.values(), key=PRECEDENCE.index)
-
-
-def gap(section, why):
-    return pytest.mark.xfail(strict=False, reason=f"{DOC} {section}: {why}")
-
-
-RULING_4_WAITING = gap("§Where each form is visible", "contract ahead of code: ruling 4 (2026-09-26): "
-                      "a waiting input has no entry and a waiting node reports None; the code "
-                      "lists waiting inputs with value 'waiting'")
 
 
 # ------------------------------------------------------------------ bodies
@@ -222,9 +210,7 @@ def test_unwired_cone_is_blocked_by_unwired_with_dict_reasons(make_context):
     assert ctx.mid.exception is None
 
 
-@pytest.mark.parametrize("kind", ["unwired", "error", pytest.param("miswiring", marks=gap(
-    "§Transitivity", "contract ahead of code: a cell below blocked-by-miswiring stays 'waiting' "
-    "(Context._apply_upstream_state has no miswiring branch), so the graph never quiesces"))])
+@pytest.mark.parametrize("kind", ["unwired", "error", "miswiring"])
 def test_every_reason_propagates_ten_edges_down(make_context, kind):
     """§Transitivity: 'a node ten edges below a missing wire still says ...'."""
     ctx = make_context()
@@ -294,7 +280,6 @@ def test_upstream_miswiring_beats_upstream_unwired_on_a_live_transformer(make_co
     assert winner(reasons) == "blocked-by-miswiring"
 
 
-@RULING_4_WAITING
 def test_waiting_loses_to_a_blocking_reason(make_context):
     """§Precedence: one progressing input + one blocked input = blocked."""
     ctx = make_context()
@@ -439,7 +424,6 @@ def test_an_errored_connected_optional_upstream_blocks(make_context):
     assert ctx.tf.result.checksum is None
 
 
-@RULING_4_WAITING
 def test_a_connected_optional_pin_gates_like_a_required_pin(make_context):
     """§Connectivity: a connected optional upstream still in progress holds the node waiting."""
     ctx = make_context()
@@ -532,7 +516,6 @@ def test_a_self_edit_revokes_the_node_and_its_cone(make_context):
     assert ctx.out.value == 12
 
 
-@RULING_4_WAITING
 def test_the_cascade_rederives_rather_than_force_sets(make_context):
     """§The cascade: a downstream with a failed co-input lands in blocked, not waiting."""
     ctx = make_context()
@@ -675,14 +658,6 @@ def test_the_wiring_refusal_message_names_both_spellings(make_context):
 # ---------------------------- round-3 rulings (contract-clarity-rulings.md, line 70 on)
 
 
-def _root_plus_subpath_refused():
-    return gap("§Cell nodes (root edge and sub-path edges are mutually exclusive)",
-               "contract ahead of code: a cell with sub-path edges "
-               "may hold only a checksum at the root, never a root source; the code accepts both "
-               "orders (and root-after-sub-path silently drops the sub-path edge)")
-
-
-@_root_plus_subpath_refused()
 def test_a_sub_path_edge_is_refused_on_a_cell_with_a_root_edge(make_context):
     ctx = make_context()
     ctx.base = Cell("plain")
@@ -698,7 +673,6 @@ def test_a_sub_path_edge_is_refused_on_a_cell_with_a_root_edge(make_context):
     assert ctx.join.value == {"a": 1}
 
 
-@_root_plus_subpath_refused()
 def test_a_root_edge_is_refused_on_a_cell_with_sub_path_edges(make_context):
     ctx = make_context()
     ctx.base = Cell("plain")
@@ -923,14 +897,6 @@ def test_a_standalone_cell_can_be_miswired():
     assert c.checksum is None
 
 
-_CELL_JOIN_PRECEDENCE = gap(
-    "§Implementation status (block-reason precedence is inverted for cell nodes)",
-    "contract ahead of code: Context._derive_cell passes only the first incomplete edge "
-    "of a join to Context._apply_pending, which ranks blocked-by-error above blocked-by-unwired",
-)
-
-
-@_CELL_JOIN_PRECEDENCE
 def test_a_join_label_is_the_maximum_over_all_its_edges(make_context):
     """§Precedence + §Transitivity for a cell node: a join whose first edge is
     errored and second is unwired is blocked-by-unwired, and its consumers say so."""
@@ -952,7 +918,6 @@ def test_a_join_label_is_the_maximum_over_all_its_edges(make_context):
     assert ctx.tf.block_reason == {"x": "blocked-by-unwired"}
 
 
-@_CELL_JOIN_PRECEDENCE
 def test_a_join_with_a_waiting_edge_and_a_blocked_edge_is_blocked(make_context):
     """§Precedence: a waiting input loses to everything, for cells too."""
     ctx = make_context()
@@ -981,15 +946,6 @@ def _deep_index(celltype_of_members="bytes"):
     return index.get_checksum()
 
 
-_DEEP_TABLE = gap(
-    "§The seven states (miswired, deep sources: the deep table)",
-    "code/contract mismatch, not listed in §Implementation status: a link outside the deep "
-    "table is not recognised as miswired; the pin conversion fails ('Illegal expression "
-    "conversion: folder -> plain') and the transformer reports blocked-by-error",
-)
-
-
-@_DEEP_TABLE
 def test_retyping_a_deep_source_outside_the_deep_table_leaves_the_consumer_miswired(make_context):
     ctx = make_context()
     ctx.src = Cell("deepfolder", checksum=_deep_index())
@@ -1007,7 +963,6 @@ def test_retyping_a_deep_source_outside_the_deep_table_leaves_the_consumer_miswi
     assert ctx.tf.exception is None
 
 
-@_DEEP_TABLE
 def test_writing_a_deep_link_outside_the_deep_table_directly_raises(make_context):
     """§The seven states: writing an ill-formed link directly raises (class unspecified)."""
     ctx = make_context()

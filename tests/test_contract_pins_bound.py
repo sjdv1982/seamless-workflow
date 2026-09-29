@@ -135,16 +135,7 @@ def test_bound_required_null_from_upstream_is_reported_on_the_pin(celltype):
         assert ("tf",) not in ctx._runtime.current_runs
 
 
-_BOUND_MODULE_NULL = pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Pin failures (no transformation is built) + Implementation status F3: "
-    "contract ahead of code: a module pin is stored as celltype 'plain' in the "
-    "transformation dict, so validate_pin_null lets the null through and the "
-    "snapshot ctx.tf().construct() succeeds although the pin is failed"))
-
-
-@pytest.mark.parametrize("celltype", [
-    pytest.param(ct, marks=_BOUND_MODULE_NULL) if ct == "module" else ct
-    for ct in ["int", "text", "deepcell", "module"]])
+@pytest.mark.parametrize("celltype", ["int", "text", "deepcell", "module"])
 def test_bound_required_null_from_upstream_builds_no_snapshot_transformation(celltype):
     with Context() as ctx:
         ctx.source = Cell(celltype)
@@ -168,16 +159,9 @@ def test_bound_required_nullable_pin_accepts_null(celltype):
         assert ctx.tf.pins.value.checksum == NULL
 
 
-_FORMAT = pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Null, required pins, optional pins (identity rule): the dropped "
-    "folder/deepfolder pin leaves its __format__ entry in the transformation dict"))
-
-
 @pytest.mark.parametrize("celltype", [
-    pytest.param(ct, marks=_FORMAT) if ct in ("folder", "deepfolder") else ct
-    for ct in ["plain", "mixed", "bytes", "binary", "int", "float", "bool", "str",
-               "text", "ipython", "checksum", "deepcell", "deepfolder", "folder",
-               "module"]])
+    "plain", "mixed", "bytes", "binary", "int", "float", "bool", "str", "text",
+    "ipython", "checksum", "deepcell", "deepfolder", "folder", "module"])
 def test_bound_optional_null_has_absent_identity_reactive_and_snapshot(celltype):
     with Context() as ctx:
         ctx.tf = optional_identity
@@ -482,25 +466,15 @@ def _derive(incoming, pins=("x", "y")):
     return node, BoundTransformerBackend.block_reason.fget(backend)
 
 
-_RULING4 = pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Transformer-level reporting + Ruling 4 (block_reason holds one entry "
-    "per input that is not complete or waiting; 'waiting' is not in the value "
-    "domain): contract ahead of code: waiting inputs are listed with value 'waiting'"))
-_WAITING_NONE = pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Transformer-level reporting + ruling 'a waiting node reports "
-    "block_reason = None': contract ahead of code: a waiting transformer reports a "
-    "dict with every input as 'waiting'"))
-
-
 @pytest.mark.parametrize("incoming,state,expected", [
     pytest.param({("code",): "computing", ("x",): "unwired", ("y",): "computing"},
-                 "blocked", {"x": "blocked-by-unwired"}, marks=_RULING4,
+                 "blocked", {"x": "blocked-by-unwired"},
                  id="blocked-with-waiting-inputs"),
     pytest.param({("code",): "computing", ("x",): "failed"},
-                 "unwired", {"x": "blocked-by-error", "y": "unwired"}, marks=_RULING4,
+                 "unwired", {"x": "blocked-by-error", "y": "unwired"},
                  id="unwired-with-waiting-code"),
     pytest.param({("code",): "computing", ("x",): "computing", ("y",): "computing"},
-                 "waiting", None, marks=_WAITING_NONE, id="waiting-is-none"),
+                 "waiting", None, id="waiting-is-none"),
     pytest.param({("code",): "failed", ("x",): "unwired", ("y",): "failed"},
                  "blocked", {"code": "blocked-by-error", "x": "blocked-by-unwired",
                              "y": "blocked-by-error"}, id="all-blocking"),

@@ -366,7 +366,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             cls = DirectBashTransformer if is_direct else BashTransformer
         else:
             cls = PythonBashBaseTransformer
-        bound_cls = getattr(cls, "_workflow_bound_class", None)
+        bound_cls = cls.__dict__.get("_workflow_bound_class")
         if bound_cls is None:
             base_cls = cls
 
@@ -377,19 +377,28 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     raise ReadOnlyEndpointError("Transformer result is read-only")
                 base_cls.__setattr__(instance, name, value)
 
+            def bound_call(instance, *args, **kwargs):
+                backend = getattr(instance, "_workflow_backend", None)
+                if backend is not None and is_direct and not args and not kwargs:
+                    return backend.run()
+                return base_cls.__call__(instance, *args, **kwargs)
+
             def bound_mount(instance):
                 from .attachments.api import MountHandle
 
                 return MountHandle(instance._workflow_backend)
 
             bound_cls = type(
-                f"WorkflowBound{cls.__name__}",
+                cls.__name__,
                 (cls,),
-                {"__setattr__": bound_setattr, "mount": property(bound_mount)},
+                {
+                    "__setattr__": bound_setattr,
+                    "__call__": bound_call,
+                    "mount": property(bound_mount),
+                },
             )
             cls._workflow_bound_class = bound_cls
-        cls = bound_cls
-        handle = cls.__new__(cls)
+        handle = bound_cls.__new__(bound_cls)
         object.__setattr__(handle, "_workflow_backend", BoundTransformerBackend(self, path))
         return handle
 
@@ -489,7 +498,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if sibling is not backend:
                 sibling._stale = True
         incoming = self._incoming_for(tuple(path)).get(())
-        if incoming is not None:
+        if incoming is not None and len(conversion_steps) <= 1:
             from dataclasses import replace
             source_node, _ = self._graph.resolve_existing(incoming.source)
             replacement = replace(
@@ -1121,6 +1130,15 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     source_ep, source_type, celltype, target.node_path,
                     target_pin=target.local_path[0],
                 )
+            if (not source_ep.local_path and not source_ep.conversion
+                    and source_type != celltype):
+                checksum = self._get_checksum(source_ep.node_path, ())
+                if checksum is not None:
+                    from seamless.checksum.null import is_null
+                    if not is_null(checksum):
+                        from seamless.checksum.expression import validate_expression_shape
+
+                        validate_expression_shape("", source_type, celltype)
         elif target.endpoint_kind == "cell-result" and source_ep.local_path:
             target_node = self._graph.nodes[target.node_path]
             target_type = target_node.cell_config.celltype
@@ -1566,8 +1584,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         for length in range(len(local), -1, -1):
             edge = incoming.get(tuple(local[:length]))
             if edge is not None:
-                source, _ = self._graph.resolve_existing(edge.source)
-                return edge.source_celltype or self._node_celltype(source)
+                source, source_local = self._graph.resolve_existing(edge.source)
+                if edge.source_conversion:
+                    return edge.source_celltype or self._node_celltype(source)
+                if source_local:
+                    return self._celltype_for_path(source, source_local)
+                return self._node_celltype(source)
         producer = node.cell_root_producer
         return producer.celltype if producer is not None else None
 
@@ -1621,14 +1643,19 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         materialized and written by the executing side.
         """
         target_type = target_type or celltype
-        Expression(
-            checksum,
-            path=_path_string(tuple(local)),
-            input_celltype=celltype,
-            celltype=target_type,
-            validator=validator,
-            validator_language=validator_language,
-        )
+        try:
+            Expression(
+                checksum,
+                path=_path_string(tuple(local)),
+                input_celltype=celltype,
+                celltype=target_type,
+                validator=validator,
+                validator_language=validator_language,
+            )
+        except (TypeError, ValueError) as exc:
+            from .errors import execution_error
+
+            return "failed", None, execution_error(exc)
         if not local and validator is None and celltype == "text" and target_type == "mixed":
             from .adapters import checksum_for_value
             value = checksum.resolve("mixed")
@@ -1742,7 +1769,14 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         target_path, target_local = self._graph.resolve_existing(edge.target)
         target_node = self._graph.nodes[target_path]
         root_type = self._node_celltype(source_node)
-        source_type = edge.source_celltype or root_type
+        if source_local:
+            source_type = edge.source_celltype or self._celltype_for_path(
+                source_node, source_local
+            )
+        elif edge.source_conversion:
+            source_type = edge.source_celltype or root_type
+        else:
+            source_type = root_type
         target_type = root_type
         if (source_local and not edge.source_conversion
                 and source_type != self._celltype_for_path(source_node, source_local)):
@@ -1760,9 +1794,26 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             pin_type = target_node.transformer_config.celltypes.get(target_local[0], 'mixed')
             if source_type != pin_type and not edge.source_conversion:
                 return 'miswired', None
+        if (not source_local and not edge.source_conversion
+                and target_node.kind == "transformer"
+                and target_local != ("code",) and source_type != target_type):
+            from seamless.checksum.expression import validate_expression_shape
+
+            try:
+                validate_expression_shape("", source_type, target_type)
+            except (TypeError, ValueError):
+                return "miswired", None
         if node.state == 'miswired' or node.block_reason == 'blocked-by-miswiring':
             return 'blocked-by-miswiring', None
         if node.state != "complete":
+            if node.state == "blocked" and isinstance(node.block_reason, dict):
+                reasons = set(node.block_reason.values())
+                if "blocked-by-miswiring" in reasons:
+                    return "blocked-by-miswiring", None
+                if "blocked-by-unwired" in reasons:
+                    return "blocked", None
+                if "blocked-by-error" in reasons:
+                    return "failed", None
             return ("failed" if node.block_reason == "blocked-by-error" else node.state), None
         conversion_steps = edge.source_conversion_steps
         if edge.source_conversion and not conversion_steps:
@@ -2189,6 +2240,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         current_type = root_type
         path_index = 0
         elided_output_type = None
+        conversion_count = 0
         steps = tuple(sorted(steps, key=lambda item: item[0]))
 
         def project(component):
@@ -2211,16 +2263,21 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 if current_type == "mixed" and converted_type == "plain":
                     elided_output_type = converted_type
                 else:
+                    if conversion_count and isinstance(current, Expression):
+                        current = current.compute()
                     current = Expression(
                         current,
                         input_celltype=current_type,
                         celltype=converted_type,
                     )
                     current_type = converted_type
+                    conversion_count += 1
         while path_index < len(local):
             project(local[path_index])
             path_index += 1
         if current_type != final_type:
+            if conversion_count and isinstance(current, Expression):
+                current = current.compute()
             current = Expression(
                 current,
                 input_celltype=current_type,
@@ -2251,8 +2308,11 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         while node_path not in visited:
             visited.add(node_path)
             node = self._graph.nodes[node_path]
-            edge = self._incoming_for(node_path).get(())
+            incoming = self._incoming_for(node_path)
+            edge = incoming.get(())
             if edge is None:
+                if incoming:
+                    return None
                 producer = node.cell_root_producer
                 if producer is None:
                     return None
@@ -2393,9 +2453,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 target_node, _ = self._graph.resolve_existing(edge.target)
                 if self._graph.nodes[target_node].kind == "cell":
                     source_node, source_local = self._graph.resolve_existing(edge.source)
-                    connection["source"] = {"node": list(source_node)}
-                    if source_local:
-                        connection["source_path"] = list(source_local)
+                    if (
+                        source_local
+                        or self._graph.nodes[source_node].cell_root_producer is not None
+                    ):
+                        connection["source"] = list(source_node + source_local)
+                    else:
+                        connection["source"] = {"node": list(source_node)}
                 else:
                     connection["source"] = list(edge.source)
             else:
@@ -2404,6 +2468,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 if not steps:
                     position = 0 if edge.source_conversion_before else len(source_local)
                     steps = ((position, edge.source_celltype or self._node_celltype(source_node)),)
+                if len(steps) > 1:
+                    connection["source"] = {"node": list(source_node)}
+                    if source_local:
+                        connection["source_path"] = list(source_local)
+                    connection["source_conversion_steps"] = [list(step) for step in steps]
+                    connections.append(connection)
+                    continue
                 position, converted_type = steps[0]
                 position = min(max(position, 0), len(source_local))
                 if position == 0:

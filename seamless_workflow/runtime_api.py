@@ -110,21 +110,48 @@ class RuntimeAPI:
             signature = inspect.Signature([inspect.Parameter(p.name, inspect.Parameter.POSITIONAL_OR_KEYWORD)
                                            for p in sig.inputs])
         args = {} if concrete_args is None else dict(concrete_args)
+        input_celltypes = {}
         for pin in cfg.pins if concrete_args is None else ():
             edge = self._incoming_edge(path, (pin,))
+            pin_state = node.pin_states.get(pin, ('unwired', None, None))[0]
             if edge is not None:
+                if pin_state == 'failed':
+                    _, checksum = self._source_state(edge)
+                    source_node, source_local = self._graph.resolve_existing(edge.source)
+                    if source_local:
+                        input_type = edge.source_celltype or self._celltype_for_path(
+                            source_node, source_local
+                        )
+                    elif edge.source_conversion:
+                        input_type = edge.source_celltype or self._node_celltype(source_node)
+                    else:
+                        input_type = self._node_celltype(source_node)
+                    args[pin] = checksum
+                    input_celltypes[pin] = input_type
+                    continue
                 if pin in cfg.optional_pins:
                     from seamless.checksum.null import canonicalize_checksum, is_null
                     state, checksum = self._source_state(edge)
                     if state == 'complete' and checksum is not None:
-                        source_node, _ = self._graph.resolve_existing(edge.source)
-                        input_type = edge.source_celltype or self._node_celltype(source_node)
+                        source_node, source_local = self._graph.resolve_existing(edge.source)
+                        if source_local:
+                            input_type = edge.source_celltype or self._celltype_for_path(
+                                source_node, source_local
+                            )
+                        elif edge.source_conversion:
+                            input_type = edge.source_celltype or self._node_celltype(source_node)
+                        else:
+                            input_type = self._node_celltype(source_node)
                         if is_null(canonicalize_checksum(checksum, input_type)):
                             continue
                 source = self._build_source_expression(edge.source)
                 args[pin] = Expression(source, celltype=cfg.celltypes.get(pin, 'mixed'))
             elif pin in node.transformer_pin_producers:
                 producer = node.transformer_pin_producers[pin]
+                if pin_state == 'failed':
+                    args[pin] = producer.checksum
+                    input_celltypes[pin] = producer.celltype
+                    continue
                 if pin in cfg.optional_pins and producer.checksum is not None:
                     from seamless.checksum.null import canonicalize_checksum, is_null
                     if is_null(canonicalize_checksum(producer.checksum, producer.celltype)):
@@ -138,7 +165,12 @@ class RuntimeAPI:
             if state != 'complete':
                 raise NodeError('Transformer code is not available')
         claims = [code, *cfg.modules.values()]
-        if concrete_args is not None: claims.extend(args.values())
+        if concrete_args is not None:
+            claims.extend(args.values())
+        else:
+            claims.extend(
+                value for value in args.values() if isinstance(value, Checksum)
+            )
         leases = tuple(Lease(cs) for cs in claims if isinstance(cs, Checksum))
         return FrozenTransformer(
             codebuf=code, language=cfg.language, celltypes=copy.deepcopy(cfg.celltypes),
@@ -148,5 +180,5 @@ class RuntimeAPI:
             scratch=cfg.scratch, direct_print=cfg.direct_print, local=cfg.local,
             call_mode=cfg.call_mode, callable=cfg.callable,
             schema=cfg.schema, compilation=copy.deepcopy(cfg.compilation), objects=copy.deepcopy(cfg.objects), header=cfg.header,
-            signature=signature,
+            signature=signature, input_celltypes=input_celltypes,
             leases=leases)

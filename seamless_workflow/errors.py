@@ -4,7 +4,7 @@
 from seamless.cell_errors import WorkflowError, AuthorityError, ValueUnavailableError
 
 
-class DependencyError(WorkflowError):
+class DependencyError(TypeError, WorkflowError):
     """Raised for illegal workflow dependency declarations."""
 
 
@@ -58,15 +58,12 @@ from seamless.error_envelope import (
 
 
 def execution_error(exc):
-    """Normalize execution errors while preserving unregistered source types."""
+    """Normalize execution errors without adding a type prefix to their message."""
     error = _execution_error(exc)
     if isinstance(error, WorkflowExecutionError) and error is not exc:
-        error_type = type(exc).__name__
-        message = str(error)
-        if error_type not in message:
-            return WorkflowExecutionError(
-                f"{error_type}: {message}",
-                failure_id=error.failure_id,
-                kind=error.kind,
-            )
+        return WorkflowExecutionError(
+            str(error),
+            failure_id=error.failure_id,
+            kind=error.kind,
+        )
     return error
