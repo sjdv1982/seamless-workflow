@@ -43,11 +43,6 @@ def _session(ctx, name):
 # Scope
 # --------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=False, reason=(
-    "attachments.md §Scope: standalone Cell.mount must raise "
-    "AttributeError('mount is only available for bound workflow cells'); contract ahead "
-    "of code: the property's AttributeError is swallowed by Cell.__getattr__, which re-raises "
-    "a bare AttributeError('mount')"))
 def test_scope_standalone_cell_message():
     with pytest.raises(AttributeError, match="only available for bound workflow cells"):
         Cell().mount("x")
@@ -78,10 +73,6 @@ def test_scope_pin_and_code_have_no_mount(tmp_path):
             c.tf.code.mount
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "attachments.md §Scope: mounting a transformer node must raise "
-    "NodeError('Mounts require an existing whole cell node'); contract ahead of code: "
-    "the transformer handle has no mount member (AttributeError)"))
 def test_scope_transformer_node_is_node_error(tmp_path):
     with Context() as c:
         c.tf = add
@@ -89,10 +80,6 @@ def test_scope_transformer_node_is_node_error(tmp_path):
             c.tf.mount(tmp_path / "x")
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "attachments.md §Scope: mounting a missing node must raise "
-    "NodeError('Mounts require an existing whole cell node'); contract ahead of code: "
-    "ctx.missing.mount is a MissingView and calling it raises TypeError"))
 def test_scope_missing_node_is_node_error(tmp_path):
     with Context() as c:
         with pytest.raises(NodeError, match="Mounts require an existing whole cell node"):
@@ -191,11 +178,6 @@ def test_spec_removed_and_session_closed_on_delete(tmp_path):
         assert p.read_text() == "again\n"
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "attachments.md §Attach, detach, close: node deletion detaches 'in exactly the same "
-    "way' as del ctx.a.mount, which waits for the transport's cleanup; contract ahead of "
-    "code: _delete_subtree does not wait for the unregister future, so the conditional "
-    "delete of a persistent=False file usually has not run when del returns"))
 def test_node_deletion_detach_waits_for_transport_cleanup(tmp_path):
     with Context() as c:
         for n in range(5):
@@ -221,11 +203,6 @@ def test_unmount_waits_for_transport_cleanup(tmp_path):
             del c.a
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "attachments.md §Detach ('an empty builder of the same celltype detaches and clears', "
-    "leaving a persistent resource untouched); contract ahead of code: the spec, session and "
-    "status survive, get_graph() still writes the mount entry, and the cleared cell stays "
-    "attached (Implementation status)"))
 def test_same_celltype_empty_builder_detaches_the_mount(tmp_path):
     p = tmp_path / "a.txt"
     with Context() as c:
@@ -289,10 +266,6 @@ def test_subcontext_deletion_detaches_each_attachment(tmp_path):
         assert p1.read_text() == "x\n"
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "attachments.md §Detach: deleting a subcontext 'returns only after the transport's "
-    "cleanup has run', so a persistent=False file is gone when del returns; contract ahead "
-    "of code: _delete_subtree does not wait for the unregister future (Implementation status)"))
 def test_subcontext_deletion_waits_for_transport_cleanup(tmp_path):
     with Context() as c:
         for n in range(5):
@@ -323,10 +296,6 @@ def test_transformer_assignment_onto_mounted_cell_is_refused_and_keeps_spec(tmp_
             assert c.a.value == "x"
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "attachments.md §Durable spec + workflow-context.md: assigning transformer code or a "
-    "delayed transformer onto a cell node must raise NodeError; contract ahead of code: "
-    "_retain_producer raises TypeError (Implementation status)"))
 def test_transformer_assignment_onto_mounted_cell_is_node_error(tmp_path):
     from seamless.transformer import delayed
     with Context() as c:
@@ -873,11 +842,6 @@ def test_scope_as_celltype_handle_mount_is_deferred(tmp_path):
         c.a.as_celltype("plain").mount(tmp_path / "anon")
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "attachments.md §The cut barrier (resolves on a non-complete actuating node), with "
-    "node-state-lifecycle.md: contract ahead of code: the result of a miswired transformer "
-    "stays 'waiting' instead of blocked-by-miswiring, so the barrier never settles. The "
-    "§Actuate half (no delivery from a non-complete node) already holds."))
 def test_miswired_upstream_does_not_actuate_and_barrier_settles(tmp_path):
     p = tmp_path / "out.txt"
     with Context() as c:

@@ -8,6 +8,11 @@ class MissingView:
         object.__setattr__(self, "_context", context)
         object.__setattr__(self, "_path", tuple(path))
 
+    def mount(self, *args, **kwargs):
+        from .errors import NodeError
+
+        raise NodeError("Mounts require an existing whole cell node")
+
     def __dir__(self):
         self._context._check_public_caller()
         return sorted(set(super().__dir__()) | set(self._context._child_names(self._path)))

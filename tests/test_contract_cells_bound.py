@@ -377,7 +377,7 @@ def test_reassigning_a_mounted_cell_clears_the_mount_and_the_cell(make_context, 
     ctx.compute(timeout=10)
     assert ctx.m.state == "unwired"
     assert ctx.m.checksum is None
-    assert ctx.m.mount.status.get("state") != "active"
+    assert ctx.m.mount.status is None
     ctx.m.celltype = "str"  # no longer mounted, so retyping is allowed
     assert ctx.m.celltype == "str"
 

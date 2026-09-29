@@ -306,7 +306,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             object.__delattr__(self, name)
         else:
             self._check_public_caller()
-            self._delete(self._prefix + (name,))
+            futures = self._delete(self._prefix + (name,))
+            if futures:
+                from .attachments.fs.service import get_service
+
+                timeout = get_service().delivery_timeout
+                for future in futures:
+                    future.result(timeout)
 
     def __getitem__(self, key):
         self._check_public_caller()
@@ -371,7 +377,16 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     raise ReadOnlyEndpointError("Transformer result is read-only")
                 base_cls.__setattr__(instance, name, value)
 
-            bound_cls = type(f"WorkflowBound{cls.__name__}", (cls,), {"__setattr__": bound_setattr})
+            def bound_mount(instance):
+                from .attachments.api import MountHandle
+
+                return MountHandle(instance._workflow_backend)
+
+            bound_cls = type(
+                f"WorkflowBound{cls.__name__}",
+                (cls,),
+                {"__setattr__": bound_setattr, "mount": property(bound_mount)},
+            )
             cls._workflow_bound_class = bound_cls
         cls = bound_cls
         handle = cls.__new__(cls)
@@ -496,11 +511,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def _delete(self, path):
         path = tuple(path)
         if path in self._graph.nodes:
-            self._delete_subtree(path)
-            return
+            return self._delete_subtree(path)
         if path in self._graph.namespaces or self._graph.has_prefix(path):
-            self._delete_subtree(path)
-            return
+            return self._delete_subtree(path)
         try:
             node_path, local = self._graph.resolve_existing(path)
         except KeyError:
@@ -514,8 +527,11 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         """Remove a node or namespace subtree and release each role once."""
 
         path = tuple(path)
+        cleanup_futures = []
         for node_path in self._graph.descendants(path):
-            self._mount_detach(node_path, derive=False)
+            future = self._mount_detach(node_path, derive=False)
+            if future is not None:
+                cleanup_futures.append(future)
             for lease in self._mount_node_leaves.pop(node_path, ()): lease._release_refholds()
             node = self._graph.nodes.pop(node_path, None)
             if node is None:
@@ -543,6 +559,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._sync_module_refholds()
         self._sync_superseded_refholds()
         self._derive_all()
+        return cleanup_futures
 
     def _create_cell(self, path, *, celltype="mixed"):
         if path in self._graph.nodes:
@@ -566,7 +583,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if node.mount is not None:
             self._mount_detach(path, delete=False, derive=False)
             node.mount = None
-            node.mount_inactive = True
+            node.mount_inactive = False
         session = self._mount_sessions.get(path)
         input_ref = cell._input_ref
         new_config = CellConfig(
@@ -1523,7 +1540,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 source_type = cfg.celltype
             inputs.append((local, checksum, source_type))
         if pending:
-            self._apply_pending(node, pending, join=len(incoming) > 1)
+            self._apply_pending(node, pending, join=True)
             return
         root = producer.checksum if producer else None
         root_type = producer.celltype if producer else cfg.celltype

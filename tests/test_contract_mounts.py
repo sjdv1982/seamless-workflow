@@ -7,11 +7,9 @@ test_mount_transport.py and test_cell_semantics.py are here.
 Settled: ``Cell.exception`` is a string (register §2 item 5, implemented);
 ``ctx.a.mount.error`` and ``status['sense_error']`` stay exception objects.
 
-Every entry of mounts.md *Implementation status* is pinned here by an
-``xfail(strict=False)`` test (NodeError unreachability, the same-celltype builder,
-graph format 0.5). Two further contract-ahead-of-code gaps that mounts.md does
-not list (the standalone-Cell message, node deletion waiting for cleanup) are
-pinned the same way, with the omission named in the reason. Code text is not
+Every entry of mounts.md *Implementation status* is pinned here. Two further
+contract rules that mounts.md does not list (the standalone-Cell message and
+node deletion waiting for cleanup) are pinned separately. Code text is not
 syntax-checked, by mount or by assignment (ruled 2026-09-28); that is pinned by
 ordinary tests.
 """
@@ -199,13 +197,6 @@ def test_already_mounted_is_value_error(tmp_path):
         assert c.a.mount.spec.path == str(tmp_path / 'a.txt')
 
 
-_NODE_ERROR_GAP = ("mounts.md *Implementation status*: NodeError('Mounts require an existing whole cell "
-                   "node') is unreachable through the public API; the check exists only inside the "
-                   "controller (AttachmentRuntime). ")
-
-
-@pytest.mark.xfail(strict=False, reason=_NODE_ERROR_GAP + "ctx.missing is a MissingView, so "
-                   "ctx.missing.mount(...) raises TypeError ('MissingView' object is not callable)")
 def test_node_error_for_missing_node(tmp_path):
     with Context() as c:
         with pytest.raises(NodeError, match='Mounts require an existing whole cell node'):
@@ -213,8 +204,6 @@ def test_node_error_for_missing_node(tmp_path):
         assert c.mounts.sync(timeout=1) == {}
 
 
-@pytest.mark.xfail(strict=False, reason=_NODE_ERROR_GAP + "a transformer handle has no mount member "
-                   "and raises AttributeError")
 def test_node_error_for_transformer_node(tmp_path):
     def f(x):
         return x
@@ -225,7 +214,6 @@ def test_node_error_for_transformer_node(tmp_path):
         assert c.mounts.sync(timeout=1) == {}
 
 
-@pytest.mark.xfail(strict=False, reason=_NODE_ERROR_GAP + "a stale handle raises StaleWorkflowHandleError")
 def test_node_error_for_stale_handle_to_deleted_node(tmp_path):
     # *Errors*: NodeError when "the node does not exist".
     with Context() as c:
@@ -249,11 +237,6 @@ def test_node_error_check_exists_inside_the_controller():
                 c._controller.call('_mount_validate', path, spec, klass=4)
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "mounts.md *Errors*: a standalone Cell raises AttributeError('mount is only available for bound "
-    "workflow cells'). Contract ahead of code, NOT listed in mounts.md's Implementation status "
-    "(attachments.md tracks it): Cell.__getattr__ swallows the property's message and re-raises a bare "
-    "AttributeError('mount')"))
 def test_standalone_cell_mount_message():
     with pytest.raises(AttributeError, match='^mount is only available for bound workflow cells$'):
         Cell().mount('x')
@@ -326,10 +309,6 @@ def test_clearing_a_mounted_cell_is_refused_in_every_mode(tmp_path):
             assert c.a.mount.spec is not None
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "mounts.md *Implementation status*: 'An empty same-celltype builder keeps the mount.' "
-    "ctx.a = Cell(celltype=<same>) on a mounted cell clears the value but leaves the spec, "
-    "status and session attached, and get_graph() still writes the mount entry"))
 @pytest.mark.parametrize('mode', ['r', 'w', 'rw'])
 def test_same_celltype_empty_builder_unmounts_and_clears(tmp_path, mode):
     # *Unmount, persistence and close* / *Errors*: "ctx.a = Cell(celltype=<same>)
@@ -1026,11 +1005,6 @@ def test_set_graph_never_deletes_non_persistent_file(tmp_path, reattach):
         assert (c.a.mount.spec is not None) == reattach
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "mounts.md *Unmount, persistence and close*: 'Node deletion waits in the same way' as unmount, so a "
-    "persistent=False file is gone when `del ctx.a` returns. Contract ahead of code, NOT listed in "
-    "mounts.md's Implementation status (attachments.md tracks it): _delete_subtree does not wait for the "
-    "unregister future"))
 def test_node_deletion_waits_for_transport_cleanup(tmp_path):
     with Context() as c:
         for n in range(5):
@@ -1128,17 +1102,12 @@ def test_graph_mount_entry_is_normalized_spec(tmp_path):
                                               'authority': 'cell', 'persistent': False}
 
 
-_FORMAT_05_GAP = ("mounts.md *Implementation status*: 'Graph format 0.5 has not landed.' get_graph() writes "
-                  "0.4 with no anonymous_nodes table, and set_graph() refuses 0.5 with PathError")
-
-
 def _mounted_graph(tmp_path):
     with Context() as c:
         c.a = Cell(celltype='text'); c.a.set('v'); c.a.mount(tmp_path / 'g.txt', mode='rw')
         return c.get_graph()
 
 
-@pytest.mark.xfail(strict=False, reason=_FORMAT_05_GAP)
 def test_get_graph_writes_format_0_5_with_anonymous_nodes(tmp_path):
     # *Graph serialization*: "The contract format is 0.5, which adds the top-level
     # anonymous_nodes table"; the mount entry rides on the cell entry.
@@ -1148,7 +1117,6 @@ def test_get_graph_writes_format_0_5_with_anonymous_nodes(tmp_path):
     assert graph['nodes'][0]['mount']['mode'] == 'rw'
 
 
-@pytest.mark.xfail(strict=False, reason=_FORMAT_05_GAP)
 def test_set_graph_loads_a_format_0_5_graph_with_mounts(tmp_path):
     graph = {**_mounted_graph(tmp_path), '__seamless_workflow__': '0.5', 'anonymous_nodes': {}}
     with Context() as c:

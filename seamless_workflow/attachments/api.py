@@ -33,9 +33,14 @@ class MountHandle:
     def _context(self):
         b = self.backend
         b.context._check_public_caller()
-        if b.local_path or b.readonly:
+        if getattr(b, "local_path", ()) or getattr(b, "readonly", False):
             raise AttributeError('Only whole Context cell nodes can be mounted')
-        b._node()
+        from ..errors import NodeError, StaleWorkflowHandleError
+
+        try:
+            b._node()
+        except StaleWorkflowHandleError as exc:
+            raise NodeError('Mounts require an existing whole cell node') from exc
         return b.context, b.node_path
 
     def __call__(self, path, mode='rw', authority='file', *, persistent=True):
