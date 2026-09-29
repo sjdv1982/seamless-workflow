@@ -215,16 +215,6 @@ def test_superseded_transformer_claim_ends_at_the_hold_deadline():
         ctx._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="checksum-reference-lifecycle.md §6 (superseded roles end on ... the "
-    "deadline): contract ahead of code (scope unconfirmed: the page does not "
-    "distinguish node kinds): a cell node is superseded through "
-    "ContextRuntime.supersede() from Context._update_runtime, which stamps a "
-    "hold_deadline but schedules no _expire_run timer (only Reactive._suspend, the "
-    "transformer path, does), so a cell's superseded claim ends only on the cap, "
-    "prune(), deletion or cleanup",
-)
 def test_superseded_cell_claim_ends_at_the_hold_deadline():
     ctx = Context()
     try:

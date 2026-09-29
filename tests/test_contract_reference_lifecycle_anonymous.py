@@ -1,22 +1,8 @@
-"""Contract tests: contracts/internal/checksum-reference-lifecycle.md §5/§6 as
-amended by register/cells-RULINGS.md round 7, item 7 (refholder roles):
+"""Contract tests for checksum-reference-lifecycle.md §§5 and 6.
 
-- a projection/anonymous handle holds a scratch-neutral ``"result"`` claim on
-  what it pulled, and releases it when the handle dies;
-- the Context holds ``anonymous:<symbol>:current`` only for non-elided
-  anonymous nodes, which it evaluates itself.
-
-Anonymous nodes are not implemented yet (no ``anonymous`` in seamless_workflow),
-so the contract is ahead of the code for all of these.
-
-§10 of the page lists these roles as "Not yet testable" with "no pinning test".
-That is not accurate: they are pinned here as xfail. The conversion-based handle
-tests first fail on an unrelated cells gap, so two narrower pins use a plain
-bound projection ``ctx.b["k"]`` (no conversion), which does exist today: it is a
-bound handle (BoundCellBackend) that pulls the projected checksum correctly but,
-like a bound handle onto a named node, holds no claim at all. That isolates the
-lifecycle gap itself. The positive side of §5 (a bound handle onto a named node
-owns nothing) is tested without xfail.
+These tests check Context-held anonymous current claims for non-elided and
+elided anonymous nodes. Projection and bound-handle tests isolate the lifecycle
+roles from cell conversion behavior.
 """
 
 from __future__ import annotations
@@ -34,10 +20,6 @@ from seamless.caching.buffer_cache import get_buffer_cache
 from seamless.reference_lifecycle import collect_refholder_claims
 from seamless_workflow import Context
 
-AHEAD = (
-    "checksum-reference-lifecycle.md §6 (cells-RULINGS round 7 item 7): contract "
-    "ahead of code: "
-)
 # Known cells gap, the first failure point of the handle tests: a bound
 # ``as_celltype`` returns a standalone Cell snapshot (not an anonymous handle),
 # and its ``.checksum`` is the source's checksum, unconverted (contrary to
@@ -48,11 +30,6 @@ SNAPSHOT_GAP = (
 )
 # Known gap, the first failure point of the Context tests: anonymous nodes do
 # not exist, so binding a handle raises TypeError.
-NO_ANONYMOUS_NODES = (
-    "first failure: anonymous nodes are not implemented, so binding "
-    "ctx.x = ctx.b.as_celltype(...)[...] raises TypeError ('Cannot bind a Cell whose "
-    "input_ref is Expression'); then "
-)
 ANONYMOUS_CURRENT = re.compile(r"^anonymous:[^:]+:current$")
 
 
@@ -195,11 +172,6 @@ def test_projection_handle_claim_is_released_when_the_handle_dies():
         ctx._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=AHEAD + NO_ANONYMOUS_NODES + "the Context must hold "
-    "anonymous:<symbol>:current for a non-elided anonymous node",
-)
 def test_context_holds_anonymous_current_for_a_non_elided_node():
     ctx = Context()
     try:
@@ -225,12 +197,6 @@ def test_context_holds_anonymous_current_for_a_non_elided_node():
         ctx._release_refholds()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=AHEAD + NO_ANONYMOUS_NODES + "an elided anonymous node is never "
-    "evaluated, so the Context must hold no anonymous:<symbol>:current for it "
-    "(elision is not implemented either)",
-)
 def test_context_holds_no_anonymous_current_for_an_elided_node():
     ctx = Context()
     try:

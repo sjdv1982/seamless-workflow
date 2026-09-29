@@ -90,6 +90,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         object.__setattr__(self, "_code_refholds", {})
         object.__setattr__(self, "_module_refholds", {})
         object.__setattr__(self, "_superseded_refholds", {})
+        object.__setattr__(self, "_anonymous_current_refholds", {})
+        object.__setattr__(self, "_anonymous_current_updates", {})
         object.__setattr__(self, "_prefix", ())
         from seamless.reference_lifecycle import register_refholder
 
@@ -358,6 +360,20 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             cls = DirectBashTransformer if is_direct else BashTransformer
         else:
             cls = PythonBashBaseTransformer
+        bound_cls = getattr(cls, "_workflow_bound_class", None)
+        if bound_cls is None:
+            base_cls = cls
+
+            def bound_setattr(instance, name, value):
+                if name == "result" and getattr(instance, "_workflow_backend", None) is not None:
+                    from .errors import ReadOnlyEndpointError
+
+                    raise ReadOnlyEndpointError("Transformer result is read-only")
+                base_cls.__setattr__(instance, name, value)
+
+            bound_cls = type(f"WorkflowBound{cls.__name__}", (cls,), {"__setattr__": bound_setattr})
+            cls._workflow_bound_class = bound_cls
+        cls = bound_cls
         handle = cls.__new__(cls)
         object.__setattr__(handle, "_workflow_backend", BoundTransformerBackend(self, path))
         return handle
@@ -1277,6 +1293,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             for record in records:
                 if record.result_checksum is not None and record.phase != "cancelled":
                     claims.append((record.result_checksum, f"node:{':'.join(path)}:superseded:{record.generation}"))
+        for symbol, (checksum, _scratch) in self._anonymous_current_refholds.items():
+            claims.append((checksum, f"anonymous:{symbol}:current"))
         return claims
 
     def _release_refholds(self):
@@ -1285,6 +1303,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         for checksum, _role in list(self._refheld_checksums()):
             checksum.decref_refholder()
         self._superseded_refholds.clear()
+        self._anonymous_current_refholds.clear()
         self._refholds_released = True
 
     def _release_all_producers(self):
@@ -1309,6 +1328,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         # A source may sort after its target; converge the small durable graph
         # rather than making public state depend on lexical node names.
         self._sync_module_refholds()
+        self._anonymous_current_updates = {}
         self._used_facts = set()
         visited, order = set(), []
         def visit(path):
@@ -1320,6 +1340,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             order.append(path)
         for path in sorted(self._graph.nodes): visit(path)
         for path in order: self._derive_node(path)
+        self._sync_anonymous_current_refholds()
         for key in set(self._jobs) - self._used_facts:
             task = self._jobs.pop(key)
             if task is not None: self._effects.append(task.cancel)
@@ -1346,6 +1367,46 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if record_id not in self._superseded_refholds:
                 checksum.incref_refholder(scratch=scratch)
                 self._superseded_refholds[record_id] = (checksum, scratch)
+
+    def _anonymous_symbol(self, recipe):
+        import hashlib
+
+        symbols = self._graph.anonymous_symbol_by_recipe
+        symbol = symbols.get(recipe)
+        if symbol is not None:
+            return symbol
+        used_symbols = {existing: old_recipe for old_recipe, existing in symbols.items()}
+        base = hashlib.sha1(repr(recipe).encode("utf-8")).hexdigest()[:5]
+        symbol = base
+        suffix = 1
+        while symbol in used_symbols and used_symbols[symbol] != recipe:
+            symbol = f"{base}-{suffix}"
+            suffix += 1
+        symbols[recipe] = symbol
+        return symbol
+
+    def _sync_anonymous_current_refholds(self):
+        active = self._anonymous_current_updates
+        old = self._anonymous_current_refholds
+        updated = {}
+        acquired = []
+        try:
+            for symbol, (checksum, scratch) in active.items():
+                claim = (checksum, scratch)
+                if old.get(symbol) == claim:
+                    updated[symbol] = old[symbol]
+                else:
+                    checksum.incref_refholder(scratch=scratch)
+                    acquired.append(checksum)
+                    updated[symbol] = claim
+        except Exception:
+            for checksum in reversed(acquired):
+                checksum.decref_refholder()
+            raise
+        for symbol, (checksum, scratch) in old.items():
+            if updated.get(symbol) != (checksum, scratch):
+                checksum.decref_refholder()
+        self._anonymous_current_refholds = updated
 
     def _derive_node(self, path):
         node = self._graph.nodes[path]
@@ -1691,12 +1752,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             position = 0 if edge.source_conversion_before else len(source_local)
             conversion_steps = ((position, source_type),)
         if conversion_steps:
-            checksum = node.current_checksum
-            if checksum is None:
+            root_checksum = node.current_checksum
+            checksum = root_checksum
+            if root_checksum is None:
                 return "unwired", None
             current_type = root_type
             path_index = 0
-            for position, converted_type in conversion_steps:
+            for step_index, (position, converted_type) in enumerate(conversion_steps):
                 position = min(position, len(source_local))
                 segment = source_local[path_index:position]
                 elided = current_type == "mixed" and converted_type == "plain"
@@ -1718,6 +1780,43 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                         if error is not None:
                             self._edge_errors[edge.target] = error
                         return state, None
+                    if step_index == 0 and not elided:
+                        if position == 0:
+                            anonymous_path = ()
+                            anonymous_type = converted_type
+                            anonymous_checksum = checksum
+                        else:
+                            anonymous_path = source_local[:position]
+                            anonymous_type = self._celltype_for_path(source_node, anonymous_path)
+                            anonymous_state, anonymous_checksum, _ = self._projection(
+                                root_checksum,
+                                anonymous_path,
+                                root_type,
+                                anonymous_type,
+                            )
+                            if anonymous_state != "complete":
+                                anonymous_checksum = None
+                        if anonymous_checksum is not None:
+                            try:
+                                from .adapters import checksum_for_value, value_for_checksum
+
+                                anonymous_value = value_for_checksum(anonymous_checksum, anonymous_type)
+                                anonymous_checksum = checksum_for_value(
+                                    anonymous_value,
+                                    anonymous_type,
+                                    checksum_is_value=True,
+                                )
+                            except Exception:
+                                pass
+                            symbol = self._anonymous_symbol((
+                                source_node,
+                                anonymous_type,
+                                tuple(anonymous_path),
+                            ))
+                            self._anonymous_current_updates[symbol] = (
+                                normalize_checksum(anonymous_checksum),
+                                True,
+                            )
                     if not elided:
                         current_type = converted_type
                     path_index = position
@@ -1738,6 +1837,24 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                         if error is not None:
                             self._edge_errors[edge.target] = error
                         return state, None
+                    if step_index == 0 and not elided:
+                        anonymous_checksum = checksum
+                        try:
+                            from .adapters import checksum_for_value, value_for_checksum
+
+                            anonymous_value = value_for_checksum(checksum, converted_type)
+                            anonymous_checksum = checksum_for_value(
+                                anonymous_value,
+                                converted_type,
+                                checksum_is_value=True,
+                            )
+                        except Exception:
+                            pass
+                        symbol = self._anonymous_symbol((source_node, converted_type, ()))
+                        self._anonymous_current_updates[symbol] = (
+                            normalize_checksum(anonymous_checksum),
+                            True,
+                        )
                     if not elided:
                         current_type = converted_type
             while path_index < len(source_local):
@@ -2206,13 +2323,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         current = self._runtime.current_runs.get(path)
         identity_checksum = node.current_checksum
         if identity_checksum is None:
-            if current is not None: self._runtime.supersede(path)
+            if current is not None: self._suspend(path)
             return
         if current and current.identity_checksum == identity_checksum:
             current.result_checksum = node.current_checksum
             return
         if current is not None:
-            self._runtime.supersede(path)
+            self._suspend(path)
         if node.state in {"complete", "failed", "computing"}:
             self._runtime.current_runs[path] = RunRecord(path, None, identity_checksum, node.current_checksum, ExceptionInfo.from_exception(node.exception) if node.exception else None, "completed" if node.state in {"complete", "failed"} else "running", self._runtime.next_generation())
 

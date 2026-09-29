@@ -692,6 +692,9 @@ class WorkflowCelltypes(WorkflowMapping):
     def __setitem__(self, key, value):
         self._backend.context._set_node_config(self._backend.node_path, "celltypes", value, key=str(key))
 
+    def __delitem__(self, key):
+        self._backend._delete_pin(str(key))
+
 
 class BoundTransformerBackend:
     def __init__(self, context, node_path: tuple[str, ...]):
@@ -723,12 +726,19 @@ class BoundTransformerBackend:
         node = self._node()
         if node.state not in {'miswired', 'unwired', 'blocked', 'waiting'}:
             return None
-        return dict(node.pin_block_reasons)
+        return dict(node.pin_block_reasons) or None
 
     @property
     def exception(self):
         node = self._node()
-        return str(node.exception) if node.state in {"failed", "blocked"} and node.exception is not None else None
+        if node.state not in {"failed", "blocked"} or node.exception is None:
+            return None
+        error = node.exception
+        message = str(error)
+        error_type = type(error).__name__
+        if isinstance(error, BaseException) and error_type != "WorkflowExecutionError" and error_type not in message:
+            return f"{error_type}: {message}"
+        return message
 
     @property
     def language(self): return self.cfg.language
@@ -809,7 +819,13 @@ class BoundTransformerBackend:
         try: return lease.checksum
         finally: lease._release_refholds()
     def run(self): return self.context._compute_node(self.node_path, reactive=True, checksum=False)
-    async def task(self): return self.run()
+    def task(self):
+        import asyncio
+
+        async def run():
+            return self.run()
+
+        return asyncio.create_task(run())
     def prune(self): self._node(); return self.context.prune(self.node_path)
     def clear_exception(self): self._node(); return self.context._clear_exception(self.node_path)
 

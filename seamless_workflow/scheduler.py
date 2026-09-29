@@ -42,7 +42,7 @@ class RunRecord:
 @dataclass
 class Scheduler:
     superseded_cap: int = 3
-    self_edit_hold_seconds: float = 15.0
+    self_edit_hold_seconds: float = 30.0
 
     def hold_deadline(self, hold_kind: str | None = "self-edit") -> float | None:
         if hold_kind == "self-edit":

@@ -67,10 +67,6 @@ def test_bound_item_form_is_not_an_escape_hatch():
 
 # --- Which pins exist ------------------------------------------------------
 
-@pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Which pins exist: bound `del tf.celltypes.x` on signature-less code "
-    "resets the celltype to mixed and keeps the pin and its input instead of "
-    "removing the declaration (standalone removes it)"))
 def test_bound_del_celltype_removes_signatureless_declaration():
     with Context() as ctx:
         ctx.loose = delayed("result = x")
@@ -408,14 +404,7 @@ def test_bound_pin_fed_through_a_symbol_path_cannot_be_retyped():
         assert ctx.tf.result.value == 40
 
 
-_RULING_1G = pytest.mark.xfail(strict=False, reason=(
-    "pins.md §Pins hold checksums, never values (a handle belongs to its own mode) "
-    "+ ruling 1(g): contract ahead of code: an anonymous or projection handle of a "
-    "bound Cell is accepted as the input of a standalone pin"))
-
-
 @pytest.mark.parametrize("spelling", ["projection", "as_celltype"])
-@_RULING_1G
 def test_anonymous_bound_handle_cannot_feed_a_standalone_pin(spelling):
     from seamless_workflow.errors import DependencyError
     with Context() as ctx:

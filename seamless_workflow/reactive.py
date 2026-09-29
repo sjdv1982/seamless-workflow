@@ -21,7 +21,7 @@ class Reactive:
                                       cfg.meta.get('metavars', {}))
             except Exception as exc:
                 self._suspend(path)
-                node.state, node.block_reason = 'blocked', 'blocked-by-error'
+                node.state, node.block_reason = 'failed', None
                 node.exception = exc
                 node.block_pins, node.pin_states, node.pin_block_reasons = [], {}, {}
                 self._replace_current_checksum(path, None)
@@ -98,7 +98,6 @@ class Reactive:
                 state, checksum, error = self._projection(checksum, (), input_type, output_type)
                 if compiled and error is not None:
                     error = ValueError(f"Pin {pin!r} conversion from {input_type!r} to {output_type!r}: {error}")
-                    node.exception = error
                 node.pin_states[pin] = (state, checksum, error)
                 if state != 'complete':
                     unavailable(pin, state)
@@ -114,13 +113,22 @@ class Reactive:
                     continue
                 node.pin_read_errors.pop(pin, None)
             if compiled:
-                from seamless_transformer.compiled_validation import validate_pin
+                from seamless_transformer.compiled_validation import (
+                    CompiledMixedValueError,
+                    validate_pin,
+                )
                 try:
                     parameter = next(p for p in sig.inputs if p.name == pin)
                     validate_pin(parameter, output_type, checksum)
+                except CompiledMixedValueError as exc:
+                    node.pin_states[pin] = ('failed', None, exc)
+                    self._suspend(path)
+                    node.state, node.block_reason, node.exception = 'failed', None, exc
+                    node.block_pins, node.pin_block_reasons = [], {}
+                    self._replace_current_checksum(path, None)
+                    return
                 except TypeError as exc:
                     node.pin_states[pin] = ('failed', None, exc)
-                    node.exception = exc
                     unavailable(pin, 'failed')
                     continue
             pins[pin] = checksum
@@ -138,12 +146,13 @@ class Reactive:
             self._suspend(path)
             node.state = 'blocked' if reason.startswith('blocked-by-') else reason
             node.block_reason = reason if node.state == 'blocked' else None
-            node.pin_block_reasons = {pin: why for why, pin in pending}
+            node.pin_block_reasons = {
+                pin: why for why, pin in pending if why != 'waiting'
+            }
             node.block_pins = sorted(
-                pin for why, pin in pending
+                pin for why, pin in pending if why != 'waiting'
             )
-            if node.state == 'unwired':
-                node.exception = None
+            node.exception = None
             self._replace_current_checksum(path, None)
             return
         key = (code.hex(), tuple((pin, cs.hex()) for pin, cs in sorted(pins.items())), cfg.config_token)
@@ -201,6 +210,15 @@ class Reactive:
                 if tf_checksum is None:
                     if isinstance(tf.exception, Exception):
                         raise tf.exception
+                    if isinstance(tf.exception, str) and len(tf.exception) == 64:
+                        try:
+                            int(tf.exception, 16)
+                        except ValueError:
+                            pass
+                        else:
+                            from seamless import CacheMissError
+
+                            raise CacheMissError(tf.exception)
                     raise RuntimeError(tf.exception or 'Transformation construction failed')
                 send('_transformation_started', path, generation, tf_checksum)
                 from seamless_transformer.observation import observed_as
@@ -209,6 +227,15 @@ class Reactive:
                 if result is None:
                     if isinstance(tf.exception, Exception):
                         raise tf.exception
+                    if isinstance(tf.exception, str) and len(tf.exception) == 64:
+                        try:
+                            int(tf.exception, 16)
+                        except ValueError:
+                            pass
+                        else:
+                            from seamless import CacheMissError
+
+                            raise CacheMissError(tf.exception)
                     raise RuntimeError(tf.exception or 'Transformation failed')
                 completion = (path, generation, tf_checksum, Lease(result), None)
             except asyncio.CancelledError:

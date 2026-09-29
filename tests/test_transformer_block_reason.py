@@ -35,15 +35,9 @@ def test_multiple_upstream_unwired_pins(make_context):
     assert ctx.tf.block_reason == {"x": "blocked-by-unwired", "y": "blocked-by-unwired"}
 
 
-RULING_4_GAP = pytest.mark.xfail(strict=False, reason=(
-    "node-state-lifecycle.md §Where each form is visible: contract ahead of code: ruling 4 "
-    "(2026-09-26) gives no entry to a waiting input and None for a waiting node; the code "
-    "lists waiting inputs with value 'waiting'"))
-
-
 @pytest.mark.parametrize("source_state, reason", [
-    pytest.param("computing", "waiting", marks=RULING_4_GAP),
-    pytest.param("waiting", "waiting", marks=RULING_4_GAP),
+    ("computing", "waiting"),
+    ("waiting", "waiting"),
     ("failed", "blocked-by-error"),
     ("unwired", "blocked-by-unwired"),
     ("blocked", "blocked-by-unwired"),
@@ -82,7 +76,6 @@ def test_optional_missing_pins_are_omitted():
     assert BoundTransformerBackend.block_reason.fget(backend) == {"code": "unwired", "x": "unwired"}
 
 
-@RULING_4_GAP
 def test_blocked_pins_include_both_errors_and_missing_upstream_inputs():
     node = Node("transformer", transformer_config=TransformerConfig(pins={"x", "y"}))
     incoming = {("code",): "failed", ("x",): "unwired", ("y",): "computing"}
@@ -100,7 +93,6 @@ def test_blocked_pins_include_both_errors_and_missing_upstream_inputs():
         "code": "blocked-by-error", "x": "blocked-by-unwired"}
 
 
-@RULING_4_GAP
 @pytest.mark.parametrize("input_states", list(permutations([
     "missing", "failed", "unwired", "computing"
 ])))
@@ -141,7 +133,6 @@ def test_mixed_inputs_follow_state_precedence_regardless_of_pin_order(input_stat
     assert BoundTransformerBackend.block_reason.fget(backend) is None
 
 
-@RULING_4_GAP
 def test_waiting_inputs_have_no_entry():
     names = ("code", "x", "y")
     incoming = {("code",): "computing", ("x",): "failed", ("y",): "computing"}

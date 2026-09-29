@@ -46,6 +46,10 @@ def _prepare_assignment(ctx, path, value):
     from seamless_transformer.transformer_class import TransformerCore
     ep = _endpoint(value)
     if ep is not None: return ep
+    try:
+        node = ctx._node_snapshot(path)
+    except StaleWorkflowHandleError:
+        node = None
     if isinstance(value, Cell):
         if _contains_expression(value._input_ref):
             expression = value.build()
@@ -66,19 +70,27 @@ def _prepare_assignment(ctx, path, value):
                 raise TypeError(f'Cannot bind a Cell whose input_ref is {type(value._input_ref).__name__}')
         return PreparedCell(value.input_celltype, value.celltype, value.validator, value.validator_language, ref,
                             scratch=bool(getattr(value, 'scratch', False)))
-    if isinstance(value, TransformerCore) or callable(value):
+    if isinstance(value, TransformerConfig):
+        if node is not None and node.kind == 'cell':
+            from .errors import NodeError
+            raise NodeError("Cannot replace a cell node with transformer code")
+        return value
+    if isinstance(value, (TransformerCore, PreparedTransformer)) or callable(value):
+        if node is not None and node.kind == 'cell':
+            from .errors import NodeError
+            raise NodeError("Cannot replace a cell node with transformer code")
+        if isinstance(value, PreparedTransformer):
+            return value
         return _prepare_transformer(ctx, value)
     from .context import Context
     from .views import SubContextView
     if isinstance(value, (Context, SubContextView)): return value
-    try:
-        node = ctx._node_snapshot(path)
-    except StaleWorkflowHandleError:
-        celltype = 'mixed'
-    else:
-        if node.kind == 'transformer':
+    if node is not None and node.kind == 'transformer':
+        if isinstance(value, str):
             return _prepare_transformer(ctx, value).config
-        celltype = node.cell_config.celltype
+        from .errors import NodeError
+        raise NodeError("Cannot replace a transformer node with a non-transformer value")
+    celltype = 'mixed' if node is None else node.cell_config.celltype
     return checksum_for_value(value, celltype, checksum_is_value=True)
 
 

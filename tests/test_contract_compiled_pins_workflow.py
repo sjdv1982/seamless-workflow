@@ -1,8 +1,7 @@
 """Contract tests: compiled pins in bound workflows and graph import.
 
 Oracle: ``seamless/docs/agent/contracts/compiled-pins.md`` §4, §5, §9, §10;
-every §12 "Implementation status" gap is pinned here by an
-``xfail(strict=False)`` test whose reason reads "contract ahead of code".
+§12 "Implementation status" gaps are covered here by focused contract tests.
 Complements ``test_compiled_celltype_workflow.py`` (not repeated here).
 """
 
@@ -154,15 +153,6 @@ def test_executor_side_schema_error_is_failed_and_names_pin_and_class():
         assert "CompiledPinSchemaError" in exc
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "compiled-pins.md §5 + rulings 2026-09-26 (valid pin checksum the "
-        "compiled transformer cannot use -> failed): contract ahead of code: a "
-        "JSON list on a mixed pin is rejected before hashing and the code "
-        "reports the pin failed and the transformer blocked/blocked-by-error"
-    ),
-)
 def test_bound_mixed_container_is_failed_and_names_pin():
     """§3a: a JSON list is a valid mixed checksum the compiled transformer
     cannot use -> transformer failed, tf.exception set (names the pin and the
@@ -203,14 +193,6 @@ def test_conversion_failure_is_recorded_on_pin_and_blocks():
         assert "CompiledPin" not in exc and "CompiledMixed" not in exc
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "compiled-pins.md §9 + rulings 2026-09-26 (rule 3: a pin with no valid "
-        "checksum does not set tf.exception): contract ahead of code: the code "
-        "copies the pin's conversion error into tf.exception"
-    ),
-)
 def test_conversion_failure_leaves_transformer_exception_none():
     with Context() as ctx:
         _conversion_failure(ctx)
@@ -223,16 +205,6 @@ def test_conversion_failure_leaves_transformer_exception_none():
 # ruling 4 / node-state-lifecycle.md, block_reason is None outside
 # unwired/miswired/blocked/waiting.  §9 D5: .exception is a string that
 # carries the class name and message.
-
-STAGE1_XFAIL = pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "compiled-pins.md §5 + clarity ruling 6: contract ahead of code: a "
-        "Stage-1 failure is state 'failed' with block_reason None; code "
-        "reports 'blocked' with block_reason {}"
-    ),
-)
-
 
 def _stage1_schema_change(ctx):
     ctx.tf = builder("int")
@@ -299,7 +271,6 @@ STAGE1_SCENARIOS = {
 }
 
 
-@STAGE1_XFAIL
 @pytest.mark.parametrize("scenario", sorted(STAGE1_SCENARIOS))
 def test_stage1_failure_is_state_failed(scenario):
     with Context() as ctx:
@@ -321,14 +292,6 @@ def test_stage1_failure_never_runs_and_reports(scenario):
         assert not ctx.tf._workflow_backend._node().pin_states
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "compiled-pins.md §9 D5 / §12: contract ahead of code: a failed "
-        "transformer's .exception carries the class name; Stage-1 diagnostics "
-        "are stored without 'CompiledPinCelltypeError'"
-    ),
-)
 def test_stage1_exception_carries_class_name():
     with Context() as ctx:
         _stage1_schema_change(ctx)
@@ -336,14 +299,6 @@ def test_stage1_exception_carries_class_name():
         assert "CompiledPinCelltypeError" in ctx.tf.exception
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "compiled-pins.md §9 D5: contract ahead of code: a transformer's "
-        ".exception carries the class name; a pre-hash CompiledMixedValueError "
-        "on a bound pin is stored as the bare message"
-    ),
-)
 def test_bound_mixed_value_exception_carries_class_name():
     """§9 D5 (confirmed 2026-09-26): .exception carries the class name."""
     with Context() as ctx:
@@ -436,14 +391,6 @@ def test_undeserializable_pin_checksum_blocks_with_pin_failure():
         assert "'x'" in ctx.tf.pins.x.exception
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "compiled-pins.md §5 (row 1: no valid checksum -> tf.exception None): "
-        "contract ahead of code: the pin's readability failure is copied into "
-        "tf.exception (same mechanism as the §12 conversion-failure gap)"
-    ),
-)
 def test_undeserializable_pin_checksum_leaves_transformer_exception_none():
     with Context() as ctx:
         _undeserializable_checksum(ctx)

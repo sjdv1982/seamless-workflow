@@ -42,10 +42,6 @@ def test_transformer_literal_survives_tempref_expiry():
     assert ctx.add_length.result.value == 20 + len(payload)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: Transformer.exception still returns exception objects, not strings",
-)
 def test_unavailable_literal_is_captured_as_transformer_exception(capsys):
     ctx = Context()
     ctx.add_length = add_length

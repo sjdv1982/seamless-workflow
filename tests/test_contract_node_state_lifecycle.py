@@ -339,8 +339,6 @@ def test_writing_a_projected_and_converting_edge_directly_raises(make_context):
         ctx.tf.pins.x = ctx.src[1]
 
 
-@gap("§Transitivity / §Equilibrium", "a cell fed by a miswired transformer is left `waiting` "
-     "(Context._apply_upstream_state has no miswired branch), so the graph never quiesces")
 def test_cell_downstream_of_a_miswired_transformer_is_blocked_by_miswiring(make_context):
     ctx = make_context()
     miswired_transformer(ctx)
@@ -351,8 +349,6 @@ def test_cell_downstream_of_a_miswired_transformer_is_blocked_by_miswiring(make_
     assert ctx.out.block_reason == "blocked-by-miswiring"
 
 
-@gap("§States as seen through barriers", "run() on a miswired node raises "
-     "'Node is miswired: None', without the repair description naming the edge")
 def test_run_on_miswired_names_the_edge(make_context):
     ctx = make_context()
     miswired_transformer(ctx)
@@ -374,8 +370,6 @@ def test_node_barrier_on_miswired_returns_none_and_run_raises_node_error(make_co
         ctx.mis.run()
 
 
-@gap("§States as seen through barriers", "NodeError for an unwired transformer reads "
-     "'Node is unwired: None' and does not name the missing pin")
 def test_run_on_unwired_transformer_names_the_missing_pin(make_context):
     ctx = make_context()
     ctx.tf = add
@@ -599,7 +593,6 @@ def test_prune_leaves_the_current_run_and_all_states_untouched(make_context):
     assert ctx.tail.result.value == 1.0
 
 
-@gap("§(b) Self-edit revert hold", "window ruled 30 s; Scheduler.self_edit_hold_seconds is 15")
 def test_the_self_edit_revert_window_is_thirty_seconds():
     from seamless_workflow.scheduler import Scheduler
 
@@ -609,8 +602,6 @@ def test_the_self_edit_revert_window_is_thirty_seconds():
 # -------------------------------------------- cell joins (§Where each form is visible)
 
 
-@gap("§Where each form is visible", "contract ahead of code: ruling 4 (2026-09-26): a cell "
-     "with one-level-deep inputs reports a dict keyed by edge; BoundCellBackend returns a scalar")
 def test_a_join_reports_a_dict_keyed_by_edge(make_context):
     ctx = make_context()
     ctx.loose = Cell("plain")
@@ -638,8 +629,6 @@ outputs:
 """
 
 
-@gap("§How each state is derived", "contract ahead of code: ruling 6 (2026-09-26): a compiled "
-     "Stage-1 failure is the transformer's own failure (state 'failed'); code reports 'blocked' with {}")
 def test_a_compiled_stage1_failure_is_failed(make_context):
     from seamless_transformer import Transformer
 
@@ -656,8 +645,6 @@ def test_a_compiled_stage1_failure_is_failed(make_context):
     assert ctx.tf.block_reason is None
 
 
-@gap("§States as seen through barriers", "contract ahead of code: ruling 5 (2026-09-26): a "
-     "standalone Pin can be miswired; after retyping its projected source it reports 'waiting'")
 def test_a_standalone_pin_can_be_miswired():
     from seamless_transformer import delayed
 
@@ -758,8 +745,6 @@ def compiled_builder(celltype):
 
 
 @needs_gcc
-@gap("§Transformer nodes, rule 3", "contract ahead of code: a pin with no valid checksum never sets "
-     "tf.exception (round-3 ruling); the compiled conversion path sets it")
 def test_a_compiled_pin_without_a_valid_checksum_blocks_without_an_exception(make_context):
     ctx = make_context()
     ctx.tf = compiled_builder("int")
@@ -774,8 +759,6 @@ def test_a_compiled_pin_without_a_valid_checksum_blocks_without_an_exception(mak
 
 
 @needs_gcc
-@gap("§Transformer nodes, rule 3", "contract ahead of code: a valid checksum the compiled transformer "
-     "cannot use makes it 'failed' (round-3 ruling); the code reports blocked-by-error")
 def test_a_compiled_transformer_that_cannot_use_a_valid_checksum_is_failed(make_context):
     ctx = make_context()
     ctx.tf = compiled_builder("mixed")
@@ -1035,11 +1018,6 @@ def test_writing_a_deep_link_outside_the_deep_table_directly_raises(make_context
         ctx.tf.pins.x = ctx.src
 
 
-@gap("§The seven states (blocked: not itself errored) / §Leaving a state (only the failing "
-     "node reports the exception)", "code/contract mismatch, not listed in §Implementation "
-     "status: Reactive._derive_transformer clears node.exception only when the node becomes "
-     "unwired, and BoundTransformerBackend.exception exposes it for 'blocked', so a transformer "
-     "that failed and is then blocked by a newly failed upstream keeps its stale exception")
 def test_a_previously_failed_transformer_blocked_by_a_new_upstream_failure_has_no_exception(make_context):
     ctx = make_context()
     ctx.up = identity

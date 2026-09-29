@@ -15,7 +15,7 @@ are not duplicated):
   handle-only entries excluded from ``anonymous_nodes``, cross-Context
   ``DependencyError``, sub-path clearing ``ValueError``, ``as_celltype``
   ``AuthorityError``): ``test_contract_cells_handles.py`` (cells.md);
-- ``ctx.tf.result = ...`` -> ``ReadOnlyEndpointError`` (xfail) and the method
+- ``ctx.tf.result = ...`` -> ``ReadOnlyEndpointError`` and the method
   producer forms: ``test_contract_transformer_bound.py``;
 - the empty same-celltype builder detaching a mount (xfail):
   ``test_contract_attachments.py``;
@@ -79,13 +79,6 @@ def _paths(ctx):
     """Node paths of the durable graph; get_graph() node order is not contract."""
 
     return sorted(tuple(node["path"]) for node in ctx.get_graph()["nodes"])
-
-
-def _ahead(section, what_the_code_does):
-    return pytest.mark.xfail(
-        strict=False,
-        reason=f"{DOC} §{section}: contract ahead of code: {what_the_code_does}",
-    )
 
 
 def _wait_for(predicate, timeout=10.0):
@@ -280,7 +273,6 @@ def test_cell_builder_onto_transformer_is_a_node_error(make_context):
     assert ctx.get_graph()["nodes"][0]["type"] == "transformer"
 
 
-@_ahead('What an assignment means', 'code raises TypeError(PreparedTransformer) instead of NodeError for a Transformer builder onto a cell node')
 def test_transformer_builder_onto_cell_is_a_node_error(make_context):
     from seamless_transformer import delayed
 
@@ -291,7 +283,6 @@ def test_transformer_builder_onto_cell_is_a_node_error(make_context):
     assert ctx.a.value == 1
 
 
-@_ahead('What an assignment means', "code raises TypeError(PreparedTransformer) instead of NodeError('Cannot replace a cell node with transformer code')")
 def test_callable_onto_cell_is_a_node_error(make_context):
     ctx = make_context()
     ctx.a = 1
@@ -300,7 +291,6 @@ def test_callable_onto_cell_is_a_node_error(make_context):
     assert ctx.a.value == 1
 
 
-@_ahead('The Context surface, error table (NodeError: an assignment mismatches the node kind)', 'a plain value onto a transformer node raises a bare AssertionError from ingress')
 def test_value_onto_transformer_is_a_node_error(make_context):
     ctx = make_context()
     ctx.tf = add_one
@@ -819,7 +809,6 @@ def test_graph_loading_never_executes_code(make_context, tmp_path):
     assert not marker.exists()
 
 
-@_ahead("Graph serialization / Implementation status", "get_graph() writes format 0.4 with no anonymous_nodes table")
 def test_get_graph_writes_format_0_5_with_an_anonymous_nodes_table(make_context):
     ctx = make_context()
     ctx.a = 1
@@ -829,7 +818,6 @@ def test_get_graph_writes_format_0_5_with_an_anonymous_nodes_table(make_context)
     assert graph["anonymous_nodes"] == {}
 
 
-@_ahead("Graph serialization / Implementation status", "set_graph() refuses a 0.5 graph (PathError: unsupported version)")
 def test_set_graph_loads_a_format_0_5_graph(make_context):
     graph = {
         "__seamless_workflow__": "0.5",

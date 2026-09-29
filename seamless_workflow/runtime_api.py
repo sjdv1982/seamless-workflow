@@ -33,6 +33,25 @@ class RuntimeAPI:
     def _withdraw_wait(self, future):
         self._barriers.pop(future, None)
 
+    def _node_error_detail(self, path, node):
+        if node.kind != "transformer":
+            return node.block_reason
+        reasons = node.pin_block_reasons
+        if node.state == "unwired":
+            pin = next((pin for pin, reason in sorted(reasons.items()) if reason == "unwired"), None)
+            return f"missing input pin {pin!r}" if pin is not None else node.block_reason
+        if node.state == "miswired":
+            pin = next((pin for pin, reason in sorted(reasons.items()) if reason == "miswired"), None)
+            if pin is not None:
+                edge = self._incoming_for(path).get((pin,))
+                if edge is not None:
+                    source_path, source_local = self._graph.resolve_existing(edge.source)
+                    source_type = self._celltype_for_path(source_path, source_local)
+                    target_type = node.transformer_config.celltypes.get(pin, "mixed")
+                    return f"pin {pin!r} expects celltype {target_type!r}, got {source_type!r}"
+                return f"pin {pin!r} has a miswired source"
+        return node.block_reason
+
     def _check_barriers(self):
         for future, predicate in list(self._barriers.items()):
             if hasattr(predicate, 'check'):
@@ -61,7 +80,8 @@ class RuntimeAPI:
                     if return_none_on_incomplete:
                         future.set_result(None)
                     else:
-                        future.set_exception(copy.deepcopy(node.exception) if node.state == 'failed' else NodeError(f'Node is {node.state}: {node.block_reason}'))
+                        detail = self._node_error_detail(path, node)
+                        future.set_exception(copy.deepcopy(node.exception) if node.state == 'failed' else NodeError(f'Node is {node.state}: {detail}'))
                     self._barriers.pop(future, None)
                     continue
             if read:

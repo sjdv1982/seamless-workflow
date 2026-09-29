@@ -51,4 +51,22 @@ class ControllerFailedError(RuntimeError):
     """An internal continuation failed; this Context must be closed."""
 
 
-from seamless.error_envelope import WorkflowExecutionError, execution_error
+from seamless.error_envelope import (
+    WorkflowExecutionError,
+    execution_error as _execution_error,
+)
+
+
+def execution_error(exc):
+    """Normalize execution errors while preserving unregistered source types."""
+    error = _execution_error(exc)
+    if isinstance(error, WorkflowExecutionError) and error is not exc:
+        error_type = type(exc).__name__
+        message = str(error)
+        if error_type not in message:
+            return WorkflowExecutionError(
+                f"{error_type}: {message}",
+                failure_id=error.failure_id,
+                kind=error.kind,
+            )
+    return error

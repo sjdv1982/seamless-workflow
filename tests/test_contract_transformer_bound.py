@@ -139,7 +139,7 @@ def test_bound_clear_exception_is_available(make_context, mode):
 def test_bound_result_rejects_producer_operations(make_context):
     """transformers.md §Pins and result: any producer operation aimed at the
     result raises ReadOnlyEndpointError (method forms; attribute assignment is
-    the xfail below)."""
+    covered by ``test_bound_result_cannot_be_assigned``)."""
     ctx = make_context()
     ctx.tf = add
     ctx.tf.pins.a = 1
@@ -187,14 +187,6 @@ def test_bound_compiled_build_is_a_detached_transformation(make_context):
     assert len(set(identities)) == 1
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "transformers.md §Pins and result / workflow-context.md §What an "
-        "assignment means: contract ahead of code: assigning to ctx.tf.result "
-        "raises AttributeError (property has no setter), not ReadOnlyEndpointError"
-    ),
-)
 def test_bound_result_cannot_be_assigned(make_context):
     ctx = make_context()
     ctx.tf = add
@@ -209,14 +201,6 @@ def test_bound_result_cannot_be_assigned(make_context):
     assert ctx.tf.result.value == 3
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "transformers.md §Named work methods: contract ahead of code: bound "
-        "task() returns a bare coroutine (BoundTransformerBackend.task); "
-        "ruled: an asyncio Task, like standalone"
-    ),
-)
 def test_bound_task_returns_asyncio_task(make_context):
     ctx = make_context()
     ctx.tf = add
