@@ -102,7 +102,11 @@ class Reactive:
                 unavailable(pin, 'failed')
                 continue
             if input_type != output_type:
-                state, checksum, error = self._projection(checksum, (), input_type, output_type)
+                # Input-side: a dispatched pin conversion is written by the
+                # executing side (checksum-reference-lifecycle.md, §1).
+                state, checksum, error = self._projection(
+                    checksum, (), input_type, output_type, scratch=False
+                )
                 if compiled and error is not None:
                     error = ValueError(f"Pin {pin!r} conversion from {input_type!r} to {output_type!r}: {error}")
                 node.pin_states[pin] = (state, checksum, error)

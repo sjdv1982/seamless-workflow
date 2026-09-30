@@ -771,12 +771,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 checksum = checksum_for_value(value, cfg.celltypes.get(pin, "mixed"))
                 new_producers[pin] = self._retain_producer(
                     checksum, frozen.input_celltypes.get(pin) or cfg.celltypes.get(pin, "mixed"),
-                    scratch=cfg.scratch,
+                    scratch=False,
                 )
                 staged_checksums.append(checksum)
 
             new_code_checksum = normalize_checksum(cfg.code_checksum)
-            new_code_checksum.incref_refholder(scratch=None)
+            new_code_checksum.incref_refholder(scratch=False)
             staged_checksums.append(new_code_checksum)
 
             new_module_refs = {}
@@ -784,7 +784,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 if not isinstance(module, Checksum):
                     continue
                 checksum = normalize_checksum(module)
-                scratch = bool(cfg.scratch)
+                scratch = False
                 checksum.incref_refholder(scratch=scratch)
                 staged_checksums.append(checksum)
                 new_module_refs[(path, module_name)] = (checksum, scratch)
@@ -951,7 +951,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             checksum = checksum_for_value(value, cfg.celltypes.get(pin, "mixed"))
             producer = self._retain_producer(
                 checksum, input_celltype or cfg.celltypes.get(pin, "mixed"),
-                scratch=cfg.scratch,
+                scratch=False,
             )
             node = self._graph.nodes[node_path]
             old_producer = node.transformer_pin_producers.get(pin)
@@ -965,17 +965,16 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if checksum is None:
             return
         checksum = normalize_checksum(checksum)
-        # A code checksum is configuration held for a possible run, not an
-        # owner claim.  Keep it alive without publishing it merely because a
-        # transformer was added to a Context.
-        checksum.incref_refholder(scratch=None)
+        # Code is input-side configuration, so its Context claim publishes
+        # it even when the transformer's result is scratch.
+        checksum.incref_refholder(scratch=False)
         self._code_refholds[tuple(path)] = checksum
 
     def _replace_code_checksum(self, path, checksum):
         old = self._code_refholds.get(tuple(path))
         new = None if checksum is None else normalize_checksum(checksum)
         if new is not None:
-            new.incref_refholder(scratch=None)
+            new.incref_refholder(scratch=False)
             self._code_refholds[tuple(path)] = new
         else:
             self._code_refholds.pop(tuple(path), None)
@@ -996,7 +995,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 if isinstance(module, Checksum):
                     active[(path, module_name)] = (
                         normalize_checksum(module),
-                        bool(node.transformer_config.scratch),
+                        False,
                     )
         old_refholds = self._module_refholds
         acquired = []
@@ -1707,6 +1706,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                                 execution=execution,
                                 member_id=key,
                                 scratch=scratch,
+                                # A checksum request: any recorded checksum
+                                # answers it; scratch only makes a dispatched
+                                # evaluation write its result.
+                                materialize=False,
                             )
                             if checksum is None:
                                 raise KeyError(_path_string(local))
@@ -1768,6 +1771,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         node = self._graph.nodes[source_node]
         target_path, target_local = self._graph.resolve_existing(edge.target)
         target_node = self._graph.nodes[target_path]
+        # A transformer's pin or code edge is input-side: what it dispatches is
+        # written by the executing side (checksum-reference-lifecycle.md, §1).
+        edge_scratch = target_node.kind != "transformer"
         root_type = self._node_celltype(source_node)
         if source_local:
             source_type = edge.source_celltype or self._celltype_for_path(
@@ -1843,6 +1849,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     else:
                         state, checksum, error = self._projection(
                             checksum, segment, current_type, converted_type,
+                            scratch=edge_scratch,
                         )
                     if state != "complete":
                         if error is not None:
@@ -1900,6 +1907,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     else:
                         state, checksum, error = self._projection(
                             checksum, (), current_type, converted_type,
+                            scratch=edge_scratch,
                         )
                     if state != "complete":
                         if error is not None:
@@ -1930,6 +1938,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 next_type = self._projected_path_celltype(current_type, component)
                 state, checksum, error = self._projection(
                     checksum, (component,), current_type, next_type,
+                    scratch=edge_scratch,
                 )
                 if state != "complete":
                     if error is not None:
@@ -1939,7 +1948,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 path_index += 1
             return "complete", checksum
         if source_local:
-            return self._projection(node.current_checksum, source_local, self._node_celltype(source_node))[:2]
+            return self._projection(
+                node.current_checksum, source_local, self._node_celltype(source_node),
+                scratch=edge_scratch,
+            )[:2]
         return "complete", node.current_checksum
 
     def _apply_pending(self, node, edges, *, join=False):
@@ -2515,16 +2527,15 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if node.cell_root_producer is not None:
                 claims.append((node.cell_root_producer.checksum, self._node_scratch(node)))
             claims.extend(
-                (producer.checksum, self._node_scratch(node))
+                (producer.checksum, False)
                 for producer in node.transformer_pin_producers.values()
             )
             if node.kind == "transformer":
                 cfg = node.transformer_config
                 if cfg.code_checksum is not None:
-                    # A configured code checksum is not a result publication.
-                    claims.append((cfg.code_checksum, None))
+                    claims.append((cfg.code_checksum, False))
                 claims.extend(
-                    (value, bool(cfg.scratch))
+                    (value, False)
                     for value in cfg.modules.values()
                     if isinstance(value, Checksum)
                 )
@@ -2554,7 +2565,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._code_refholds = {p:n.transformer_config.code_checksum for p,n in graph.nodes.items()
                               if n.kind == "transformer" and n.transformer_config.code_checksum is not None}
         self._module_refholds = {
-            (path, name): (normalize_checksum(module), bool(node.transformer_config.scratch))
+            (path, name): (normalize_checksum(module), False)
             for path, node in graph.nodes.items()
             if node.kind == "transformer"
             for name, module in node.transformer_config.modules.items()
@@ -2580,7 +2591,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             for pin, producer in list(copied_node.transformer_pin_producers.items()):
                 copied_node.transformer_pin_producers[pin] = self._retain_producer(
                     producer.checksum, producer.celltype,
-                    scratch=copied_node.transformer_config.scratch,
+                    scratch=False,
                 )
             if copied_node.current_checksum is not None:
                 copied_node.current_checksum.incref_refholder(

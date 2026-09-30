@@ -2,17 +2,18 @@
 Context claims and scratch.
 
 Ruling (contract-clarity-rulings.md, "Rulings requested by coverage subagents"):
-"Claims held for scratch nodes must not publish." That covers every claim the
-Context holds for a scratch node: its current and superseded results, a copied
-node's result, a scratch cell's literal, and a scratch transformer's pin, code
-and module claims.
+"Claims held for scratch nodes must not publish." That covers the result-side
+claims the Context holds for a scratch node: its current and superseded
+results, a copied node's result, and a scratch cell's literal. Amended
+2026-09-30: scratch governs a transformer's result only. Its pin, code and
+module claims are input-side, so they refhold and publish whatever the
+transformer's scratch (a dispatched or remotely fingertipped run needs them).
 
 §1 *Neutral claim*: a Context's snapshot and in-flight leases are neutral claims
 (protect, never publish, never change scratch status); a Context node's claim on
 its current result follows the node's scratch policy. §8: only a non-scratch
 owner publishes, and persistence is a property of who holds.
 
-§10 gaps pinned here (xfail): pin/code claims and module claims of a scratch node.
 The ruling also covers
 ``anonymous:<symbol>:current``, which cannot be exercised until anonymous nodes
 exist (see test_contract_reference_lifecycle_anonymous.py).
@@ -149,7 +150,7 @@ def _suffix(word):
     return word + "-out"
 
 
-def test_a_scratch_transformer_pin_and_code_claims_do_not_publish(writes):
+def test_a_scratch_transformer_pin_and_code_claims_publish(writes):
     from seamless.transformer import delayed
 
     builder = delayed(_suffix)
@@ -166,15 +167,15 @@ def test_a_scratch_transformer_pin_and_code_claims_do_not_publish(writes):
             if role.startswith("transformer:tf:")
         }
         assert {"transformer:tf:pin:word", "transformer:tf:code"} <= set(claims)
-        published = [role for role, checksum in claims.items() if checksum in writes]
-        assert published == [], f"claims for a scratch transformer published: {published}"
+        unpublished = [role for role, checksum in claims.items() if checksum not in writes]
+        assert unpublished == [], f"input-side claims not published: {unpublished}"
         result = ctx._graph.nodes[("tf",)].current_checksum
         assert result is not None and result not in writes
     finally:
         ctx._release_refholds()
 
 
-def test_a_scratch_transformer_module_claim_does_not_publish(writes):
+def test_a_scratch_transformer_module_claim_publishes(writes):
     from seamless.transformer import delayed
 
     cache = get_buffer_cache()
@@ -191,6 +192,6 @@ def test_a_scratch_transformer_module_claim_does_not_publish(writes):
         assert (checksum, "transformer:tf:module:example") in tuple(
             ctx._refheld_checksums()
         ), "precondition: the Context holds the module claim"
-        assert checksum not in writes, "a scratch transformer's module claim published"
+        assert checksum in writes, "a scratch transformer's module claim did not publish"
     finally:
         ctx._release_refholds()
