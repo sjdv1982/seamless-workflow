@@ -101,9 +101,24 @@ def _anonymous_graph(make_context):
     ctx.compute(timeout=10)
     graph = ctx.get_graph()
     assert graph["__seamless_workflow__"] == "0.5"
-    symbols = list(graph["anonymous_nodes"])
-    assert len(symbols) == 1
-    return graph, symbols[0]
+    entries = graph["anonymous_nodes"]
+    assert len(entries) == 2
+    (path_symbol,), = [
+        (symbol,)
+        for symbol, entry in entries.items()
+        if entry == {"source": {"node": ["b"]}, "celltype": "text", "path": "[3]"}
+    ]
+    (conversion_symbol,), = [
+        (symbol,)
+        for symbol, entry in entries.items()
+        if entry == {
+            "source": {"symbol": path_symbol},
+            "celltype": "plain",
+            "path": "",
+        }
+    ]
+    assert graph["connections"][-1]["source"] == {"symbol": conversion_symbol}
+    return graph, path_symbol
 
 
 def _rename(value, old, new):
@@ -118,6 +133,11 @@ def _rename(value, old, new):
 
 def test_user_cell_named_like_a_symbol_does_not_collide(make_context):
     graph, symbol = _anonymous_graph(make_context)
+    conversion_symbol = next(
+        name
+        for name, entry in graph["anonymous_nodes"].items()
+        if entry["source"] == {"symbol": symbol}
+    )
     graph = _rename(graph, symbol, "abcde")
     restored = make_context()
     restored.abcde = Cell("int")
@@ -129,7 +149,11 @@ def test_user_cell_named_like_a_symbol_does_not_collide(make_context):
     restored.compute(timeout=10)
     assert restored.result.value == ","
     assert restored.abcde.value == 5
-    assert set(restored.get_graph()["anonymous_nodes"]) == {"abcde"}
+    restored_graph = restored.get_graph()
+    restored_entries = restored_graph["anonymous_nodes"]
+    assert set(restored_entries) == {"abcde", conversion_symbol}
+    assert restored_entries[conversion_symbol]["source"] == {"symbol": "abcde"}
+    assert restored_graph["connections"][-1]["source"] == {"symbol": conversion_symbol}
 
 
 def test_set_graph_checks_the_invariant_on_symbol_table_entries(make_context):

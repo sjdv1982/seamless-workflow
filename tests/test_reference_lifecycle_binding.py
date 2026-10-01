@@ -35,6 +35,36 @@ def test_checksum_backed_cell_binding_adopts_before_builder_release():
     assert _count(checksum) == 0
 
 
+@pytest.mark.parametrize("chain", ["projection", "project_then_convert", "convert_then_project"])
+def test_binding_standalone_projection_chains_preserves_path_and_claims(chain, caplog):
+    buffer = Buffer({"a": [1, 2]}, "mixed")
+    checksum = buffer.get_checksum()
+    source = Cell(checksum=checksum, celltype="mixed")
+    if chain == "projection":
+        cell = source["a"]
+    elif chain == "project_then_convert":
+        cell = source["a"].as_celltype("plain")
+    else:
+        cell = source.as_celltype("plain")["a"]
+
+    ctx = Context()
+    ctx.result = cell
+    ctx.compute(timeout=10)
+    assert ctx.result.value == [1, 2]
+    assert cell._refholds_released is True
+
+    del cell, source, buffer
+    gc.collect()
+    assert ctx.result.value == [1, 2]
+    with caplog.at_level("WARNING", logger="seamless.references"):
+        audit_reference_accounting(holders=[ctx])
+    assert "live claims" not in caplog.text
+
+    del ctx
+    gc.collect()
+    assert _count(checksum) == 0
+
+
 def test_checksum_backed_transformer_binding_releases_standalone_builder():
     from seamless.transformer import delayed
 

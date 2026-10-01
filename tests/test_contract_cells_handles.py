@@ -330,15 +330,95 @@ def test_assigning_to_an_existing_name_adds_an_edge_from_the_symbol(make_context
     assert x.celltype == "plain"
 
 
-def test_handle_only_entries_are_excluded_from_the_graph(make_context):
+def test_as_celltype_handle_creates_anonymous_node_immediately(make_context):
     ctx = make_context()
     ctx.b = Cell("text")
     ctx.b.set("[1]")
     held = ctx.b.as_celltype("plain")
     graph = ctx.get_graph()
     assert graph["__seamless_workflow__"] == "0.5"
-    assert graph["anonymous_nodes"] == {}
+    assert len(graph["anonymous_nodes"]) == 1
+    entry, = graph["anonymous_nodes"].values()
+    assert entry == {"source": {"node": ["b"]}, "celltype": "plain", "path": ""}
     assert held.celltype == "plain"
+
+
+def test_projection_handle_creates_anonymous_node_immediately(make_context):
+    ctx = make_context()
+    ctx.b = Cell("plain")
+    ctx.b.set({"x": 1})
+    held = ctx.b["x"]
+    graph = ctx.get_graph()
+    assert len(graph["anonymous_nodes"]) == 1
+    entry, = graph["anonymous_nodes"].values()
+    assert entry == {"source": {"node": ["b"]}, "celltype": "plain", "path": "x"}
+    assert held.value == 1
+
+
+def test_projected_as_celltype_handle_creates_anonymous_node_immediately(make_context):
+    ctx = make_context()
+    ctx.b = Cell("mixed")
+    ctx.b.set({"a": [1, 2]})
+    held = ctx.b["a"].as_celltype("plain")
+    graph = ctx.get_graph()
+    assert len(graph["anonymous_nodes"]) == 2
+    path_symbol, path_entry = next(
+        (symbol, entry)
+        for symbol, entry in graph["anonymous_nodes"].items()
+        if entry["path"] == "a"
+    )
+    conversion_entry, = (
+        entry for entry in graph["anonymous_nodes"].values() if entry["path"] == ""
+    )
+    assert path_entry == {
+        "source": {"node": ["b"]},
+        "celltype": "mixed",
+        "path": "a",
+    }
+    assert conversion_entry == {
+        "source": {"symbol": path_symbol},
+        "celltype": "plain",
+        "path": "",
+    }
+    assert held.value == [1, 2]
+
+    restored = make_context()
+    restored.set_graph(graph)
+    restored_held = restored.b["a"].as_celltype("plain")
+    assert restored_held.value == [1, 2]
+    assert restored.get_graph()["anonymous_nodes"] == graph["anonymous_nodes"]
+
+
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_projected_as_celltype_assignment_roundtrips_through_outermost_symbol(
+    make_context, target_exists
+):
+    ctx = make_context()
+    ctx.b = Cell("mixed")
+    ctx.b.set({"a": [1, 2]})
+    if target_exists:
+        ctx.target = Cell("plain")
+    held = ctx.b["a"].as_celltype("plain")
+    target_name = "target" if target_exists else "new_target"
+    setattr(ctx, target_name, held)
+    ctx.compute(timeout=10)
+    assert getattr(ctx, target_name).value == [1, 2]
+
+    graph = ctx.get_graph()
+    edge = next(
+        edge for edge in graph["connections"] if edge["target"] == [target_name]
+    )
+    assert set(edge["source"]) == {"symbol"}
+    outer_symbol = edge["source"]["symbol"]
+    outer_entry = graph["anonymous_nodes"][outer_symbol]
+    assert outer_entry["path"] == ""
+    assert outer_entry["celltype"] == "plain"
+    assert set(outer_entry["source"]) == {"symbol"}
+
+    restored = make_context()
+    restored.set_graph(graph)
+    restored.compute(timeout=10)
+    assert getattr(restored, target_name).value == [1, 2]
 
 
 def test_same_recipe_shares_one_symbol_and_entries_use_tagged_refs(make_context):
@@ -351,11 +431,27 @@ def test_same_recipe_shares_one_symbol_and_entries_use_tagged_refs(make_context)
     assert (ctx.p.value, ctx.q.value) == (10, 20)
     graph = ctx.get_graph()
     entries = graph["anonymous_nodes"]
-    assert len(entries) == 1
-    (symbol, entry), = entries.items()
-    assert entry == {"source": {"node": ["b"]}, "celltype": "plain", "path": ""}
-    targets = sorted(edge["target"] for edge in _graph_edges_from(graph, {"symbol": symbol}))
-    assert targets == [["p"], ["q"]]
+    assert len(entries) == 3
+    (conversion_symbol,), = [
+        (symbol,)
+        for symbol, entry in entries.items()
+        if entry == {"source": {"node": ["b"]}, "celltype": "plain", "path": ""}
+    ]
+    path_entries = {
+        entry["path"]: (symbol, entry)
+        for symbol, entry in entries.items()
+        if entry["path"] in {"[0]", "[1]"}
+    }
+    assert set(path_entries) == {"[0]", "[1]"}
+    for symbol, entry in path_entries.values():
+        assert entry == {
+            "source": {"symbol": conversion_symbol},
+            "celltype": "plain",
+            "path": entry["path"],
+        }
+        assert [edge["target"] for edge in _graph_edges_from(graph, {"symbol": symbol})] == [
+            ["p"] if entry["path"] == "[0]" else ["q"]
+        ]
 
 
 def test_symbol_is_stable_across_value_changes_of_its_source(make_context):

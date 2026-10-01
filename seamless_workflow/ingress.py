@@ -51,7 +51,11 @@ def _prepare_assignment(ctx, path, value):
     except StaleWorkflowHandleError:
         node = None
     if isinstance(value, Cell):
-        if _contains_expression(value._input_ref):
+        if (
+            _contains_expression(value._input_ref)
+            or value._path
+            or value._conversion_link
+        ):
             expression = value.build()
             return PreparedCell(
                 expression.input_celltype,

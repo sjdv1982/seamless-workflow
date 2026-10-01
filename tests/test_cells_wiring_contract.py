@@ -3,12 +3,56 @@
 No Transformers are needed: conversion failures supply failed producers.
 """
 import asyncio
+import json
 import re
 from threading import Event, Thread
 
 import pytest
 from seamless import Buffer, Cell, Expression
 from seamless.checksum import expression as expression_module
+from seamless_transformer import delayed
+
+
+def _identity(value):
+    return value
+
+
+def _projection_root(ctx, kind, leaf=13):
+    payload = {"a": {"b": leaf}}
+    if kind == "constant":
+        ctx.root = Cell("plain")
+        ctx.root.set(payload)
+    elif kind == "transformer":
+        ctx.tf = delayed(_identity)
+        ctx.tf.pins.value = payload
+        ctx.root = Cell("mixed")
+        ctx.root = ctx.tf.result
+    elif kind == "text-fed":
+        ctx.source = Cell("text")
+        ctx.source.set(json.dumps(payload))
+        ctx.root = Cell("plain")
+        ctx.root = ctx.source
+    elif kind == "mixed-fed":
+        ctx.source = Cell("mixed")
+        ctx.source.set(payload)
+        ctx.root = Cell("plain")
+        ctx.root = ctx.source
+    elif kind == "join":
+        ctx.root = Cell("plain")
+        ctx.root.set(payload)
+        ctx.extra = Cell("plain")
+        ctx.extra.set({"kept": True})
+        ctx.root["extra"] = ctx.extra
+    elif kind == "text-input":
+        ctx.root = Cell("plain")
+        ctx.root.set_checksum(
+            Buffer(json.dumps(payload), "text").get_checksum(),
+            input_celltype="text",
+        )
+    else:
+        raise AssertionError(kind)
+    ctx.compute(timeout=10)
+    return payload
 
 
 @pytest.mark.parametrize("join_type", ["plain", "mixed"])
@@ -89,20 +133,38 @@ def test_anonymous_nodes_roundtrip_with_stable_symbols(make_context):
     assert restored.get_graph()["anonymous_nodes"] == {}
 
 
-def test_named_and_anonymous_intermediates_fuse_identically(make_context):
+@pytest.mark.parametrize(
+    "root_kind",
+    ["constant", "transformer", "text-fed", "mixed-fed", "join", "text-input"],
+)
+def test_named_and_anonymous_intermediates_fuse_identically(make_context, monkeypatch, root_kind):
     ctx = make_context()
-    ctx.source = Cell("plain")
-    ctx.source.set({"a": {"b": 13}})
-    ctx.named = ctx.source["a"]
+    _projection_root(ctx, root_kind)
+    built_paths = []
+    initialize = Expression.__post_init__
+
+    def record(expression):
+        initialize(expression)
+        built_paths.append(expression.path)
+
+    monkeypatch.setattr(Expression, "__post_init__", record)
+    ctx.named = ctx.root["a"]
     ctx.named_result = ctx.named["b"]
-    ctx.anonymous_result = ctx.source["a"]["b"]
+    ctx.anonymous_result = ctx.root["a"]["b"]
     ctx.compute(timeout=10)
     assert ctx.named.state == "complete"
     assert ctx.named.value == {"b": 13}
     assert ctx.named_result.value == ctx.anonymous_result.value == 13
-    expected = Expression(ctx.source.checksum, input_celltype="plain", celltype="plain", path="a.b")
+    expected = Expression(
+        ctx.root.checksum,
+        input_celltype=ctx.root.celltype,
+        celltype=ctx.root.celltype,
+        path="a.b",
+    )
     assert ctx.named_result.build().identity_key == expected.identity_key
     assert ctx.anonymous_result.build().identity_key == expected.identity_key
+    assert "a.b" in built_paths
+    assert "b" not in built_paths
 
 
 def test_miswiring_blocks_dependents_and_recovers(make_context):
@@ -208,12 +270,11 @@ def test_projection_handle_checksum_pulls_over_the_parent_checksum(make_context)
     assert projected.value == 113
 
 
+@pytest.mark.parametrize("root_kind", ["constant", "transformer"])
 @pytest.mark.parametrize("named", [False, True])
-def test_only_anonymous_fusible_intermediates_are_elided(make_context, monkeypatch, named):
+def test_only_anonymous_fusible_intermediates_are_elided(make_context, monkeypatch, named, root_kind):
     ctx = make_context()
-    ctx.root = Cell("plain")
-    ctx.root.set({"a": {"b": 167}})
-    ctx.compute(timeout=10)
+    _projection_root(ctx, root_kind, leaf=167)
     built_paths = []
     initialize = Expression.__post_init__
 
@@ -246,11 +307,33 @@ def test_stored_collision_suffixes_survive_graph_load(make_context):
     ctx.b = ctx.second.as_celltype("plain")[0]
     ctx.compute(timeout=10)
     graph = ctx.get_graph()
-    symbols = list(graph["anonymous_nodes"])
-    assert len(symbols) == 2
+    entries = graph["anonymous_nodes"]
+    assert len(entries) == 4
+    conversion_symbols = {
+        entry["source"]["node"][0]: symbol
+        for symbol, entry in entries.items()
+        if entry["source"].get("node", [None])[0] in {"first", "second"}
+    }
+    assert set(conversion_symbols) == {"first", "second"}
+    path_entries = {
+        symbol: entry
+        for symbol, entry in entries.items()
+        if entry["source"].get("symbol") in conversion_symbols.values()
+    }
+    assert len(path_entries) == 2
+    assert all(entry["path"] == "[0]" for entry in path_entries.values())
+    assert {
+        edge["source"]["symbol"]
+        for edge in graph["connections"]
+        if edge["target"] in (["a"], ["b"])
+    } == set(path_entries)
     # Exercise the durable collision representation independently of the hash
-    # function: loading must not recompute the five-hex symbol or its suffix.
-    replacement = dict(zip(symbols, ["abcde", "abcde-1"]))
+    # function: loading must not recompute the five-hex conversion symbols or suffix.
+    replacement = {
+        conversion_symbols["first"]: "abcde",
+        conversion_symbols["second"]: "abcde-1",
+    }
+    assert not set(replacement.values()) & set(path_entries)
 
     def rename(value):
         if isinstance(value, str):
@@ -267,4 +350,18 @@ def test_stored_collision_suffixes_survive_graph_load(make_context):
     restored.compute(timeout=10)
     assert restored.a.value == 1
     assert restored.b.value == 3
-    assert set(restored.get_graph()["anonymous_nodes"]) == {"abcde", "abcde-1"}
+    restored_graph = restored.get_graph()
+    restored_entries = restored_graph["anonymous_nodes"]
+    assert set(restored_entries) == set(replacement.values()) | set(path_entries)
+    assert restored_entries["abcde"]["source"] == {"node": ["first"]}
+    assert restored_entries["abcde-1"]["source"] == {"node": ["second"]}
+    assert {
+        entry["source"]["symbol"]
+        for symbol, entry in restored_entries.items()
+        if symbol in path_entries
+    } == set(replacement.values())
+    assert {
+        edge["source"]["symbol"]
+        for edge in restored_graph["connections"]
+        if edge["target"] in (["a"], ["b"])
+    } == set(path_entries)

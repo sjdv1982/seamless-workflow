@@ -11,7 +11,8 @@ def _parse_path_string(path):
 
     if path == "":
         return ()
-    node = ast.parse("x" + path, mode="eval").body
+    relative_path = path if path.startswith((".", "[")) else "." + path
+    node = ast.parse("x" + relative_path, mode="eval").body
     components = []
     while not isinstance(node, ast.Name):
         if isinstance(node, ast.Subscript):
@@ -124,24 +125,76 @@ def prepare_graph(data):
     if version != "0.5" and anonymous_nodes:
         raise PathError("anonymous_nodes require workflow graph version 0.5")
     import re
+    parsed_anonymous_nodes = {}
     for symbol, anonymous in anonymous_nodes.items():
         if not isinstance(symbol, str) or re.fullmatch(r"[0-9a-f]{5}(?:-[1-9][0-9]*)?", symbol) is None:
             raise PathError(f"Invalid anonymous node symbol: {symbol!r}")
         if not isinstance(anonymous, dict) or set(anonymous) != {"source", "celltype", "path"}:
             raise PathError(f"Invalid anonymous node entry: {symbol!r}")
         source_ref = anonymous["source"]
-        if not isinstance(source_ref, dict) or set(source_ref) != {"node"}:
-            raise PathError(f"Anonymous node source must name a node: {symbol!r}")
-        source_node = tuple(source_ref["node"])
-        if source_node not in graph.nodes:
-            raise PathError(f"Anonymous node source does not exist: {source_node!r}")
+        if not isinstance(source_ref, dict) or set(source_ref) not in ({"node"}, {"symbol"}):
+            raise PathError(f"Invalid anonymous node source: {symbol!r}")
+        if set(source_ref) == {"node"}:
+            source_key = tuple(source_ref["node"])
+            if source_key not in graph.nodes:
+                raise PathError(f"Anonymous node source does not exist: {source_key!r}")
+        else:
+            source_key = source_ref["symbol"]
+            if not isinstance(source_key, str):
+                raise PathError(f"Invalid anonymous node source symbol: {source_key!r}")
         try:
             path = _parse_path_string(anonymous["path"])
         except (SyntaxError, TypeError, ValueError) as exc:
             raise PathError(f"Invalid anonymous node path: {anonymous['path']!r}") from exc
         celltype = anonymous["celltype"]
         Buffer._map_celltype(celltype)
-        graph.anonymous_symbol_by_recipe[(source_node, celltype, path)] = symbol
+        graph.anonymous_symbol_by_recipe[(source_key, celltype, path)] = symbol
+        parsed_anonymous_nodes[symbol] = (source_ref, celltype, path)
+
+    resolved_anonymous_nodes = {}
+    resolving_anonymous_nodes = set()
+
+    def resolve_anonymous_node(symbol):
+        if symbol in resolved_anonymous_nodes:
+            return resolved_anonymous_nodes[symbol]
+        if symbol in resolving_anonymous_nodes:
+            raise DependencyError(f"Anonymous node cycle at {symbol!r}")
+        try:
+            source_ref, celltype, path = parsed_anonymous_nodes[symbol]
+        except KeyError as exc:
+            raise PathError(f"Unknown anonymous node symbol: {symbol!r}") from exc
+        resolving_anonymous_nodes.add(symbol)
+        if set(source_ref) == {"node"}:
+            source_node = tuple(source_ref["node"])
+            source_path = ()
+            source_celltype = graph.nodes[source_node].cell_config.celltype
+            conversion_steps = ()
+            source_miswired = False
+        else:
+            (source_node, source_path, source_celltype,
+             conversion_steps, source_miswired) = resolve_anonymous_node(
+                source_ref["symbol"]
+            )
+        expected_celltype = _projected_celltype(source_celltype, path)
+        source_path = source_path + path
+        if path:
+            if celltype != expected_celltype:
+                source_miswired = True
+        elif celltype != source_celltype:
+            conversion_steps = conversion_steps + ((len(source_path), celltype),)
+        resolved = (
+            source_node,
+            source_path,
+            celltype,
+            conversion_steps,
+            source_miswired,
+        )
+        resolving_anonymous_nodes.remove(symbol)
+        resolved_anonymous_nodes[symbol] = resolved
+        return resolved
+
+    for symbol in parsed_anonymous_nodes:
+        resolve_anonymous_node(symbol)
     for entry in data.get('connections',[]):
         source_ref = entry['source']
         target = tuple(entry['target'])
@@ -164,33 +217,15 @@ def prepare_graph(data):
                     source_celltype = source_conversion_steps[-1][1]
             elif set(source_ref) == {"symbol"}:
                 symbol = source_ref["symbol"]
-                try:
-                    anonymous = anonymous_nodes[symbol]
-                except KeyError as exc:
-                    raise PathError(f"Unknown anonymous node symbol: {symbol!r}") from exc
-                source_node = tuple(anonymous["source"]["node"])
-                anonymous_path = _parse_path_string(anonymous["path"])
+                (source_node, anonymous_path, anonymous_type,
+                 source_conversion_steps, source_miswired) = resolve_anonymous_node(
+                    symbol
+                )
                 source = source_node + anonymous_path + source_path
-                root_type = graph.nodes[source_node].cell_config.celltype
-                projected_type = _projected_celltype(root_type, anonymous_path)
-                anonymous_type = anonymous["celltype"]
-                if anonymous_path and anonymous_type != projected_type:
-                    # A stored projection cannot change celltype behind the path.
-                    source_celltype = anonymous_type
-                    source_miswired = True
-                elif anonymous_path:
-                    source_celltype = anonymous_type
-                    converted_type = entry.get("source_conversion_after")
-                    if converted_type is not None:
-                        source_conversion = True
-                        source_conversion_steps = ((len(anonymous_path), converted_type),)
-                        source_celltype = converted_type
-                else:
-                    source_celltype = anonymous_type
-                    if anonymous_type != root_type:
-                        source_conversion = True
-                        source_conversion_before = True
-                        source_conversion_steps = ((0, anonymous_type),)
+                source_celltype = _projected_celltype(anonymous_type, source_path)
+                if source_conversion_steps:
+                    source_conversion = True
+                    source_conversion_before = source_conversion_steps[0][0] == 0
             else:
                 raise PathError(f"Invalid connection source reference: {source_ref!r}")
         else:

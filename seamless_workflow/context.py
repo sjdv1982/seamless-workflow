@@ -33,6 +33,7 @@ from .views import MissingView, SubContextView
 from .sidework import Lease, PreparedCell, PreparedTransformer, SideLoop, evaluate_cell, evaluate_projection
 
 PIN_CELLTYPES = {"plain", "mixed", "deepcell", "deepfolder", "folder"}
+_DEEP_CELLTYPES = {"deepcell", "deepfolder", "folder"}
 
 
 def _projected_source_type_error(
@@ -1308,9 +1309,18 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if self._refholds_released:
             return ()
         claims = []
+        seen_root_expressions = set()
         for path, node in self._graph.nodes.items():
             if node.cell_root_producer is not None:
                 claims.append((node.cell_root_producer.checksum, f"cell:{':'.join(path)}:literal"))
+            if node.cell_root_expression is not None:
+                expression = node.cell_root_expression
+                if id(expression) not in seen_root_expressions:
+                    seen_root_expressions.add(id(expression))
+                    for checksum, role in expression._refheld_checksums():
+                        claims.append(
+                            (checksum, f"cell:{':'.join(path)}:expression:{role}")
+                        )
             for pin, producer in node.transformer_pin_producers.items():
                 claims.append((producer.checksum, f"transformer:{':'.join(path)}:pin:{pin}"))
             if node.kind == "transformer":
@@ -1845,7 +1855,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             celltype=converted_type,
                         )
                     if elided:
-                        state, error = "complete", None
+                        state, checksum, error = self._projection(
+                            checksum, segment, current_type, current_type,
+                            scratch=edge_scratch,
+                        )
                     else:
                         state, checksum, error = self._projection(
                             checksum, segment, current_type, converted_type,
@@ -1892,8 +1905,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                                 normalize_checksum(anonymous_checksum),
                                 True,
                             )
-                    if not elided:
-                        current_type = converted_type
+                    current_type = converted_type
                     path_index = position
                 elif converted_type != current_type:
                     if not elided:
@@ -1931,8 +1943,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             normalize_checksum(anonymous_checksum),
                             True,
                         )
-                    if not elided:
-                        current_type = converted_type
+                    current_type = converted_type
             while path_index < len(source_local):
                 component = source_local[path_index]
                 next_type = self._projected_path_celltype(current_type, component)
@@ -2132,6 +2143,23 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         node_celltype = self._node_celltype(node_path)
         celltype = _target_celltype or self._celltype_for_path(node_path, local)
         input_type = node_celltype
+        if (
+            input_ref is _UNSET
+            and local
+            and not _conversion
+            and not _conversion_steps
+            and node.kind == "cell"
+            and node.current_checksum is not None
+        ):
+            fused = self._fused_projection_source(node_path, local)
+            if fused is not None:
+                checksum, input_type, fused_path = fused
+                return Expression(
+                    checksum,
+                    path=_path_string(fused_path),
+                    input_celltype=input_type,
+                    celltype=celltype,
+                )
         if input_ref is _UNSET:
             if node.cell_root_expression is not None:
                 expression = node.cell_root_expression
@@ -2159,6 +2187,16 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                         return self._build_conversion_expression(
                             checksum, root_type, source_local, steps, celltype
                         )
+                    if source_local:
+                        fused = self._fused_projection_source(source_path, source_local)
+                        if fused is not None:
+                            checksum, input_type, fused_path = fused
+                            return Expression(
+                                checksum,
+                                path=_path_string(fused_path),
+                                input_celltype=input_type,
+                                celltype=celltype,
+                            )
                     upstream = self._incoming_for(source_path).get(())
                     if (source_local and upstream is not None
                             and upstream.source_celltype is not None
@@ -2202,15 +2240,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             celltype=celltype,
                         )
                     if source_local:
-                        fused = self._fused_projection_source(source_path, source_local)
-                        if fused is not None:
-                            checksum, input_type, fused_path = fused
-                            return Expression(
-                                checksum,
-                                path=_path_string(fused_path),
-                                input_celltype=input_type,
-                                celltype=celltype,
-                            )
                         return Expression(
                             checksum,
                             path=_path_string(source_local),
@@ -2256,7 +2285,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         steps = tuple(sorted(steps, key=lambda item: item[0]))
 
         def project(component):
-            nonlocal current, current_type, elided_output_type
+            nonlocal current, current_type, elided_output_type, conversion_count
+            if conversion_count and isinstance(current, Expression):
+                current = current.compute()
+                conversion_count = 0
             next_type = elided_output_type or self._projected_path_celltype(current_type, component)
             current = Expression(
                 current,
@@ -2273,7 +2305,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 path_index += 1
             if converted_type != current_type:
                 if current_type == "mixed" and converted_type == "plain":
-                    elided_output_type = converted_type
+                    if path_index == 0 and not isinstance(current, Expression):
+                        current_type = converted_type
+                    else:
+                        elided_output_type = converted_type
                 else:
                     if conversion_count and isinstance(current, Expression):
                         current = current.compute()
@@ -2314,30 +2349,44 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         )
 
     def _fused_projection_source(self, node_path, local):
-        node_path = tuple(node_path)
-        path = tuple(local)
+        """Root the maximal fusible run ending at a projection of ``node_path``.
+
+        Each visited cell is a valid fallback root in its own current state.  The
+        walk continues upstream only through a single, same-celltype, non-converting
+        root edge; any other edge is a fusion boundary.
+        """
+        node_path, path = tuple(node_path), tuple(local)
+        root = None
         visited = set()
         while node_path not in visited:
             visited.add(node_path)
             node = self._graph.nodes[node_path]
+            checksum = node.current_checksum
+            if node.kind != "cell" or checksum is None:
+                break
+            celltype = self._node_celltype(node_path)
+            root = checksum, celltype, path
+
             incoming = self._incoming_for(node_path)
             edge = incoming.get(())
-            if edge is None:
-                if incoming:
-                    return None
-                producer = node.cell_root_producer
-                if producer is None:
-                    return None
-                return producer.checksum, producer.celltype, path
+            if edge is None or len(incoming) > 1:
+                break
             if edge.source_conversion or edge.source_conversion_steps:
-                return None
+                break
+
             source_path, source_local = self._graph.resolve_existing(edge.source)
+            source_node = self._graph.nodes[source_path]
+            if source_node.kind != "cell":
+                break
             source_type = edge.source_celltype or self._celltype_for_path(source_path, source_local)
-            if source_type != self._node_celltype(node_path):
-                return None
+            if source_type != celltype:
+                break
+            if source_local and self._node_celltype(source_path) in _DEEP_CELLTYPES:
+                break
+
             path = tuple(source_local) + path
             node_path = source_path
-        return None
+        return root
 
     def _capture_endpoint(self, endpoint):
         node = self._graph.nodes.get(endpoint.node_path)
@@ -2459,6 +2508,64 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 used_symbols[symbol] = recipe
             return symbol
 
+        def projected_celltype(celltype, path):
+            for component in path:
+                if isinstance(component, slice):
+                    continue
+                if celltype == "deepcell":
+                    celltype = "mixed"
+                elif celltype in {"deepfolder", "folder"}:
+                    celltype = "bytes"
+            return celltype
+
+        def add_live_entry(source_ref, source_key, celltype, path):
+            recipe = (source_key, celltype, tuple(path))
+            symbol = symbol_for(recipe)
+            anonymous_nodes[symbol] = {
+                "source": source_ref,
+                "celltype": celltype,
+                "path": _path_string(tuple(path)),
+            }
+            return {"symbol": symbol}, symbol
+
+        def add_anonymous_chain(source_node, local_path, conversion_steps=()):
+            source_ref = {"node": list(source_node)}
+            source_key = source_node
+            current_celltype = self._node_celltype(source_node)
+            position = 0
+            for step_position, converted_celltype in sorted(conversion_steps):
+                step_position = min(max(step_position, position), len(local_path))
+                path_segment = local_path[position:step_position]
+                if path_segment:
+                    current_celltype = projected_celltype(current_celltype, path_segment)
+                    source_ref, source_key = add_live_entry(
+                        source_ref, source_key, current_celltype, path_segment
+                    )
+                source_ref, source_key = add_live_entry(
+                    source_ref, source_key, converted_celltype, ()
+                )
+                current_celltype = converted_celltype
+                position = step_position
+            path_segment = local_path[position:]
+            if path_segment:
+                current_celltype = projected_celltype(current_celltype, path_segment)
+                source_ref, source_key = add_live_entry(
+                    source_ref, source_key, current_celltype, path_segment
+                )
+            return source_ref
+
+        live_handles = {
+            backend
+            for siblings in self._anonymous_handle_backends.values()
+            for backend in tuple(siblings)
+        }
+        for backend in live_handles:
+            if backend._stale or backend.node_path not in self._graph.nodes:
+                continue
+            add_anonymous_chain(
+                backend.node_path, backend.local_path, backend._conversion_steps
+            )
+
         for edge in sorted(self._graph.edges, key=lambda e: (e.source, e.target)):
             connection = {"type": "connection", "target": list(edge.target)}
             if not edge.source_conversion:
@@ -2480,37 +2587,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 if not steps:
                     position = 0 if edge.source_conversion_before else len(source_local)
                     steps = ((position, edge.source_celltype or self._node_celltype(source_node)),)
-                if len(steps) > 1:
-                    connection["source"] = {"node": list(source_node)}
-                    if source_local:
-                        connection["source_path"] = list(source_local)
-                    connection["source_conversion_steps"] = [list(step) for step in steps]
-                    connections.append(connection)
-                    continue
-                position, converted_type = steps[0]
-                position = min(max(position, 0), len(source_local))
-                if position == 0:
-                    anonymous_path = ()
-                    anonymous_celltype = converted_type
-                    connection_path = source_local
-                    convert_after = None
-                else:
-                    anonymous_path = source_local[:position]
-                    anonymous_celltype = self._celltype_for_path(source_node, anonymous_path)
-                    connection_path = source_local[position:]
-                    convert_after = converted_type
-                recipe = (source_node, anonymous_celltype, tuple(anonymous_path))
-                symbol = symbol_for(recipe)
-                anonymous_nodes[symbol] = {
-                    "source": {"node": list(source_node)},
-                    "celltype": anonymous_celltype,
-                    "path": _path_string(tuple(anonymous_path)),
-                }
-                connection["source"] = {"symbol": symbol}
-                if connection_path:
-                    connection["source_path"] = list(connection_path)
-                if convert_after is not None:
-                    connection["source_conversion_after"] = convert_after
+                connection["source"] = add_anonymous_chain(
+                    source_node, source_local, steps
+                )
             connections.append(connection)
         return {
             "__seamless_workflow__": "0.5",

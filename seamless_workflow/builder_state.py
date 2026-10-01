@@ -48,6 +48,16 @@ class BoundCellBackend:
             )
             from weakref import WeakSet
             context._anonymous_handle_backends.setdefault(self._anonymous_recipe, WeakSet()).add(self)
+        if self.local_path or self._conversion_steps:
+            from weakref import WeakSet
+            handle_recipe = (
+                "handle",
+                self.node_path,
+                self.local_path,
+                self._projected_celltype,
+                self._conversion_steps,
+            )
+            context._anonymous_handle_backends.setdefault(handle_recipe, WeakSet()).add(self)
 
     def _hold_result(self, checksum):
         lease = self._result_lease
