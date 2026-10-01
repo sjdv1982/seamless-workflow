@@ -1690,13 +1690,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 try:
                     if function is evaluate_projection:
                         from seamless.checksum.expression import (
-                            evaluate_expression_remote,
+                            evaluate_expression_placed,
                             softcancel_expression,
                         )
 
                         cs, local, ct, target, validator, validator_language, scratch = args
                         try:
-                            checksum = await evaluate_expression_remote(
+                            checksum = await evaluate_expression_placed(
                                 cs,
                                 _path_string(local),
                                 ct,

@@ -171,7 +171,7 @@ def test_a_missing_key_is_distinguishable_from_a_key_holding_null():
     The one field that separates them is the node checksum: the present-but-null
     key carries the checksum of ``null``, the absent key carries none at all.
     [MOD-3] must not collapse that distinction while moving sub-path reads onto
-    ``evaluate_expression``; this is the regression net for it, not a statement
+    ``evaluate_expression_local``; this is the regression net for it, not a statement
     that the current answer is a good one — see the ``a3`` test below.
     """
 
@@ -217,7 +217,7 @@ def test_a_missing_key_is_reported_as_something_other_than_complete():
     The assertion deliberately does not choose the answer (``failed``, a distinct
     block reason, or an exception on read).  It requires only that a node with no
     checksum stop calling itself ``complete``.  [MOD-3] moves sub-path reads onto
-    ``evaluate_expression``, which is where the distinction can be made.
+    ``evaluate_expression_local``, which is where the distinction can be made.
     """
 
     ctx = _missing_key_graph()

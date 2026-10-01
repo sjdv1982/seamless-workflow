@@ -371,7 +371,7 @@ are §26.3 of the design document.
    worse than the cause: a transformer whose pin is fed by the typo'd
    projection reports `unwired` — *a pin is not connected* — when the pin is
    connected and it is the key behind it that does not exist.  [MOD-3] moves
-   sub-path reads onto `evaluate_expression`, which is where the distinction can
+   sub-path reads onto `evaluate_expression_local`, which is where the distinction can
    be made; the tests pin the surviving distinction as a regression net and
    require only that a node with no checksum stop calling itself `complete`.
 6. **`ctx.tf.celltypes` neither normalises nor validates.**  The standalone

@@ -88,7 +88,7 @@ class SideLoop:
 
 
 def evaluate_cell(root, root_type, inputs, target_type):
-    from seamless.checksum.expression import evaluate_expression
+    from seamless.checksum.expression import evaluate_expression_local
     from .context import _assign_path
     from .adapters import checksum_for_value
     value = root.resolve(root_type) if root is not None else {}
@@ -103,9 +103,9 @@ def evaluate_projection(checksum, path, input_celltype, celltype, validator=None
     if not path and validator is None and input_celltype == "text" and celltype == "mixed":
         from .adapters import checksum_for_value
         return checksum_for_value(checksum.resolve("mixed"), "mixed", checksum_is_value=True)
-    from seamless.checksum.expression import evaluate_expression
+    from seamless.checksum.expression import evaluate_expression_local
     from .builder_state import _path_string
-    result = evaluate_expression(checksum, _path_string(path), input_celltype, celltype,
+    result = evaluate_expression_local(checksum, _path_string(path), input_celltype, celltype,
                                  validator=validator, validator_language=validator_language)
     if result is None:
         raise KeyError(f'Expression path {path!r} does not exist')
