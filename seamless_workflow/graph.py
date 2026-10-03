@@ -208,6 +208,72 @@ def anonymous_links(
     return links
 
 
+def fusible_runs(
+    source_celltype: str,
+    links: list[tuple[str, Path]],
+) -> list[tuple[str, Path, str, int]]:
+    """Group anonymous links into maximal fusible runs (expressions.md, *Fusion*).
+
+    ``links`` is ``anonymous_links``' answer for a recipe read at
+    ``source_celltype``.  Returns ``(input_celltype, path, celltype, last)``
+    per run, innermost first: the run is one Expression over the previous
+    run's result (the recipe's root for the first), and ``last`` is the index
+    of its last link.  The anonymous cells of the links before ``last`` are
+    inside the run: elided, never built (cells.md, *Anonymous cells, symbols
+    and elision*).
+    """
+    from seamless.checksum.conversion import conversion_reinterpret, conversion_trivial
+
+    preserving = conversion_trivial | conversion_reinterpret
+    runs = []
+    # The open run: [input, path, celltype, last, ends_in_conversion, absorbed]
+    open_run = None
+
+    def close():
+        nonlocal open_run
+        if open_run is not None:
+            runs.append(tuple(open_run[:4]))
+            open_run = None
+
+    current = source_celltype
+    for index, (celltype, path) in enumerate(links):
+        path = tuple(path)
+        if current in DEEP_CELLTYPES or celltype in DEEP_CELLTYPES:
+            close()
+            runs.append((current, path, celltype, index))
+        elif path:
+            if open_run is None:
+                open_run = [current, path, celltype, index, False, False]
+            elif not open_run[4]:
+                open_run[1] = open_run[1] + path
+                open_run[2] = celltype
+                open_run[3] = index
+            else:
+                run_input, run_path, run_type = open_run[:3]
+                if (not run_path and not open_run[5]
+                        and (run_input == run_type
+                             or (run_input, run_type) in preserving)):
+                    open_run = [run_type, path, celltype, index, False, True]
+                else:
+                    close()
+                    open_run = [current, path, celltype, index, False, False]
+        else:
+            if open_run is None:
+                open_run = [current, (), celltype, index, True, False]
+            elif celltype == current:
+                open_run[3] = index
+            elif open_run[4]:
+                close()
+                open_run = [current, (), celltype, index, True, False]
+            else:
+                open_run[2] = celltype
+                open_run[3] = index
+                open_run[4] = True
+        current = celltype
+    close()
+    return runs
+
+
 def split_deep_step(
     celltype: str,
     local_path: Path,

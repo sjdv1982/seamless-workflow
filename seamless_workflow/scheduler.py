@@ -44,10 +44,15 @@ class RunRecord:
 class Scheduler:
     superseded_cap: int = 3
     self_edit_hold_seconds: float = 30.0
+    upstream_hold_max_seconds: float = 300.0
 
     def hold_deadline(self, hold_kind: str | None = "self-edit") -> float | None:
         if hold_kind == "self-edit":
             return time() + self.self_edit_hold_seconds
+        if hold_kind == "upstream":
+            # node-state-lifecycle.md, Holder policy and bounds: the upstream
+            # event ends the hold; this is only the backstop.
+            return time() + self.upstream_hold_max_seconds
         return None
 
 

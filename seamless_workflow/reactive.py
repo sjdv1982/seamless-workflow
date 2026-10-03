@@ -161,6 +161,7 @@ class Reactive:
             self._replace_current_checksum(path, None)
             return
         key = (code.hex(), tuple((pin, cs.hex()) for pin, cs in sorted(pins.items())), cfg.config_token)
+        self._release_upstream_holds(path, lambda record: record.demand_key == key)
         current = self._runtime.current_runs.get(path)
         force_value_run = False
         if current is not None and current.demand_key == key:
@@ -200,6 +201,7 @@ class Reactive:
                     self._effects.append(lambda args=args: controller.notify('_transformation_finished', args))
                 record.phase = 'running'
                 record.hold_deadline = None
+                record.hold_kind = None
                 self._runtime.current_runs[path] = record
                 self._publish_run(path, record)
                 return
@@ -295,7 +297,11 @@ class Reactive:
         current = self._runtime.current_runs.get(path)
         if current is None:
             return
-        self._runtime.supersede(path)
+        # node-state-lifecycle.md, Speculation: a run superseded while an
+        # upstream recomputes waits for that upstream; otherwise only a revert
+        # of the node's own edit can bring its identity back.
+        hold_kind = "upstream" if self._upstream_unresolved(path) else "self-edit"
+        self._runtime.supersede(path, hold_kind)
         if current.phase == 'superseded':
             deadline = current.hold_deadline
             delay = (
@@ -311,6 +317,27 @@ class Reactive:
         for record in self._runtime.evicted:
             if record.et is not None: self._effects.append(record.et.cancel)
         self._runtime.evicted.clear()
+
+    def _upstream_unresolved(self, path):
+        for edge in self._incoming_for(path).values():
+            try:
+                source, _ = self._graph.resolve_existing(edge.source)
+            except KeyError:
+                continue
+            if self._graph.nodes[source].state in ('waiting', 'computing'):
+                return True
+        return False
+
+    def _release_upstream_holds(self, path, keep):
+        # The upstream event: every "upstream" hold of this node ends now,
+        # except the ones `keep` selects (those are reinstated by the caller).
+        queue = self._runtime.superseded_runs.get(path)
+        for record in tuple(queue or ()):
+            if record.hold_kind != 'upstream' or record.phase == 'cancelled' or keep(record):
+                continue
+            queue.remove(record)
+            record.phase = 'cancelled'
+            if record.et is not None: self._effects.append(record.et.cancel)
 
     def _enqueue_expiry(self, path, generation):
         # Timer callback only enqueues; it never reads the graph.

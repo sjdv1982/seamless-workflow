@@ -1,6 +1,6 @@
 """Durable graph preparation, entirely before publication or reference release."""
 import copy
-from seamless import Buffer, Checksum
+from seamless import Buffer, Checksum, Expression
 from .configuration import fingerprint
 from .graph import (
     ContextGraph, Node, CellConfig, TransformerConfig, ConstantProducer, Edge, projected_celltype,
@@ -37,6 +37,114 @@ def _parse_path_string(path):
     return tuple(reversed(components))
 
 
+_EXPRESSION_RECIPE_KEYS = frozenset({"input", "path", "input_celltype", "celltype"})
+_EXPRESSION_VALIDATOR_KEYS = frozenset({"validator", "validator_language"})
+
+
+def expression_to_graph(expression):
+    # workflow-context.md, *Graph serialization*: a cell's retained root
+    # Expression is saved as its definition, nested through ``"input"``.  A
+    # chain whose innermost input is a live object (a Transformation) has no
+    # durable form: None.
+    recipes = []
+    ref = expression
+    while isinstance(ref, Expression):
+        recipes.append(ref)
+        ref = ref._input_ref
+    if ref is None:
+        input_entry = None
+    elif isinstance(ref, Checksum):
+        input_entry = {"checksum": ref.hex()}
+    else:
+        return None
+    for link in reversed(recipes):
+        recipe = {
+            "input": input_entry,
+            "path": link.path,
+            "input_celltype": link.input_celltype,
+            "celltype": link.celltype,
+        }
+        if link.validator is not None or link.validator_language is not None:
+            recipe["validator"] = None if link.validator is None else link.validator.hex()
+            recipe["validator_language"] = link.validator_language
+        input_entry = {"expression": recipe}
+    return input_entry["expression"]
+
+
+def expression_from_graph(recipe):
+    import re
+
+    # Walk the nesting iteratively (a hostile graph may nest deeply), checking
+    # every level, then build innermost first.
+    levels = []
+    current = recipe
+    while True:
+        if not isinstance(current, dict):
+            raise PathError(f"Cell expression recipe must be a mapping, not {type(current).__name__}")
+        keys = set(current)
+        missing = _EXPRESSION_RECIPE_KEYS - keys
+        if missing:
+            raise PathError(f"Cell expression recipe is missing {sorted(missing)!r}")
+        unknown = keys - _EXPRESSION_RECIPE_KEYS - _EXPRESSION_VALIDATOR_KEYS
+        if unknown:
+            raise PathError(f"Cell expression recipe has unknown keys {sorted(unknown)!r}")
+        if ("validator" in keys) != ("validator_language" in keys):
+            raise PathError("Cell expression recipe must give validator and validator_language together")
+        if not isinstance(current["path"], str):
+            raise PathError(f"Cell expression path must be a string: {current['path']!r}")
+        for field in ("input_celltype", "celltype"):
+            value = current[field]
+            if not isinstance(value, str):
+                raise PathError(f"Cell expression {field} must be a string: {value!r}")
+            try:
+                Buffer._map_celltype(value)
+            except TypeError as exc:
+                raise PathError(f"Cell expression {field} is not a celltype: {value!r}") from exc
+        if "validator" in keys:
+            validator = current["validator"]
+            language = current["validator_language"]
+            if validator is not None and (
+                not isinstance(validator, str) or re.fullmatch(r"[0-9a-f]{64}", validator) is None
+            ):
+                raise PathError(f"Cell expression validator is not a checksum: {validator!r}")
+            if language is not None and not isinstance(language, str):
+                raise PathError(f"Cell expression validator_language must be a string: {language!r}")
+        levels.append(current)
+        input_entry = current["input"]
+        if input_entry is None:
+            ref = None
+            break
+        if not isinstance(input_entry, dict) or len(input_entry) != 1 or not (
+            set(input_entry) <= {"checksum", "expression"}
+        ):
+            raise PathError(
+                "Cell expression input must be null, {'checksum': ...} or {'expression': ...}"
+            )
+        if "checksum" in input_entry:
+            text = input_entry["checksum"]
+            if not isinstance(text, str) or re.fullmatch(r"[0-9a-f]{64}", text) is None:
+                raise PathError(f"Cell expression input is not a checksum: {text!r}")
+            ref = Checksum(text)
+            break
+        current = input_entry["expression"]
+    # The stored fields are post-fusion, so rebuilding does not change them.
+    for level in reversed(levels):
+        kwargs = {}
+        if "validator" in level:
+            kwargs["validator"] = (
+                None if level["validator"] is None else Checksum(level["validator"])
+            )
+            kwargs["validator_language"] = level["validator_language"]
+        try:
+            ref = Expression(
+                ref, path=level["path"], input_celltype=level["input_celltype"],
+                celltype=level["celltype"], **kwargs,
+            )
+        except (TypeError, ValueError) as exc:
+            raise PathError(f"Invalid cell expression recipe: {exc}") from exc
+    return ref
+
+
 def prepare_graph(data):
     version = data.get('__seamless_workflow__', '0.2')
     if version not in {'0.2', '0.3', '0.4', '0.5'}:
@@ -59,6 +167,15 @@ def prepare_graph(data):
             value = entry.get('value')
             producer = None if value is None else ConstantProducer(Checksum(value['checksum']),value.get('celltype',ct))
             node = Node('cell', cell_config=cfg, cell_root_producer=producer)
+            recipe = entry.get('expression')
+            if recipe is not None:
+                # workflow-context.md, *Graph serialization*: a cell holds a
+                # literal or a root Expression recipe, not both.
+                if version != '0.5':
+                    raise PathError('Cell expression recipes require workflow graph version 0.5')
+                if value is not None:
+                    raise PathError('A cell entry cannot have both a value and an expression')
+                node.cell_root_expression = expression_from_graph(recipe)
         elif entry['type'] == 'transformer':
             if 'call_mode' not in entry:
                 raise PathError('Transformer graph entry is missing required call_mode')
@@ -227,6 +344,8 @@ def prepare_graph(data):
             sn,sl = graph.resolve_existing(source); tn,tl = graph.resolve_existing(target)
         except KeyError as exc:
             raise PathError(f'Connection endpoint does not exist: {exc}') from exc
+        if graph.nodes[tn].kind == 'cell' and graph.nodes[tn].cell_root_expression is not None:
+            raise PathError(f'Connection targets a cell with a root expression: {target!r}')
         if graph.nodes[tn].mount and 'r' in graph.nodes[tn].mount.mode:
             raise PathError('Sensing mounts cannot have incoming connections')
         if graph.nodes[tn].kind == 'cell':

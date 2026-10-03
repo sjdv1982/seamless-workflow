@@ -35,6 +35,7 @@ from .graph import (
     NodePath,
     TransformerConfig,
     anonymous_links,
+    fusible_runs,
     deep_barrier as _deep_barrier,
     deep_recipe_error as _deep_recipe_error,
     projected_celltype,
@@ -2296,16 +2297,19 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if root_checksum is None:
                 return "unwired", None
             checksum = root_checksum
-            current_type = root_type
             recipe = root_checksum
+            # One Expression per maximal fusible run (expressions.md, *Fusion*);
+            # the anonymous cells inside a run are elided: never built, no
+            # checksum held (cells.md, *Anonymous cells, symbols and elision*).
             links = anonymous_links(root_type, source_local, conversion_steps)
-            for index, (next_type, path) in enumerate(links):
-                last = index == len(links) - 1
+            runs = fusible_runs(root_type, links)
+            for number, (input_type, path, next_type, last_link) in enumerate(runs):
+                last = number == len(runs) - 1
                 previous = recipe if isinstance(recipe, Expression) else None
                 try:
                     recipe = Expression(
                         recipe, path=_path_string(path),
-                        input_celltype=current_type, celltype=next_type,
+                        input_celltype=input_type, celltype=next_type,
                     )
                 except (TypeError, ValueError) as exc:
                     from .errors import execution_error
@@ -2313,25 +2317,25 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     self._edge_errors[edge.target] = execution_error(exc)
                     return "failed", None
                 state, checksum, error = self._projection(
-                    checksum, path, current_type, next_type,
+                    checksum, path, input_type, next_type,
                     scratch=edge_scratch if last else True,
                     materialize=materialize if last else False,
                     input_expression=previous,
-                    input_materializer=root_materializer if index == 0 else None,
+                    input_materializer=root_materializer if number == 0 else None,
                 )
                 if state != "complete":
                     if error is not None:
                         self._edge_errors[edge.target] = error
                     return state, None
                 if not last:
+                    link_type, link_path = links[last_link]
                     symbol = self._anonymous_symbol(
-                        edge, (source_node, next_type, path),
-                        index=chain_offset + index,
+                        edge, (source_node, link_type, link_path),
+                        index=chain_offset + last_link,
                     )
                     self._anonymous_current_updates[symbol] = (
                         normalize_checksum(checksum), True,
                     )
-                current_type = next_type
             return "complete", checksum
         if source_local:
             return self._projection(
@@ -2548,6 +2552,11 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                         if edge.source_conversion and not steps:
                             position = 0 if edge.source_conversion_before else len(source_local)
                             steps = ((position, source_type),)
+                        if split_deep_step(root_type, source_local, steps) is None:
+                            return self._build_edge_recipe(
+                                edge, source_path, checksum, root_type,
+                                source_local, steps, celltype,
+                            )
                         return self._build_conversion_expression(
                             checksum, root_type, source_local, steps, celltype
                         )
@@ -2623,6 +2632,43 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if local:
             return self._path_expression(expression, base_celltype, tuple(local), celltype)
         return expression
+
+    def _build_edge_recipe(self, edge, source_path, checksum, root_type, local,
+                           steps, final_type):
+        """Build a bound edge's recipe from its fusible runs.
+
+        One Expression per run (expressions.md, *Fusion*).  A run after the
+        first is rooted at the checksum the Context holds for the previous
+        run's last anonymous cell, so that named and anonymous intermediates
+        build the same identity (expressions.md, *Identity*); the anonymous
+        cells inside a run are elided and never looked up.
+        """
+        links = anonymous_links(root_type, local, steps)
+        runs = fusible_runs(root_type, links)
+        current = checksum
+        current_type = root_type
+        for number, (input_type, path, next_type, _last) in enumerate(runs):
+            if number:
+                previous_last = runs[number - 1][3]
+                link_type, link_path = links[previous_last]
+                symbol = self._anonymous_symbol(
+                    edge, (source_path, link_type, link_path), index=previous_last,
+                )
+                held = self._anonymous_current_refholds.get(symbol)
+                if held is not None:
+                    current = held[0]
+            current = Expression(
+                current, path=_path_string(path),
+                input_celltype=input_type, celltype=next_type,
+            )
+            current_type = next_type
+        if current_type != final_type:
+            current = Expression(
+                current, input_celltype=current_type, celltype=final_type,
+            )
+        if isinstance(current, Expression):
+            return current
+        return Expression(current, input_celltype=root_type, celltype=final_type)
 
     def _build_conversion_expression(self, checksum, root_type, local, steps, final_type):
         """Build a recipe without evaluating any intermediate link."""
@@ -2786,6 +2832,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if identity_checksum is None:
             if current is not None: self._suspend(path)
             return
+        # The upstream event: the cell has a concrete checksum again.
+        self._release_upstream_holds(path, lambda record: False)
         if current and current.identity_checksum == identity_checksum:
             current.result_checksum = node.current_checksum
             return
@@ -2805,6 +2853,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         for path, node in sorted(self._graph.nodes.items()):
             if node.kind == "cell":
                 entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "validator": node.cell_config.validator, "validator_language": node.cell_config.validator_language, "scratch": node.cell_config.scratch, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
+                if node.cell_root_expression is not None:
+                    # workflow-context.md, *Graph serialization*: a retained
+                    # root Expression is saved as its definition.
+                    from .serialization import expression_to_graph
+                    recipe = expression_to_graph(node.cell_root_expression)
+                    if recipe is not None:
+                        entry["expression"] = recipe
             else:
                 cfg = node.transformer_config
                 entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
