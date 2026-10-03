@@ -9,8 +9,8 @@ are deliberately not pinned here.
 Claims of this page that are pinned in a sibling file rather than here (so they
 are not duplicated):
 
-- anonymous/projection handles (takeover on assignment to a new name,
-  ``StaleWorkflowHandleError`` for the other handles, edge from the symbol,
+- anonymous/projection handles (a dummy edge on assignment to a new name,
+  with every handle staying valid, edge from the symbol,
   handle-only entries excluded from ``anonymous_nodes``, cross-Context
   ``DependencyError``, sub-path clearing ``ValueError``, ``as_celltype``
   ``AuthorityError``): ``test_contract_cells_handles.py`` (cells.md);
@@ -219,6 +219,61 @@ def test_deleting_a_namespace_deletes_its_subtree_and_stales_handles(make_contex
     assert _paths(ctx) == [("keep",)]
     with pytest.raises(StaleWorkflowHandleError):
         handle.value
+
+
+def _saved_sources(graph, prefix):
+    """Each connection under ``prefix``, with its source chain resolved through the
+    symbol table and node paths taken relative to ``prefix``."""
+    result = {}
+    for connection in graph["connections"]:
+        if connection["target"][: len(prefix)] != prefix:
+            continue
+        source = connection["source"]
+        links = []
+        while isinstance(source, dict) and "symbol" in source:
+            entry = graph["anonymous_nodes"][source["symbol"]]
+            links.append((entry["celltype"], entry["path"]))
+            source = entry["source"]
+        form = "list" if isinstance(source, list) else "node"
+        node = source if isinstance(source, list) else source["node"]
+        assert node[: len(prefix)] == prefix
+        target = tuple(connection["target"][len(prefix):])
+        result[target] = (form, tuple(node[len(prefix):]), tuple(reversed(links)))
+    return result
+
+
+def test_copying_a_namespace_keeps_its_conversions(make_context):
+    """§Nodes, names and namespaces: "Assigning a namespace view copies that subtree."
+    The copy computes what the original computes, and saves in the same form apart from
+    its paths (cells.md, *Which entries are serialized*)."""
+    ctx = make_context()
+    ctx.sub = Context()
+    ctx.sub.b = Cell("text")
+    ctx.sub.b.set("[10, 20, 30, 40]")
+    ctx.sub.chain = Cell("mixed")
+    ctx.sub.chain = ctx.sub.b.as_celltype("plain")[3]
+    ctx.sub.link = Cell("mixed")
+    ctx.sub.link = ctx.sub.b.as_celltype("plain")
+    ctx.sub.collapsed = ctx.sub.b.as_celltype("plain")
+    ctx.compute(timeout=10)
+    ctx.copy = ctx.sub
+    ctx.compute(timeout=10)
+    for name, expected in [
+        ("chain", 40),
+        ("link", [10, 20, 30, 40]),
+        ("collapsed", [10, 20, 30, 40]),
+    ]:
+        assert getattr(ctx.sub, name).value == expected
+        assert getattr(ctx.copy, name).value == expected
+    graph = ctx.get_graph()
+    original = _saved_sources(graph, ["sub"])
+    assert len(original) == 3
+    assert _saved_sources(graph, ["copy"]) == original
+    restored = make_context()
+    restored.set_graph(graph)
+    restored.compute(timeout=10)
+    assert restored.copy.chain.value == 40
+    assert restored.copy.link.value == [10, 20, 30, 40]
 
 
 def test_mounts_is_reserved_for_assignment_and_graph_nodes(make_context):

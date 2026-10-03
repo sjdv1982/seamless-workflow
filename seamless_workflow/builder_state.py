@@ -6,12 +6,13 @@ import copy
 import operator
 from typing import Any
 
-from seamless import Cell, Checksum
+from seamless import Cell, Checksum, Expression
 from seamless.cell_class import _UNSET, append_item_path, append_slice_path
 from seamless_transformer.frozen_transformer import FrozenTransformer
 
 from .endpoints import BoundEndpoint
 from .errors import AuthorityError, DependencyError, ReadOnlyEndpointError, StaleWorkflowHandleError
+from .graph import deep_recipe_error
 
 
 def _path_string(path: tuple[Any, ...]) -> str:
@@ -24,6 +25,25 @@ def _path_string(path: tuple[Any, ...]) -> str:
     return result
 
 
+_DEEP_CELLTYPES = frozenset({"deepcell", "deepfolder", "folder"})
+
+
+def _member_celltype(celltype: str, component) -> str:
+    """The celltype one projection step below ``celltype``.
+
+    A slice keeps the celltype; an item one step below a deep celltype is the
+    member celltype (``mixed`` for ``deepcell``, ``bytes`` for ``deepfolder``
+    and ``folder``); any other item keeps the celltype.
+    """
+    if isinstance(component, slice):
+        return celltype
+    if celltype == "deepcell":
+        return "mixed"
+    if celltype in ("deepfolder", "folder"):
+        return "bytes"
+    return celltype
+
+
 class BoundCellBackend:
     def __init__(self, context, node_path: tuple[str, ...], local_path=(), *, readonly=False,
                  projected_celltype=None, conversion=False, conversion_before=False,
@@ -33,31 +53,23 @@ class BoundCellBackend:
         self.local_path = tuple(local_path)
         self.readonly = bool(readonly)
         self._handle_id = object()
-        self._projected_celltype = projected_celltype
         self._conversion = bool(conversion)
         self._conversion_before = bool(conversion_before)
-        self._conversion_steps = tuple(conversion_steps)
+        conversion_steps = tuple(conversion_steps)
+        if self._conversion and not conversion_steps and projected_celltype is not None:
+            # A single conversion given without its position.
+            position = 0 if self._conversion_before else len(self.local_path)
+            conversion_steps = ((position, projected_celltype),)
+        # The handle's explicit links: its path, and the conversions written
+        # with ``as_celltype`` at their path positions.  Its celltype is not
+        # stored: it follows the parent (``celltype``).
+        self._conversion_steps = conversion_steps
         self._result_lease = None
-        self._stale = False
-        self._anonymous_recipe = None
-        if self._conversion and not self.local_path:
-            self._anonymous_recipe = (
-                self.node_path,
-                self._projected_celltype,
-                self._conversion_steps,
-            )
-            from weakref import WeakSet
-            context._anonymous_handle_backends.setdefault(self._anonymous_recipe, WeakSet()).add(self)
-        if self.local_path or self._conversion_steps:
-            from weakref import WeakSet
-            handle_recipe = (
-                "handle",
-                self.node_path,
-                self.local_path,
-                self._projected_celltype,
-                self._conversion_steps,
-            )
-            context._anonymous_handle_backends.setdefault(handle_recipe, WeakSet()).add(self)
+        # Handle-local memo and failure of an anonymous or projection handle,
+        # keyed by the parent's (checksum, celltype) (_handle_sync).
+        self._handle_key = None
+        self._handle_result = None
+        self._handle_error = None
 
     def _hold_result(self, checksum):
         lease = self._result_lease
@@ -77,9 +89,241 @@ class BoundCellBackend:
             self._result_lease = Lease(checksum, role="result")
         return checksum
 
+    # --- Reads through an anonymous or projection handle ----------------------
+    #
+    # cells.md, *Anonymous and projection handles*: such a handle reads like an
+    # unbound Cell over its parent's checksum.  Every pulling read builds the
+    # handle's own Expression -- all of its links, paths and conversions, in
+    # syntax order, fused as far as the Expression constructor allows -- over
+    # the parent's checksum, and evaluates it with the standalone getter's
+    # machinery (`_available_input_checksum`), placed by the Context's
+    # `expression_execution`.  It never waits on the parent.  The memo and the
+    # failure live on the handle, keyed by the parent's checksum and celltype.
+
+    def _is_handle(self):
+        return bool(self.local_path or self._conversion or self._conversion_steps)
+
+    def _handle_parent(self):
+        """Snapshot the parent's checksum: a bound attribute read that never waits."""
+        return self.context._read_snapshot(self.node_path)
+
+    def _handle_miswired(self, parent_celltype):
+        # A live handle follows its parent (cells.md, *The input*: "a retype
+        # never leaves a bound handle `miswired`"), so the ordinary wiring rule
+        # cannot fail on it.  A deep link outside the deep tables is still
+        # ill-formed (cells.md, *Connecting*; deep-celltypes.md, *Paths*).
+        return deep_recipe_error(parent_celltype, self.local_path, self._conversion_steps) is not None
+
+    def _handle_links(self):
+        """The handle's links in syntax order: ``(True, component)`` for a path
+        step, ``(False, celltype)`` for an ``as_celltype`` conversion."""
+        links, index = [], 0
+        for position, celltype in self._conversion_steps:
+            while index < min(position, len(self.local_path)):
+                links.append((True, self.local_path[index]))
+                index += 1
+            links.append((False, celltype))
+        links.extend((True, component) for component in self.local_path[index:])
+        return links
+
+    def _handle_celltype(self, parent_celltype):
+        """The handle's celltype over a parent of ``parent_celltype``.
+
+        cells.md, *The input*: "A bound handle's `celltype` follows its
+        parent."  A path step keeps the celltype, except one step below a deep
+        celltype, where it is the member celltype; a conversion written with
+        ``as_celltype`` keeps its explicit target.
+        """
+        current = parent_celltype
+        for is_path, item in self._handle_links():
+            current = _member_celltype(current, item) if is_path else item
+        return current
+
+    def _handle_expression(self, parent_checksum, parent_celltype):
+        """Build the handle's Expression over the parent's checksum.
+
+        Each link becomes one Expression whose input is the previous one; the
+        Expression constructor fuses path into path and a pathless,
+        checksum-preserving conversion into a following path, and keeps every
+        other pair a chain (expressions.md, *Fusion*).  Returns the bare parent
+        checksum when no link applies anything (the dummy Expression).
+        """
+        current, current_type = parent_checksum, parent_celltype
+        for is_path, item in self._handle_links():
+            if is_path:
+                next_type = _member_celltype(current_type, item)
+                current = Expression(
+                    current, path=_path_string((item,)),
+                    input_celltype=current_type, celltype=next_type,
+                )
+                current_type = next_type
+            elif item != current_type:
+                current = Expression(current, input_celltype=current_type, celltype=item)
+                current_type = item
+        # ``current_type`` is now the handle's celltype over this parent
+        # (``_handle_celltype``): the links are all there is to the recipe.
+        return current
+
+    def _handle_sync(self, lease):
+        """Discard the memo and failure when the parent changed (passive)."""
+        key = None if lease.checksum is None else (lease.checksum.hex(), lease.celltype)
+        if key != self._handle_key:
+            self._handle_key = key
+            self._handle_result = None
+            self._handle_error = None
+
+    def _handle_is_dummy(self, parent_celltype):
+        current_type = parent_celltype
+        for is_path, item in self._handle_links():
+            if is_path:
+                return False
+            current_type = item
+        return current_type == parent_celltype
+
+    def _handle_pull(self, *, compute=False):
+        """Pull the handle's checksum over the parent's current checksum.
+
+        Standalone resolution order (cells.md, *Reads*): the dummy Expression,
+        then the process cache, the database, an in-flight evaluation, local
+        evaluation, dispatch.  ``compute`` re-evaluates after a recorded
+        failure, as a standalone ``compute()`` does; a plain read reports the
+        sticky failure as ``None`` until ``clear_exception()``.
+        """
+        from seamless.cell_class import _available_input_checksum
+        from seamless.checksum.null import canonicalize_checksum
+        from seamless.error_envelope import RunningLoopRefusal, execution_error
+
+        lease = self._handle_parent()
+        try:
+            self._handle_sync(lease)
+            parent = lease.checksum
+            if parent is None or self._handle_miswired(lease.celltype):
+                # No parent checksum: return None without waiting, raising or
+                # recording anything.
+                return None
+            if self._handle_error is not None and not compute:
+                return None
+            if self._handle_result is not None:
+                return self._handle_result
+            try:
+                built = self._handle_expression(parent, lease.celltype)
+                if isinstance(built, Checksum):
+                    result = canonicalize_checksum(built, self._handle_celltype(lease.celltype))
+                else:
+                    # A handle starts non-scratch (cells.md, *Scratch policy*).
+                    result = _available_input_checksum(
+                        built, scratch=False,
+                        execution=self.context._expression_execution,
+                    )
+            except RunningLoopRefusal:
+                # Not a failure: nothing recorded, the handle stays waiting.
+                return None
+            except Exception as exc:
+                self._handle_error = execution_error(exc)
+                self._handle_result = None
+                return None
+            self._handle_error = None
+            self._handle_result = result
+            return result
+        finally:
+            lease._release_refholds()
+
+    def _handle_compute(self, timeout=None):
+        import asyncio
+        try:
+            asyncio.get_running_loop()
+            in_loop = True
+        except RuntimeError:
+            in_loop = False
+        if timeout is None or in_loop:
+            result = self._handle_pull(compute=True)
+        else:
+            # `timeout` bounds only the wait for the handle's own evaluation.
+            from concurrent.futures import ThreadPoolExecutor
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(self._handle_pull, compute=True)
+            finally:
+                executor.shutdown(wait=False)
+            try:
+                result = future.result(timeout=timeout)
+            except TimeoutError:
+                raise TimeoutError(
+                    f"Handle evaluation did not finish within {timeout} seconds"
+                ) from None
+        if result is not None:
+            result.tempref()
+        return self._hold_result(result)
+
+    async def _handle_compute_async(self, timeout=None):
+        import asyncio
+        work = asyncio.to_thread(self._handle_pull, compute=True)
+        if timeout is not None:
+            work = asyncio.wait_for(work, timeout)
+        result = await work
+        if result is not None:
+            result.tempref()
+        return self._hold_result(result)
+
+    def _handle_state(self):
+        lease = self._handle_parent()
+        try:
+            if self._handle_miswired(lease.celltype):
+                return "miswired"
+            self._handle_sync(lease)
+            if lease.checksum is None:
+                parent_state = self.context._graph.nodes[self.node_path].state
+                return "unwired" if parent_state == "unwired" else "waiting"
+            if self._handle_error is not None:
+                return "failed"
+            if self._handle_result is not None or self._handle_is_dummy(lease.celltype):
+                return "complete"
+            return "waiting"
+        finally:
+            lease._release_refholds()
+
+    def _handle_exception(self):
+        lease = self._handle_parent()
+        try:
+            self._handle_sync(lease)
+        finally:
+            lease._release_refholds()
+        return None if self._handle_error is None else str(self._handle_error)
+
+    def _handle_buffer(self):
+        checksum = self.checksum
+        if checksum is None:
+            return None
+        # A materialization failure is raised, never recorded (cells.md,
+        # *`.buffer` and `.value`*).
+        from seamless.buffer_class import Buffer
+        from seamless.checksum.hash_type_validation import validate_deserializable_as
+        celltype = self.celltype
+        mapped = Buffer._map_celltype(celltype)
+        validate_deserializable_as(checksum, mapped)
+        buffer = checksum.resolve()
+        validate_deserializable_as(checksum, mapped, buffer=buffer)
+        if celltype in _DEEP_CELLTYPES:
+            buffer.get_value(celltype)
+        return buffer
+
+    def _handle_value(self):
+        checksum = self.checksum
+        if checksum is None:
+            return None
+        celltype = self.celltype
+        value = checksum.resolve(celltype)
+        return value.content if celltype == "bytes" and hasattr(value, "content") else value
+
+    def _handle_run(self):
+        result = self._handle_compute()
+        if result is None:
+            if self._handle_error is not None:
+                raise self._handle_error
+            return None
+        return self._handle_value()
+
     def _node(self):
-        if self._stale:
-            raise StaleWorkflowHandleError("Anonymous handle was transferred to a named cell")
         self.context._check_public_caller()
         try:
             node = self.context._node_snapshot(self.node_path)
@@ -123,11 +367,16 @@ class BoundCellBackend:
     @property
     def celltype(self):
         node = self._node()
-        if self.readonly:
-            return node.transformer_config.celltypes.get("result", "mixed")
-        if self._projected_celltype is not None:
-            return self._projected_celltype
-        return self.context._celltype_for_path(self.node_path, self.local_path)
+        if node.kind == "cell":
+            parent_celltype = node.cell_config.celltype
+        else:
+            parent_celltype = node.transformer_config.celltypes.get("result", "mixed")
+        # cells.md, *The input*: "A bound handle's `celltype` follows its
+        # parent.  Retyping the parent retypes every live handle over it";
+        # one step below a deep parent it is the member celltype, and an
+        # explicit ``as_celltype`` keeps its target.  Only an edge fixes a
+        # celltype, in the anonymous cell it creates.
+        return self._handle_celltype(parent_celltype)
 
     @celltype.setter
     def celltype(self, value):
@@ -180,59 +429,36 @@ class BoundCellBackend:
     @property
     def checksum(self):
         self._node()
+        if self._is_handle():
+            return self._hold_result(self._handle_pull())
         if self.state == "miswired":
             return self._hold_result(None)
-        checksum = self.context._get_checksum(
-            self.node_path,
-            self.local_path,
-            _handle_id=self._handle_id,
-            _target_celltype=self._projected_celltype,
-        )
-        return self._hold_result(checksum)
+        return self._hold_result(self.context._get_checksum(self.node_path))
 
     @property
     def buffer(self):
         self._node()
+        if self._is_handle():
+            return self._handle_buffer()
         if self.state == "miswired":
             return None
-        return self.context._get_buffer(
-            self.node_path,
-            self.local_path,
-            _handle_id=self._handle_id,
-            _target_celltype=self._projected_celltype,
-            _conversion=self._conversion,
-        )
+        return self.context._get_buffer(self.node_path)
 
     @property
     def value(self):
         self._node()
+        if self._is_handle():
+            return self._handle_value()
         if self.state == "miswired":
             return None
-        value = self.context._get_value(
-            self.node_path,
-            self.local_path,
-            celltype=self.celltype,
-            _handle_id=self._handle_id,
-            _target_celltype=self._projected_celltype,
-        )
+        value = self.context._get_value(self.node_path, celltype=self.celltype)
         return value.content if self.celltype == "bytes" and hasattr(value, "content") else value
 
     @property
     def state(self):
         node = self._node()
-        if self.local_path:
-            if self._projected_celltype is not None and not self._conversion:
-                parent_type = self.context._node_snapshot(self.node_path).cell_config.celltype
-                if (parent_type not in {"deepcell", "deepfolder", "folder"}
-                        and self._projected_celltype not in {"deepcell", "deepfolder", "folder"}
-                        and parent_type != self._projected_celltype):
-                    return "miswired"
-            if self.context._projection_error(
-                    self.node_path, self.local_path, self._handle_id) is not None:
-                return "failed"
-            return self.context._projection_state(
-                self.node_path, self.local_path, self._handle_id
-            )
+        if self._is_handle():
+            return self._handle_state()
         return node.state
 
     @property
@@ -242,12 +468,8 @@ class BoundCellBackend:
     @property
     def exception(self):
         node = self._node()
-        if self.local_path:
-            error = self.context._projection_error(
-                self.node_path, self.local_path, self._handle_id
-            )
-            if error is not None:
-                return str(error)
+        if self._is_handle():
+            return self._handle_exception()
         return str(node.exception) if node.state == "failed" and node.exception is not None else None
 
     def derive(self, **updates):
@@ -285,11 +507,12 @@ class BoundCellBackend:
 
     def derive_item(self, key):
         self._node()
-        local = self.local_path + (key,)
-        projected_celltype = self._projected_celltype if self._conversion else self.context._celltype_for_path(self.node_path, local)
+        # The child's celltype is not fixed here: it follows the parent, and
+        # one step below a deep celltype it is the member celltype, also after
+        # an as_celltype (cells.md, *The input*; deep-celltypes.md, *Handles
+        # and writes one step below a deep parent*).
         return type(self)(
-            self.context, self.node_path, local, readonly=self.readonly,
-            projected_celltype=projected_celltype,
+            self.context, self.node_path, self.local_path + (key,), readonly=self.readonly,
             conversion=self._conversion,
             conversion_before=self._conversion_before,
             conversion_steps=self._conversion_steps,
@@ -297,14 +520,11 @@ class BoundCellBackend:
 
     def derive_slice(self, start=None, stop=None, step=None):
         self._node()
-        local = self.local_path + (slice(start, stop, step),)
-        projected_celltype = self._projected_celltype if self._conversion else self.context._celltype_for_path(self.node_path, local)
         return type(self)(
             self.context,
             self.node_path,
-            local,
+            self.local_path + (slice(start, stop, step),),
             readonly=self.readonly,
-            projected_celltype=projected_celltype,
             conversion=self._conversion,
             conversion_before=self._conversion_before,
             conversion_steps=self._conversion_steps,
@@ -378,8 +598,8 @@ class BoundCellBackend:
             self.node_path,
             self.local_path,
             input_ref,
-            _handle_id=self._handle_id,
-            _target_celltype=self._projected_celltype,
+            # A handle's celltype follows its parent; it is read now.
+            _target_celltype=self.celltype if self._is_handle() else None,
             _conversion=self._conversion_before,
             _conversion_steps=self._conversion_steps,
         )
@@ -388,35 +608,19 @@ class BoundCellBackend:
         self._node()
         if input_ref is not _UNSET:
             return self.build(input_ref).compute()
-        if self.local_path:
-            state = self.context._cell_endpoint_parent_state(self.node_path)
-            if state in {"waiting", "computing"}:
-                return None
-        return self.context._compute_cell_endpoint(
-            self.node_path,
-            self.local_path,
-            timeout=timeout,
-            _handle_id=self._handle_id,
-            _target_celltype=self._projected_celltype,
-        )
+        if self._is_handle():
+            return self._handle_compute(timeout=timeout)
+        return self.context._compute_cell_endpoint(self.node_path, timeout=timeout)
 
     def run(self, input_ref):
         self._node()
         if input_ref is not _UNSET:
             return self.build(input_ref).run()
-        if self.local_path and self.context._cell_endpoint_parent_state(self.node_path) in {
-            "waiting", "computing", "unwired"
-        }:
-            return None
-        value = self.context._compute_cell_value(
-            self.node_path, self.local_path, _handle_id=self._handle_id
-        )
+        if self._is_handle():
+            return self._handle_run()
+        value = self.context._compute_cell_value(self.node_path)
         if value is None:
-            error = self.context._projection_error(
-                self.node_path, self.local_path, self._handle_id
-            )
-            if error is None and not self.local_path:
-                error = self.context._node_snapshot(self.node_path).exception
+            error = self.context._node_snapshot(self.node_path).exception
             if error is not None:
                 raise error
         return value.content if self.celltype == "bytes" and hasattr(value, "content") else value
@@ -424,11 +628,14 @@ class BoundCellBackend:
     async def compute_async(self, input_ref, *, timeout=None):
         if input_ref is not _UNSET:
             return await self.build(input_ref).compute_async()
+        if self._is_handle():
+            self._node()
+            return await self._handle_compute_async(timeout=timeout)
         from .ingress import _wait_async
         lease = await _wait_async(
             self.context,
             self.node_path,
-            self.local_path,
+            (),
             read=True,
             barrier=True,
             timeout=timeout,
@@ -438,10 +645,6 @@ class BoundCellBackend:
             return None
         try:
             checksum = lease.checksum
-            if checksum is not None and self.local_path:
-                from .sidework import evaluate_projection
-                import asyncio
-                checksum = await asyncio.to_thread(evaluate_projection, checksum, self.local_path, lease.celltype, lease.celltype)
             if checksum is not None: checksum.tempref()
             return checksum
         finally: lease._release_refholds()
@@ -452,10 +655,10 @@ class BoundCellBackend:
 
     def clear_exception(self):
         self._node()
-        if self.local_path:
-            return self.context._clear_projection_error(
-                self.node_path, self.local_path, self._handle_id
-            )
+        if self._is_handle():
+            # The failure lives on the handle; clearing it is the explicit retry.
+            self._handle_error = None
+            return None
         return self.context._clear_exception(self.node_path)
 
     def _workflow_endpoint(self):
@@ -475,7 +678,6 @@ class BoundCellBackend:
             conversion=self._conversion,
             conversion_before=self._conversion_before,
             conversion_steps=self._conversion_steps,
-            handle_id=self._handle_id,
         )
 
 
@@ -501,7 +703,6 @@ class BoundCellBackend:
             self._conversion,
             self._conversion_before,
             self._conversion_steps,
-            self._handle_id,
         )
 
     def capture_source(self):

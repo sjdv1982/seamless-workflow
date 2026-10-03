@@ -26,7 +26,20 @@ from .errors import (
     StaleWorkflowHandleError,
     ValueUnavailableError,
 )
-from .graph import CellConfig, ConstantProducer, ContextGraph, Edge, Node, NodePath, TransformerConfig
+from .graph import (
+    CellConfig,
+    ConstantProducer,
+    ContextGraph,
+    Edge,
+    Node,
+    NodePath,
+    TransformerConfig,
+    anonymous_links,
+    deep_barrier as _deep_barrier,
+    deep_recipe_error as _deep_recipe_error,
+    projected_celltype,
+    split_deep_step,
+)
 from .scheduler import ContextRuntime, ExceptionInfo, RunRecord
 from .views import MissingView, SubContextView
 
@@ -37,33 +50,109 @@ _DEEP_CELLTYPES = {"deepcell", "deepfolder", "folder"}
 
 
 def _projected_source_type_error(
-    source_ep, source_type, target_type, target_path, target_pin=None, target_local=()
+    source_ep, source_type, target_type, target_path, target_pin=None, target_local=(),
+    root_type=None,
 ):
+    """The wiring rule's refusal; its text is contract (cells.md, *Connecting*).
+
+    The header ``would convert <in> -> <out> behind a projection.`` is followed
+    by the two spellings, projection first, each glossed ``# item k of ...``.
+    The source is spelled as written: its node, then its links in order --
+    bracket-form path steps and ``as_celltype`` conversions -- and ``k`` is
+    the path step(s) after its last conversion, which are what the target
+    would convert behind.  ``root_type`` is the celltype of the source node.
+    A conversion-first spelling that the conversion table refuses -- a deep
+    index converted outside the deep table (deep-celltypes.md, *Bound wiring
+    around the step*) -- is not offered.
+    """
+    import json
+    from seamless.checksum.expression import validate_expression_shape
+
     source_name = "ctx." + ".".join(source_ep.node_path)
+    if source_ep.endpoint_kind == "transformer-result":
+        source_name += ".result"
     target_name = "ctx." + ".".join(target_path)
     if target_local:
         component = target_local[0]
         if isinstance(component, str):
-            import json
             target_name += f"[{json.dumps(component)}]"
         else:
             target_name += f"[{component}]"
     if target_pin is not None:
         target_name += f".pins.{target_pin}"
-    projection_path = _path_string(source_ep.local_path)
-    item = projection_path[1:-1]
-    projection = (
-        f"  {target_name} = {source_name}{projection_path}.as_celltype(\"{target_type}\") "
-        f"# item {item} of the {source_type} (a character), as {target_type}"
-    )
-    conversion = (
-        f"  {target_name} = {source_name}.as_celltype(\"{target_type}\"){projection_path} "
-        f"# item {item} of the parsed list"
-    )
-    return TypeError(
-        f"would convert {source_type} -> {target_type} behind a projection.\n"
-        f"{projection}\n{conversion}"
-    )
+
+    path = tuple(source_ep.local_path)
+    steps = tuple(source_ep.conversion_steps)
+    if source_ep.conversion and not steps:
+        position = 0 if source_ep.conversion_before else len(path)
+        steps = ((position, source_ep.celltype),)
+    base, current, position = source_name, root_type or source_type, 0
+    for step_position, converted in sorted(steps, key=lambda step: step[0]):
+        step_position = min(max(step_position, position), len(path))
+        base += _spelled_path(path[position:step_position]) + f'.as_celltype("{converted}")'
+        current, position = converted, step_position
+    trailing = path[position:]
+    spelled = _spelled_path(trailing)
+    item = spelled[1:-1] if len(trailing) == 1 else spelled
+
+    if current in _DEEP_CELLTYPES:
+        nature = " (a member)"
+    elif current in _CHARACTER_CELLTYPES:
+        nature = " (a character)"
+    else:
+        nature = ""
+    spellings = [(
+        f'{target_name} = {base}{spelled}.as_celltype("{target_type}")',
+        f"# item {item} of the {current}{nature}, as {target_type}"
+        if trailing else f"# the {current}, as {target_type}",
+    )]
+    try:
+        validate_expression_shape("", current, target_type)
+        conversion_legal = bool(trailing)
+    except (TypeError, ValueError):
+        conversion_legal = False
+    if conversion_legal:
+        if current in _CHARACTER_CELLTYPES:
+            parsed = "the parsed mapping" if isinstance(trailing[0], str) else "the parsed list"
+        else:
+            parsed = f"the {target_type}"
+        spellings.append((
+            f'{target_name} = {base}.as_celltype("{target_type}"){spelled}',
+            f"# item {item} of {parsed}",
+        ))
+    width = max(len(code) for code, _gloss in spellings)
+    lines = [f"would convert {source_type} -> {target_type} behind a projection."]
+    lines += [f"  {code.ljust(width)}   {gloss}" for code, gloss in spellings]
+    return TypeError("\n".join(lines))
+
+
+# Celltypes whose value is a string, so that one item of it is a character.
+_CHARACTER_CELLTYPES = frozenset({"text", "str", "python", "ipython", "cson", "yaml", "checksum"})
+
+
+def _spelled_path(path):
+    """A projection path as it is written on a handle: ``["k"]``, ``[3]``, ``[1:3]``.
+
+    String keys are written in bracket form, since deep keys routinely contain
+    ``/`` and ``.`` (deep-celltypes.md, *Paths*).
+    """
+    import json
+
+    spelled = []
+    for component in path:
+        if isinstance(component, slice):
+            def bound(value):
+                return "" if value is None else repr(value)
+
+            text = f"{bound(component.start)}:{bound(component.stop)}"
+            if component.step is not None:
+                text += f":{component.step!r}"
+            spelled.append(f"[{text}]")
+        elif isinstance(component, str):
+            spelled.append(f"[{json.dumps(component)}]")
+        else:
+            spelled.append(f"[{component!r}]")
+    return "".join(spelled)
 
 
 
@@ -85,13 +174,14 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         object.__setattr__(self, "_expression_execution", expression_execution)
         object.__setattr__(self, "top_id", uuid4().hex)
         object.__setattr__(self, "_graph", ContextGraph())
-        object.__setattr__(self, "_anonymous_handle_backends", {})
         object.__setattr__(self, "_runtime", ContextRuntime())
         object.__setattr__(self, "_refholds_released", False)
         object.__setattr__(self, "_code_refholds", {})
         object.__setattr__(self, "_module_refholds", {})
         object.__setattr__(self, "_superseded_refholds", {})
         object.__setattr__(self, "_anonymous_current_refholds", {})
+        object.__setattr__(self, "_edge_pin_refholds", {})
+        object.__setattr__(self, "_edge_code_states", {})
         object.__setattr__(self, "_anonymous_current_updates", {})
         object.__setattr__(self, "_prefix", ())
         from seamless.reference_lifecycle import register_refholder
@@ -103,8 +193,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         object.__setattr__(self, "_facts", {})
         object.__setattr__(self, "_barriers", {})
         object.__setattr__(self, "_effects", [])
-        object.__setattr__(self, "_projection_errors", {})
-        object.__setattr__(self, "_projection_successes", {})
         object.__setattr__(self, "_edge_errors", {})
         object.__setattr__(self, "_mount_sessions", {})
         object.__setattr__(self, "_mount_node_leaves", {})
@@ -241,7 +329,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             edge = self._incoming_edge(path, ())
             if edge is not None:
                 source_path, source_local = self._graph.resolve_existing(edge.source)
-                if source_local and cfg.celltype != self._node_celltype(source_path):
+                if (source_local and not edge.source_conversion
+                        and not edge.source_conversion_steps
+                        and cfg.celltype != self._node_celltype(source_path)):
                     raise TypeError(
                         "Cannot implicitly convert behind a projection; use as_celltype() "
                         "before or after projecting"
@@ -254,7 +344,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 edge = self._incoming_edge(path, (pin,))
                 if edge is not None:
                     source_path, local = self._graph.resolve_existing(edge.source)
-                    if local and self._node_celltype(source_path) != celltype:
+                    if (local and not edge.source_conversion
+                            and not edge.source_conversion_steps
+                            and self._node_celltype(source_path) != celltype):
                         raise TypeError("Cannot implicitly convert behind a projection; use as_celltype() before or after projecting")
             if cfg.compilation is not None:
                 removed_pins = node.transformer_config.pins - cfg.pins
@@ -425,6 +517,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     endpoint = self._endpoint(value)
                     if not endpoint.can_source or endpoint.node_path == path or self._would_cycle(endpoint.node_path, path):
                         raise DependencyError("Invalid source for transformer replacement")
+                    self._check_deep_link(endpoint)
                     self._replace_current_checksum(path, None)
                     self._release_node_producers(node, path)
                     self._release_code_checksum(path)
@@ -456,9 +549,15 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         elif isinstance(value, SubContextView):
             self._copy_subcontext(value._prefix, path)
         elif self._is_bound_source(value):
-            self._create_cell(path, celltype=self._source_celltype(value))
+            # cells.md, *Assigning an anonymous handle*: the new node takes the
+            # handle's celltype and is fed by an edge from it -- for an
+            # anonymous handle, a dummy (identity) edge from its anonymous
+            # cell.  Nothing is renamed, and the handle stays what it was.
+            celltype = self._source_celltype(value)
+            # An ill-formed deep link raises before the new node exists.
+            self._check_deep_link(self._endpoint(value))
+            self._create_cell(path, celltype=celltype)
             self._add_endpoint_edge(value, self._cell_endpoint(path))
-            self._adopt_anonymous_handle(value, path)
         elif isinstance(value, (Cell, PreparedCell)):
             self._create_cell_from_builder(path, value)
         elif isinstance(value, (TransformerCore, PreparedTransformer)):
@@ -469,54 +568,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._create_cell(path)
             self._cell_operation(path, (), value, detach=True)
         self._derive_all()
-
-    def _adopt_anonymous_handle(self, value, path):
-        backend = getattr(value, "_workflow_backend", None)
-        if backend is None and isinstance(value, BoundEndpoint) and value.handle_id is not None:
-            for siblings in self._anonymous_handle_backends.values():
-                backend = next(
-                    (candidate for candidate in siblings
-                     if candidate._handle_id is value.handle_id),
-                    None,
-                )
-                if backend is not None:
-                    break
-        recipe = getattr(backend, "_anonymous_recipe", None)
-        if recipe is None or backend.local_path:
-            return
-        source_node, target_type, conversion_steps = recipe
-        if any(
-            edge.target != tuple(path)
-            and edge.source_conversion
-            and self._graph.resolve_existing(edge.source)[0] == source_node
-            and edge.source_conversion_steps == conversion_steps
-            and edge.source_celltype == target_type
-            for edge in self._graph.edges
-        ):
-            return
-        siblings = self._anonymous_handle_backends.pop(recipe, ())
-        for sibling in tuple(siblings):
-            if sibling is not backend:
-                sibling._stale = True
-        incoming = self._incoming_for(tuple(path)).get(())
-        if incoming is not None and len(conversion_steps) <= 1:
-            from dataclasses import replace
-            source_node, _ = self._graph.resolve_existing(incoming.source)
-            replacement = replace(
-                incoming,
-                source_celltype=self._node_celltype(source_node),
-                source_conversion=False,
-                source_conversion_before=False,
-                source_conversion_steps=(),
-            )
-            self._graph.edges[self._graph.edges.index(incoming)] = replacement
-        backend.node_path = tuple(path)
-        backend.local_path = ()
-        backend._projected_celltype = None
-        backend._conversion = False
-        backend._conversion_before = False
-        backend._conversion_steps = ()
-        backend._anonymous_recipe = None
 
     def _delete(self, path):
         path = tuple(path)
@@ -627,14 +678,57 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 self._release_producer(old_producer, path)
             self._remove_edges_targeting(path, (), descendants=True)
         elif isinstance(input_ref, Expression):
-            node.cell_config = new_config
-            node.cell_root_expression = input_ref
-            old_producer = node.cell_root_producer
-            node.cell_root_producer = None
-            self._revisions[path] = self._revisions.get(path, 0) + 1
-            if old_producer is not None:
-                self._release_producer(old_producer, path)
-            self._remove_edges_targeting(path, (), descendants=True)
+            from seamless.checksum.expression import parse_path
+
+            links = []
+            root = input_ref
+            while isinstance(root, Expression):
+                links.append(root)
+                root = root._input_ref
+            if isinstance(root, Checksum):
+                links.reverse()
+                root_type = links[0].input_celltype
+                source_path = self._graph.first_free("cell")
+                self._create_cell(source_path, celltype=root_type)
+                source_node = self._graph.nodes[source_path]
+                source_node.cell_config.scratch = True
+                source_node.cell_root_producer = self._retain_producer(
+                    root, root_type, scratch=True,
+                )
+                local = []
+                steps = []
+                current_type = root_type
+                for link in links:
+                    components = [item for kind, item in parse_path(link.path)]
+                    if components:
+                        local.extend(components)
+                        current_type = projected_celltype(current_type, tuple(components))
+                    if link.celltype != current_type:
+                        steps.append((len(local), link.celltype))
+                        current_type = link.celltype
+                node.cell_config = new_config
+                old_producer = node.cell_root_producer
+                node.cell_root_producer = None
+                self._revisions[path] = self._revisions.get(path, 0) + 1
+                if old_producer is not None:
+                    self._release_producer(old_producer, path)
+                self._remove_edges_targeting(path, (), descendants=True)
+                self._add_edge(
+                    source_path + tuple(local), path,
+                    source_celltype=current_type,
+                    source_conversion=bool(steps),
+                    source_conversion_before=bool(steps and steps[0][0] == 0),
+                    source_conversion_steps=tuple(steps),
+                )
+            else:
+                node.cell_config = new_config
+                node.cell_root_expression = input_ref
+                old_producer = node.cell_root_producer
+                node.cell_root_producer = None
+                self._revisions[path] = self._revisions.get(path, 0) + 1
+                if old_producer is not None:
+                    self._release_producer(old_producer, path)
+                self._remove_edges_targeting(path, (), descendants=True)
         elif input_ref is not None:
             raise TypeError(
                 f"Cannot bind a Cell whose input_ref is {type(input_ref).__name__}"
@@ -1049,8 +1143,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         edge = self._incoming_edge(node_path, (pin,))
         producer = node.transformer_pin_producers.get(pin)
         if edge is not None:
-            source_node, _ = self._graph.resolve_existing(edge.source)
-            input_type = edge.source_celltype or self._node_celltype(source_node)
+            input_type = self._edge_input_celltype(edge)
             source = self._public_source(edge.source)
         else:
             input_type = producer.celltype if producer else None
@@ -1099,6 +1192,39 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def _transformer_endpoint(self, node_path, pin=None):
         return BoundEndpoint(self.top_id, tuple(node_path), "transformer-code" if pin == "code" else "transformer-input", () if pin is None else (pin,), False, True, True)
 
+    def _check_deep_link(self, source_ep, target=None):
+        """Refuse a deep link outside the deep tables, before anything changes.
+
+        deep-celltypes.md, *Bound wiring around the step*: writing an
+        ill-formed deep link raises ``ValueError`` -- an integer key, a slice,
+        a second step or an illegal deep conversion -- and the graph is left
+        unchanged.  Only a graph loaded by `set_graph`, or a retype that
+        invalidates existing wiring, derives the defect instead.
+
+        ``target``, when it is the root of an existing cell, adds that cell's
+        implicit conversion of a pathless source: ``ctx.x = ctx.d`` with ``d``
+        deep converts ``d``'s celltype into ``x``'s, and that conversion is
+        held to the deep table like any other.  A pathed source converting
+        into its target is the wiring rule's ``TypeError`` instead.
+        """
+        if source_ep is None or source_ep.node_path not in self._graph.nodes:
+            return
+        local = tuple(source_ep.local_path)
+        steps = tuple(source_ep.conversion_steps)
+        if source_ep.conversion and not steps:
+            position = 0 if source_ep.conversion_before else len(local)
+            steps = ((position, source_ep.celltype),)
+        root_type = self._node_celltype(source_ep.node_path)
+        if (not local and target is not None and target.endpoint_kind == "cell-result"
+                and not target.local_path and target.node_path in self._graph.nodes
+                and self._graph.nodes[target.node_path].kind == "cell"):
+            target_type = self._graph.nodes[target.node_path].cell_config.celltype
+            if target_type != (source_ep.celltype or root_type):
+                steps = steps + ((0, target_type),)
+        error = _deep_recipe_error(root_type, local, steps)
+        if error is not None:
+            raise error
+
     def _add_endpoint_edge(self, source, target, *, detach=False):
         source_ep = self._endpoint(source)
         if source_ep is None:
@@ -1107,6 +1233,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             raise DependencyError("Cross-top-level dependencies are not supported")
         if not source_ep.can_source:
             raise DependencyError("Endpoint cannot be used as a source")
+        self._check_deep_link(source_ep, target)
         if target.endpoint_kind == "cell-subvalue":
             if len(target.local_path) != 1 or isinstance(target.local_path[0], slice):
                 raise PathError("Cell connection targets are limited to one point component")
@@ -1119,6 +1246,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     raise _projected_source_type_error(
                         source_ep, source_type, target_type, target.node_path,
                         target_local=target.local_path,
+                        root_type=self._node_celltype(source_ep.node_path),
                     )
         elif target.endpoint_kind == "transformer-input":
             if len(target.local_path) != 1:
@@ -1129,6 +1257,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 raise _projected_source_type_error(
                     source_ep, source_type, celltype, target.node_path,
                     target_pin=target.local_path[0],
+                    root_type=self._node_celltype(source_ep.node_path),
                 )
             if (not source_ep.local_path and not source_ep.conversion
                     and source_type != celltype):
@@ -1146,6 +1275,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if target_type != source_type and not source_ep.conversion:
                 raise _projected_source_type_error(
                     source_ep, source_type, target_type, target.node_path,
+                    root_type=self._node_celltype(source_ep.node_path),
                 )
         self._add_edge(
             source_ep.node_path + source_ep.local_path,
@@ -1192,12 +1322,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         else:
             self._check_authority(target_node, target_local)
         self._remove_edges_targeting(target_node, target_local, descendants=True)
-        self._graph.edges.append(
-            Edge(
-                tuple(source), tuple(target), source_celltype,
-                source_conversion, source_conversion_before, tuple(source_conversion_steps),
-            )
+        edge = Edge(
+            tuple(source), tuple(target), source_celltype,
+            source_conversion, source_conversion_before, tuple(source_conversion_steps),
         )
+        # cells.md, *Symbols*: the edge creates its anonymous links, so their
+        # symbols are assigned now, in arrival order.
+        self._graph.edges.append(self._graph.register_edge_symbols(edge))
         self._derive_all()
 
     def _would_cycle(self, source, target):
@@ -1247,16 +1378,28 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._graph.edges = kept
 
     def _incoming_edge(self, node_path, local):
+        """The incoming edge at ``local``, as its target derives and reports it.
+
+        A dummy edge from a single link is looked through (``ContextGraph.own_link``).
+        """
         for edge in self._graph.edges:
             try:
                 target_node, target_local = self._graph.resolve_existing(edge.target)
             except KeyError:
                 continue
             if target_node == node_path and target_local == tuple(local):
-                return edge
+                return self._graph.own_link(edge)
         return None
 
     def _incoming_for(self, node_path):
+        """The incoming edges by target path, as their target derives and reports them.
+
+        cells.md, *The input*: "A dummy edge from a single link is looked
+        through", so such an edge is the link itself, as the target's own
+        incoming edge -- the form ``get_graph()`` saves and ``set_graph()``
+        loads.  State derivation, ``.source`` and ``input_celltype`` all read
+        edges through here, so a running Context and a reloaded one agree.
+        """
         result = {}
         for edge in self._graph.edges:
             try:
@@ -1264,7 +1407,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             except KeyError:
                 continue
             if target_node == node_path:
-                result[target_local] = edge
+                result[target_local] = self._graph.own_link(edge)
         return result
 
     def _value_from_producer(self, producer):
@@ -1296,12 +1439,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             # The node owns its result, so its scratch policy decides.
             new_checksum.incref_refholder(scratch=self._node_scratch(node))
         node.current_checksum = new_checksum
-        for key in tuple(self._projection_errors):
-            if key[0] == node_path:
-                self._projection_errors.pop(key, None)
-        for key in tuple(self._projection_successes):
-            if key[0] == node_path:
-                self._projection_successes.pop(key, None)
         if old_checksum is not None:
             old_checksum.decref_refholder()
 
@@ -1326,7 +1463,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if node.kind == "transformer":
                 cfg = node.transformer_config
                 code_checksum = cfg.code_checksum
-                if code_checksum is not None:
+                if code_checksum is not None and self._incoming_edge(path, ("code",)) is None:
                     claims.append((code_checksum, f"transformer:{':'.join(path)}:code"))
                 for module_name, module in cfg.modules.items():
                     if isinstance(module, Checksum):
@@ -1339,6 +1476,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     claims.append((record.result_checksum, f"node:{':'.join(path)}:superseded:{record.generation}"))
         for symbol, (checksum, _scratch) in self._anonymous_current_refholds.items():
             claims.append((checksum, f"anonymous:{symbol}:current"))
+        for (path, pin), (checksum, _scratch) in self._edge_pin_refholds.items():
+            role = "code" if pin == "code" else f"pin:{pin}"
+            claims.append((checksum, f"transformer:{':'.join(path)}:{role}"))
         return claims
 
     def _release_refholds(self):
@@ -1348,6 +1488,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             checksum.decref_refholder()
         self._superseded_refholds.clear()
         self._anonymous_current_refholds.clear()
+        self._edge_pin_refholds.clear()
         self._refholds_released = True
 
     def _release_all_producers(self):
@@ -1373,6 +1514,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         # rather than making public state depend on lexical node names.
         self._sync_module_refholds()
         self._anonymous_current_updates = {}
+        self._edge_code_states = {}
         self._used_facts = set()
         visited, order = set(), []
         def visit(path):
@@ -1384,6 +1526,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             order.append(path)
         for path in sorted(self._graph.nodes): visit(path)
         for path in order: self._derive_node(path)
+        self._sync_edge_pin_refholds()
         self._sync_anonymous_current_refholds()
         for key in set(self._jobs) - self._used_facts:
             task = self._jobs.pop(key)
@@ -1412,22 +1555,83 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 checksum.incref_refholder(scratch=scratch)
                 self._superseded_refholds[record_id] = (checksum, scratch)
 
-    def _anonymous_symbol(self, recipe):
-        import hashlib
+    def _sync_edge_pin_refholds(self):
+        wanted = {}
+        for path, node in self._graph.nodes.items():
+            if node.kind != "transformer":
+                continue
+            for pin, (state, checksum, _error) in node.pin_states.items():
+                if state == "complete" and checksum is not None and self._incoming_edge(path, (pin,)) is not None:
+                    wanted[(path, pin)] = (
+                        checksum, self._edge_target_scratch(node, (pin,)))
+            code = self._edge_code_states.get(path)
+            if code is not None:
+                wanted[(path, "code")] = (
+                    code, self._edge_target_scratch(node, ("code",)))
+        old = self._edge_pin_refholds
+        acquired = []
+        try:
+            for key, (checksum, scratch) in wanted.items():
+                if old.get(key) != (checksum, scratch):
+                    checksum.incref_refholder(scratch=scratch)
+                    acquired.append(checksum)
+        except Exception:
+            for checksum in reversed(acquired):
+                checksum.decref_refholder()
+            raise
+        for key, (checksum, scratch) in old.items():
+            if wanted.get(key) != (checksum, scratch):
+                checksum.decref_refholder()
+        self._edge_pin_refholds = wanted
 
-        symbols = self._graph.anonymous_symbol_by_recipe
-        symbol = symbols.get(recipe)
-        if symbol is not None:
-            return symbol
-        used_symbols = {existing: old_recipe for old_recipe, existing in symbols.items()}
-        base = hashlib.sha1(repr(recipe).encode("utf-8")).hexdigest()[:5]
-        symbol = base
-        suffix = 1
-        while symbol in used_symbols and used_symbols[symbol] != recipe:
-            symbol = f"{base}-{suffix}"
-            suffix += 1
-        symbols[recipe] = symbol
-        return symbol
+    def _anonymous_symbol(self, edge, recipe, index=0):
+        """The symbol of ``edge``'s anonymous link at ``index``, innermost first.
+
+        It was assigned when the edge was added (``register_edge_symbols``), so
+        this is a lookup.  The stored recipe is used rather than ``recipe``,
+        which is recomputed from the current celltypes: a symbol and its
+        entry's celltype are fixed when the anonymous cell is created.
+        """
+        if len(edge.source_chain) > index:
+            recipe = edge.source_chain[index]
+        return self._graph.assign_symbol(recipe)
+
+    def _evaluate_deep_step(self, edge, source_node, checksum, root_type, local, deep, *, scratch,
+                            materialize=False, input_materializer=None):
+        """Evaluate the deep step of ``edge``'s source recipe; return the child.
+
+        ``deep`` is ``split_deep_step``'s answer.  The conversions before the
+        step and the step itself are separate Expressions (a deep step forms no
+        pair, expressions.md, *Fusion*), so their anonymous cells are not
+        elided: each one's result checksum is produced and held, unless the
+        step is the last link of the recipe (cells.md, *Anonymous cells,
+        symbols and elision*).
+        """
+        prefix, deep_type, member, rest_local, rest_steps = deep
+        current = root_type
+        for index, converted in enumerate(prefix):
+            if converted != current:
+                state, checksum, error = self._projection(
+                    checksum, (), current, converted, scratch=True,
+                    materialize=False,
+                    input_materializer=input_materializer if index == 0 else None)
+                if state != "complete":
+                    return state, None, error
+            symbol = self._anonymous_symbol(edge, (source_node, converted, ()), index=index)
+            self._anonymous_current_updates[symbol] = (normalize_checksum(checksum), True)
+            current = converted
+        step = tuple(local[:1])
+        state, child, error = self._projection(
+            checksum, step, deep_type, member,
+            scratch=scratch if not (rest_local or rest_steps) else True,
+            materialize=materialize if not (rest_local or rest_steps) else False,
+            input_materializer=input_materializer if not prefix else None)
+        if state != "complete":
+            return state, None, error
+        if rest_local or rest_steps:
+            symbol = self._anonymous_symbol(edge, (source_node, member, step), index=len(prefix))
+            self._anonymous_current_updates[symbol] = (normalize_checksum(child), True)
+        return "complete", child, None
 
     def _sync_anonymous_current_refholds(self):
         active = self._anonymous_current_updates
@@ -1473,11 +1677,17 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if edge is not None:
                 source_path, source_local = self._graph.resolve_existing(edge.source)
                 source_node = self._graph.nodes[source_path]
-                if (source_local and not edge.source_miswired and source_node.state == "complete"
+                if (source_local and source_node.state == "complete"
+                        and self._graph.edge_miswiring(edge) is None
                         and not edge.source_conversion_before and not edge.source_conversion):
-                    if (cfg.celltype not in {"deepcell", "deepfolder", "folder"}
-                            and self._node_celltype(source_path) != cfg.celltype
-                            and not edge.source_conversion):
+                    # One step below a deep parent, the source is the member
+                    # celltype (deep-celltypes.md, *Handles and writes one step
+                    # below a deep parent*); a deep link outside the deep tables
+                    # is statically ill-formed (cells.md, *Connecting*).
+                    if (_deep_recipe_error(self._node_celltype(source_path), source_local) is not None
+                            or (cfg.celltype not in {"deepcell", "deepfolder", "folder"}
+                                and self._celltype_for_path(source_path, source_local) != cfg.celltype
+                                and not edge.source_conversion)):
                         self._replace_current_checksum(path, None)
                         node.state, node.block_reason, node.exception = "miswired", None, None
                         return
@@ -1487,10 +1697,29 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     fused = self._fused_projection_source(source_path, source_local)
                     if fused is not None:
                         source_checksum, input_type, projection_path = fused
+                    input_materializer = (
+                        self._scratch_source_materializer(source_path)
+                        if source_checksum == source_node.current_checksum else None
+                    )
+                    member = _deep_barrier(input_type, projection_path, cfg.celltype)
+                    if member is not None:
+                        # The deep step is a fusion barrier, so its anonymous cell
+                        # is evaluated and held, not elided (cells.md, *Anonymous
+                        # cells, symbols and elision*); `_projection` below reuses
+                        # this evaluation for the step.
+                        step = tuple(projection_path[:1])
+                        child_state, child, _ = self._projection(
+                            source_checksum, step, input_type, member, scratch=True,
+                            input_materializer=input_materializer,
+                        )
+                        if child_state == "complete" and len(projection_path) > 1:
+                            symbol = self._anonymous_symbol(edge, (source_path, member, step))
+                            self._anonymous_current_updates[symbol] = (normalize_checksum(child), True)
                     state, checksum, error = self._projection(
                         source_checksum, projection_path,
                         input_type, cfg.celltype,
                         cfg.validator, cfg.validator_language, scratch=cfg.scratch,
+                        input_materializer=input_materializer,
                     )
                     self._replace_current_checksum(path, checksum)
                     node.state, node.block_reason, node.exception = state, None, error
@@ -1513,6 +1742,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     state, checksum, error = self._projection(
                         checksum, (), self._node_celltype(source_path), cfg.celltype,
                         cfg.validator, cfg.validator_language, scratch=cfg.scratch,
+                        input_materializer=self._scratch_source_materializer(source_path),
                     )
                     self._replace_current_checksum(path, checksum)
                     node.state, node.block_reason, node.exception = state, None, error
@@ -1593,21 +1823,43 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         for length in range(len(local), -1, -1):
             edge = incoming.get(tuple(local[:length]))
             if edge is not None:
-                source, source_local = self._graph.resolve_existing(edge.source)
-                if edge.source_conversion:
-                    return edge.source_celltype or self._node_celltype(source)
-                if source_local:
-                    return self._celltype_for_path(source, source_local)
-                return self._node_celltype(source)
+                return self._edge_input_celltype(edge)
         producer = node.cell_root_producer
         return producer.celltype if producer is not None else None
+
+    def _edge_input_celltype(self, edge):
+        """The celltype an incoming edge delivers: its source's, at the source path.
+
+        cells.md, *The input*: ``input_celltype`` is the celltype of whatever
+        ``.source`` resolves to, one lookup with it.  ``edge`` comes from
+        ``_incoming_for`` / ``_incoming_edge``, so a looked-through dummy edge
+        is already the link itself: it reports the link's own source, at that
+        source's celltype, exactly as after a save and reload.  An edge from
+        an anonymous cell reports that cell's recorded celltype.
+        """
+        source, source_local = self._graph.resolve_existing(edge.source)
+        if (source_local or edge.source_conversion) and edge.source_celltype is not None:
+            return edge.source_celltype
+        if source_local:
+            return self._celltype_for_path(source, source_local)
+        return self._node_celltype(source)
 
     def _public_cell_source(self, node_path, local):
         incoming = self._incoming_for(node_path)
         for length in range(len(local), -1, -1):
             edge = incoming.get(tuple(local[:length]))
             if edge is not None:
-                return self._public_source(edge.source)
+                source_path, source_local = self._graph.resolve_existing(edge.source)
+                source_node = self._graph.nodes[source_path]
+                backend = BoundCellBackend(
+                    self, source_path, source_local,
+                    readonly=source_node.kind != "cell",
+                    projected_celltype=edge.source_celltype,
+                    conversion=edge.source_conversion,
+                    conversion_before=edge.source_conversion_before,
+                    conversion_steps=edge.source_conversion_steps,
+                )
+                return Cell._from_backend(backend)
         return None
 
     def _node_celltype(self, path):
@@ -1615,18 +1867,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         return node.cell_config.celltype if node.kind == "cell" else node.transformer_config.celltypes.get("result", "mixed")
 
     def _celltype_for_path(self, path, local=()):
-        """Return the effective celltype of a node's projected handle."""
-        celltype = self._node_celltype(path)
-        if self._graph.nodes[path].kind != "cell":
-            return celltype
-        for component in local:
-            if isinstance(component, slice):
-                continue
-            if celltype == "deepcell":
-                celltype = "mixed"
-            elif celltype in {"deepfolder", "folder"}:
-                celltype = "bytes"
-        return celltype
+        """Return the effective celltype of a node's projected handle.
+
+        A transformer node is projected through its result, which may be deep
+        like any cell (deep-celltypes.md, *The output side*).
+        """
+        return projected_celltype(self._node_celltype(path), tuple(local))
 
     def _projected_path_celltype(self, celltype, component):
         if isinstance(component, slice):
@@ -1644,14 +1890,100 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             return bool(node.transformer_config.scratch)
         return False
 
-    def _projection(self, checksum, local, celltype, target_type=None, validator=None, validator_language=None,
-                    scratch=True):
-        """Evaluate one Expression; ``scratch`` is the owning cell's policy.
+    def _edge_target_scratch(self, target_node, target_local):
+        if target_node.kind == "cell":
+            return bool(target_node.cell_config.scratch)
+        if target_node.kind == "transformer":
+            return bool(target_node.transformer_config.meta.get("allow_input_fingertip"))
+        return False
 
-        A non-scratch projection asks for the bytes, so a dispatched one is
-        materialized and written by the executing side.
+    def _feeds_non_scratch_holder(self, path):
+        # A holder overrules a scratch producer only while its result is the
+        # holder's own buffer. Paths and buffer-producing conversions end that
+        # checksum-preserving walk.
+        from seamless.checksum.conversion import conversion_trivial, conversion_reinterpret
+
+        preserving = conversion_trivial | conversion_reinterpret
+        visited = {path}
+        stack = [path]
+        while stack:
+            current = stack.pop()
+            for edge in self._graph.edges:
+                try:
+                    source, source_local = self._graph.resolve_existing(edge.source)
+                    target, local = self._graph.resolve_existing(edge.target)
+                except KeyError:
+                    continue
+                if source != current:
+                    continue
+                if source_local:
+                    continue
+                source_type = self._node_celltype(source)
+                steps = edge.source_conversion_steps
+                if edge.source_conversion and not steps:
+                    steps = ((0, edge.source_celltype or source_type),)
+                if any((left, right) not in preserving and left != right
+                       for left, right in zip(
+                           (source_type,) + tuple(step[1] for step in steps[:-1]),
+                           tuple(step[1] for step in steps),
+                       )):
+                    continue
+                output_type = steps[-1][1] if steps else source_type
+                node = self._graph.nodes[target]
+                if node.kind == "transformer":
+                    pin_type = node.transformer_config.celltypes.get(local[0], "mixed")
+                    if output_type != pin_type and (output_type, pin_type) not in preserving:
+                        continue
+                    if not self._edge_target_scratch(node, local):
+                        return True
+                elif node.kind == "cell":
+                    if local:
+                        continue
+                    cell_type = node.cell_config.celltype
+                    if output_type != cell_type and (output_type, cell_type) not in preserving:
+                        continue
+                    if not node.cell_config.scratch:
+                        return True
+                    if target not in visited:
+                        visited.add(target)
+                        stack.append(target)
+        return False
+
+    def _projection(self, checksum, local, celltype, target_type=None, validator=None, validator_language=None,
+                    scratch=True, materialize=False, input_expression=None,
+                    input_materializer=None):
+        """Evaluate one Expression under its edge target's scratch policy.
+
+        ``materialize`` asks for reachable bytes when the target is a
+        non-scratch transformer pin. A cell edge asks for a checksum.
+
+        A path that crosses a deep step is two Expressions: the step yields the
+        child checksum, and the rest is evaluated over that child
+        (expressions.md, *Fusion*: a deep step is a barrier and forms no pair).
         """
         target_type = target_type or celltype
+        local = tuple(local)
+        member = _deep_barrier(celltype, local, target_type)
+        if member is not None:
+            state, child, error = self._projection(checksum, local[:1], celltype, member,
+                                                   scratch=True, materialize=False,
+                                                   input_expression=input_expression,
+                                                   input_materializer=input_materializer)
+            if state != "complete":
+                return state, child, error
+            try:
+                first = Expression(
+                    input_expression or checksum, path=_path_string(local[:1]),
+                    input_celltype=celltype, celltype=member,
+                )
+            except (TypeError, ValueError) as exc:
+                from .errors import execution_error
+
+                return "failed", None, execution_error(exc)
+            return self._projection(
+                child, local[1:], member, target_type, validator, validator_language,
+                scratch=scratch, materialize=materialize, input_expression=first,
+            )
         try:
             Expression(
                 checksum,
@@ -1665,18 +1997,34 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             from .errors import execution_error
 
             return "failed", None, execution_error(exc)
-        if not local and validator is None and celltype == "text" and target_type == "mixed":
-            from .adapters import checksum_for_value
-            value = checksum.resolve("mixed")
-            return "complete", checksum_for_value(value, "mixed", checksum_is_value=True), None
         # Python slices are represented as strings in the content key.
         key = ("expression", checksum.hex(), _path_string(local), celltype, target_type,
                validator.hex() if isinstance(validator, Checksum) else validator, validator_language,
-               bool(scratch))
+               bool(scratch), bool(materialize))
         state, result, error = self._demand(key, evaluate_projection,
-            (checksum, tuple(local), celltype, target_type, validator, validator_language, bool(scratch)),
+            (checksum, tuple(local), celltype, target_type, validator,
+             validator_language, bool(scratch), bool(materialize), input_expression,
+             input_materializer),
             [checksum])
         return state, result, error
+
+    def _path_expression(self, source, input_type, path, celltype):
+        """Build ``path`` over ``source`` as an Expression, never fusing across a deep step.
+
+        When ``path`` crosses a deep step, the step is its own Expression and
+        the rest is a separate Expression over the child checksum
+        (expressions.md, *Fusion*).
+        """
+        path = tuple(path)
+        member = _deep_barrier(input_type, path, celltype)
+        if member is not None:
+            source = Expression(
+                source, path=_path_string(path[:1]), input_celltype=input_type, celltype=member,
+            )
+            input_type, path = member, path[1:]
+            if not path and celltype == member:
+                return source
+        return Expression(source, path=_path_string(path), input_celltype=input_type, celltype=celltype)
 
     def _demand(self, key, function, args, checksums):
         self._used_facts.add(key)
@@ -1704,7 +2052,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             softcancel_expression,
                         )
 
-                        cs, local, ct, target, validator, validator_language, scratch = args
+                        cs, local, ct, target, validator, validator_language, scratch, materialize, input_expression, input_materializer = args
+                        materialize_input = input_materializer
+                        if input_expression is not None:
+                            async def materialize_input():
+                                return await input_expression._evaluate_internal_async(
+                                    execution="local", scratch=True, materialize=True,
+                                )
                         try:
                             checksum = await evaluate_expression_placed(
                                 cs,
@@ -1716,10 +2070,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                                 execution=execution,
                                 member_id=key,
                                 scratch=scratch,
-                                # A checksum request: any recorded checksum
-                                # answers it; scratch only makes a dispatched
-                                # evaluation write its result.
-                                materialize=False,
+                                materialize=materialize,
+                                materialize_input=materialize_input,
                             )
                             if checksum is None:
                                 raise KeyError(_path_string(local))
@@ -1773,17 +2125,71 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._jobs.pop(key, None)
         self._derive_all()
 
+    def _scratch_source_materializer(self, source_node):
+        """Return local recomputation for a scratch named source, if it has one."""
+        node = self._graph.nodes[source_node]
+        if node.kind == "cell":
+            incoming = self._incoming_for(source_node)
+            if not node.cell_config.scratch or not incoming:
+                return None
+            from seamless.cell_class import _UNSET
+
+            expression = self._build_cell_expression(source_node, (), _UNSET)
+            upstream_materializer = None
+            if set(incoming) == {()}:
+                upstream_path, _ = self._graph.resolve_existing(incoming[()].source)
+                if upstream_path != source_node:
+                    upstream_materializer = self._scratch_source_materializer(upstream_path)
+
+            async def materialize_cell():
+                if upstream_materializer is not None:
+                    await upstream_materializer()
+                return await expression._evaluate_internal_async(
+                    execution="local", scratch=True, materialize=True,
+                )
+
+            return materialize_cell
+        if node.kind == "transformer" and node.transformer_config.scratch:
+            from dataclasses import replace
+
+            frozen = replace(
+                self._freeze_transformer(source_node),
+                local=True, scratch=True, signature=None,
+            )
+
+            async def materialize_transformer():
+                from seamless_transformer.transformer_class import PythonBashBaseTransformer
+
+                try:
+                    builder = PythonBashBaseTransformer.__new__(PythonBashBaseTransformer)
+                    transformation = builder._build_from_frozen(frozen)
+                    result = await transformation.computation(require_value=True)
+                    if result is None:
+                        raise RuntimeError(transformation.exception or "Transformation failed")
+                    return result
+                finally:
+                    for lease in frozen.leases:
+                        lease._release_refholds()
+
+            return materialize_transformer
+        return None
+
     def _source_state(self, edge):
         self._edge_errors.pop(edge.target, None)
-        if edge.source_miswired:
-            return "blocked-by-miswiring", None
+        # cells.md, *The handle and the node*: an anonymous cell whose recorded
+        # celltype its source no longer projects to is `miswired`, and what it
+        # feeds is blocked; a looked-through single link (``_incoming_for``)
+        # is the target's own, so its defect is too.  The ordinary
+        # target-side comparisons below apply to it as to any own edge.
+        miswiring = self._graph.edge_miswiring(edge)
+        if miswiring is not None:
+            return miswiring, None
         source_node, source_local = self._graph.resolve_existing(edge.source)
         node = self._graph.nodes[source_node]
         target_path, target_local = self._graph.resolve_existing(edge.target)
         target_node = self._graph.nodes[target_path]
-        # A transformer's pin or code edge is input-side: what it dispatches is
-        # written by the executing side (checksum-reference-lifecycle.md, §1).
-        edge_scratch = target_node.kind != "transformer"
+        edge_scratch = self._edge_target_scratch(target_node, target_local)
+        materialize = target_node.kind == "transformer" and not edge_scratch
         root_type = self._node_celltype(source_node)
         if source_local:
             source_type = edge.source_celltype or self._celltype_for_path(
@@ -1819,6 +2225,24 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 validate_expression_shape("", source_type, target_type)
             except (TypeError, ValueError):
                 return "miswired", None
+        if (not source_local and target_node.kind == "cell" and not target_local
+                and source_type != target_type
+                and (source_type in _DEEP_CELLTYPES or target_type in _DEEP_CELLTYPES)):
+            # A cell's implicit conversion of a pathless deep link is held to
+            # the deep table (deep-celltypes.md, *Bound wiring around the
+            # step*); outside it the link is statically ill-formed.
+            from seamless.checksum.expression import validate_expression_shape
+
+            try:
+                validate_expression_shape("", source_type, target_type)
+            except (TypeError, ValueError):
+                return "miswired", None
+        conversion_steps = edge.source_conversion_steps
+        if edge.source_conversion and not conversion_steps:
+            position = 0 if edge.source_conversion_before else len(source_local)
+            conversion_steps = ((position, source_type),)
+        if _deep_recipe_error(root_type, source_local, conversion_steps) is not None:
+            return "miswired", None
         if node.state == 'miswired' or node.block_reason == 'blocked-by-miswiring':
             return 'blocked-by-miswiring', None
         if node.state != "complete":
@@ -1831,144 +2255,83 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 if "blocked-by-error" in reasons:
                     return "failed", None
             return ("failed" if node.block_reason == "blocked-by-error" else node.state), None
-        conversion_steps = edge.source_conversion_steps
-        if edge.source_conversion and not conversion_steps:
-            position = 0 if edge.source_conversion_before else len(source_local)
-            conversion_steps = ((position, source_type),)
-        if conversion_steps:
-            root_checksum = node.current_checksum
-            checksum = root_checksum
+        root_checksum = node.current_checksum
+        root_materializer = self._scratch_source_materializer(source_node)
+        # Index into the edge's anonymous links of the first link evaluated below.
+        chain_offset = 0
+        deep = split_deep_step(root_type, source_local, conversion_steps)
+        if deep is not None:
+            # deep-celltypes.md, *Paths*: the step yields the child checksum, and
+            # the rest of the recipe is ordinary wiring over that child.
             if root_checksum is None:
                 return "unwired", None
+            state, root_checksum, error = self._evaluate_deep_step(
+                edge, source_node, root_checksum, root_type, source_local, deep,
+                scratch=edge_scratch,
+                materialize=materialize,
+                input_materializer=root_materializer,
+            )
+            if state != "complete":
+                if error is not None:
+                    self._edge_errors[edge.target] = error
+                return state, None
+            prefix, _deep_type, root_type, source_local, conversion_steps = deep
+            chain_offset = len(prefix) + 1
+        if conversion_steps:
+            if root_checksum is None:
+                return "unwired", None
+            checksum = root_checksum
             current_type = root_type
-            path_index = 0
-            for step_index, (position, converted_type) in enumerate(conversion_steps):
-                position = min(position, len(source_local))
-                segment = source_local[path_index:position]
-                elided = current_type == "mixed" and converted_type == "plain"
-                if segment:
-                    if not elided:
-                        Expression(
-                            checksum,
-                            path=_path_string(segment),
-                            input_celltype=current_type,
-                            celltype=converted_type,
-                        )
-                    if elided:
-                        state, checksum, error = self._projection(
-                            checksum, segment, current_type, current_type,
-                            scratch=edge_scratch,
-                        )
-                    else:
-                        state, checksum, error = self._projection(
-                            checksum, segment, current_type, converted_type,
-                            scratch=edge_scratch,
-                        )
-                    if state != "complete":
-                        if error is not None:
-                            self._edge_errors[edge.target] = error
-                        return state, None
-                    if step_index == 0 and not elided:
-                        if position == 0:
-                            anonymous_path = ()
-                            anonymous_type = converted_type
-                            anonymous_checksum = checksum
-                        else:
-                            anonymous_path = source_local[:position]
-                            anonymous_type = self._celltype_for_path(source_node, anonymous_path)
-                            anonymous_state, anonymous_checksum, _ = self._projection(
-                                root_checksum,
-                                anonymous_path,
-                                root_type,
-                                anonymous_type,
-                            )
-                            if anonymous_state != "complete":
-                                anonymous_checksum = None
-                        if anonymous_checksum is not None:
-                            try:
-                                from .adapters import checksum_for_value, value_for_checksum
+            recipe = root_checksum
+            links = anonymous_links(root_type, source_local, conversion_steps)
+            for index, (next_type, path) in enumerate(links):
+                last = index == len(links) - 1
+                previous = recipe if isinstance(recipe, Expression) else None
+                try:
+                    recipe = Expression(
+                        recipe, path=_path_string(path),
+                        input_celltype=current_type, celltype=next_type,
+                    )
+                except (TypeError, ValueError) as exc:
+                    from .errors import execution_error
 
-                                anonymous_value = value_for_checksum(anonymous_checksum, anonymous_type)
-                                anonymous_checksum = checksum_for_value(
-                                    anonymous_value,
-                                    anonymous_type,
-                                    checksum_is_value=True,
-                                )
-                            except Exception:
-                                pass
-                            symbol = self._anonymous_symbol((
-                                source_node,
-                                anonymous_type,
-                                tuple(anonymous_path),
-                            ))
-                            self._anonymous_current_updates[symbol] = (
-                                normalize_checksum(anonymous_checksum),
-                                True,
-                            )
-                    current_type = converted_type
-                    path_index = position
-                elif converted_type != current_type:
-                    if not elided:
-                        Expression(
-                            checksum,
-                            input_celltype=current_type,
-                            celltype=converted_type,
-                        )
-                    if elided:
-                        state, error = "complete", None
-                    else:
-                        state, checksum, error = self._projection(
-                            checksum, (), current_type, converted_type,
-                            scratch=edge_scratch,
-                        )
-                    if state != "complete":
-                        if error is not None:
-                            self._edge_errors[edge.target] = error
-                        return state, None
-                    if step_index == 0 and not elided:
-                        anonymous_checksum = checksum
-                        try:
-                            from .adapters import checksum_for_value, value_for_checksum
-
-                            anonymous_value = value_for_checksum(checksum, converted_type)
-                            anonymous_checksum = checksum_for_value(
-                                anonymous_value,
-                                converted_type,
-                                checksum_is_value=True,
-                            )
-                        except Exception:
-                            pass
-                        symbol = self._anonymous_symbol((source_node, converted_type, ()))
-                        self._anonymous_current_updates[symbol] = (
-                            normalize_checksum(anonymous_checksum),
-                            True,
-                        )
-                    current_type = converted_type
-            while path_index < len(source_local):
-                component = source_local[path_index]
-                next_type = self._projected_path_celltype(current_type, component)
+                    self._edge_errors[edge.target] = execution_error(exc)
+                    return "failed", None
                 state, checksum, error = self._projection(
-                    checksum, (component,), current_type, next_type,
-                    scratch=edge_scratch,
+                    checksum, path, current_type, next_type,
+                    scratch=edge_scratch if last else True,
+                    materialize=materialize if last else False,
+                    input_expression=previous,
+                    input_materializer=root_materializer if index == 0 else None,
                 )
                 if state != "complete":
                     if error is not None:
                         self._edge_errors[edge.target] = error
                     return state, None
+                if not last:
+                    symbol = self._anonymous_symbol(
+                        edge, (source_node, next_type, path),
+                        index=chain_offset + index,
+                    )
+                    self._anonymous_current_updates[symbol] = (
+                        normalize_checksum(checksum), True,
+                    )
                 current_type = next_type
-                path_index += 1
             return "complete", checksum
         if source_local:
             return self._projection(
-                node.current_checksum, source_local, self._node_celltype(source_node),
+                root_checksum, source_local, root_type,
+                projected_celltype(root_type, source_local),
                 scratch=edge_scratch,
+                materialize=materialize,
+                input_materializer=root_materializer,
             )[:2]
-        return "complete", node.current_checksum
+        return "complete", root_checksum
 
     def _apply_pending(self, node, edges, *, join=False):
         states = [self._source_state(edge)[0] for edge in edges]
         reason_for = {
-            "miswired": "blocked-by-miswiring",
+            "miswired": "miswired",
             "blocked-by-miswiring": "blocked-by-miswiring",
             "failed": "blocked-by-error",
             "blocked": "blocked-by-unwired",
@@ -1988,7 +2351,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 scalar_reason = reason
         if join:
             node.block_reason = reasons or None
-            node.state = "blocked" if reasons else "waiting"
+            if "miswired" in reasons.values():
+                node.state = "miswired"
+            elif "unwired" in reasons.values():
+                node.state = "unwired"
+            else:
+                node.state = "blocked" if reasons else "waiting"
         else:
             node.block_reason = scalar_reason
             node.state = "blocked" if scalar_reason is not None else "waiting"
@@ -2040,31 +2408,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             target_type=self._celltype_for_path(node_path, local),
             scratch=node.cell_config.scratch,
         )[1]
-
-    def _cell_endpoint_parent_state(self, node_path):
-        return self._graph.nodes[node_path].state
-
-    def _record_projection_error(self, node_path, local, error, handle_id=None):
-        self._projection_errors[(tuple(node_path), tuple(local), handle_id)] = error
-
-    def _projection_error(self, node_path, local, handle_id=None):
-        return self._projection_errors.get((tuple(node_path), tuple(local), handle_id))
-
-    def _record_projection_success(self, node_path, local, parent_checksum, handle_id=None):
-        self._projection_successes[(tuple(node_path), tuple(local), handle_id)] = parent_checksum
-
-    def _projection_state(self, node_path, local, handle_id=None):
-        node = self._graph.nodes[node_path]
-        key = (tuple(node_path), tuple(local), handle_id)
-        if key in self._projection_successes and self._projection_successes[key] == (
-                node.current_checksum.hex() if node.current_checksum is not None else None):
-            return "complete"
-        return "waiting" if node.state == "complete" else node.state
-
-    def _clear_projection_error(self, node_path, local, handle_id=None):
-        key = (tuple(node_path), tuple(local), handle_id)
-        self._projection_errors.pop(key, None)
-        self._projection_successes.pop(key, None)
 
     def _record_node_error(self, node_path, error):
         self._replace_current_checksum(node_path, None)
@@ -2136,13 +2479,24 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         return result
 
     def _build_cell_expression(self, node_path, local, input_ref, *,
-                               _handle_id=None, _target_celltype=None,
+                               _target_celltype=None,
                                _conversion=False, _conversion_steps=()):
         from seamless.cell_class import _UNSET, _typed_input_celltype
         node = self._graph.nodes[node_path]
         node_celltype = self._node_celltype(node_path)
         celltype = _target_celltype or self._celltype_for_path(node_path, local)
         input_type = node_celltype
+        if _target_celltype is not None:
+            # A handle starts at its parent node.  Its upstream wiring has
+            # already produced that node's checksum and is a fusion boundary.
+            if input_ref is _UNSET:
+                input_ref = node.current_checksum
+                input_type = node_celltype
+            else:
+                input_type = _typed_input_celltype(input_ref) or node_celltype
+            return self._build_conversion_expression(
+                input_ref, input_type, local, _conversion_steps, celltype,
+            )
         if (
             input_ref is _UNSET
             and local
@@ -2154,31 +2508,26 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             fused = self._fused_projection_source(node_path, local)
             if fused is not None:
                 checksum, input_type, fused_path = fused
-                return Expression(
-                    checksum,
-                    path=_path_string(fused_path),
-                    input_celltype=input_type,
-                    celltype=celltype,
-                )
+                return self._path_expression(checksum, input_type, fused_path, celltype)
         if input_ref is _UNSET:
             if node.cell_root_expression is not None:
                 expression = node.cell_root_expression
                 if local:
-                    return Expression(
-                        expression,
-                        path=_path_string(tuple(local)),
-                        input_celltype=expression.celltype,
-                        celltype=celltype,
+                    return self._path_expression(
+                        expression, expression.celltype, tuple(local), celltype,
                     )
                 return expression
             incoming = self._incoming_for(node_path)
             if set(incoming) == {()}:
                 edge = incoming[()]
                 source_path, source_local = self._graph.resolve_existing(edge.source)
-                if edge.source_celltype is not None:
+                if edge.source_celltype is not None or source_local:
+                    # A projection edge that records no celltype -- one saved
+                    # and reloaded, or a looked-through single link
+                    # (``_incoming_for``) -- builds exactly like a live one.
                     checksum = self._get_checksum(source_path, ())
                     root_type = self._node_celltype(source_path)
-                    source_type = edge.source_celltype
+                    source_type = self._edge_input_celltype(edge)
                     if edge.source_conversion_steps or edge.source_conversion:
                         steps = edge.source_conversion_steps
                         if edge.source_conversion and not steps:
@@ -2191,24 +2540,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                         fused = self._fused_projection_source(source_path, source_local)
                         if fused is not None:
                             checksum, input_type, fused_path = fused
-                            return Expression(
-                                checksum,
-                                path=_path_string(fused_path),
-                                input_celltype=input_type,
-                                celltype=celltype,
-                            )
+                            return self._path_expression(checksum, input_type, fused_path, celltype)
                     upstream = self._incoming_for(source_path).get(())
                     if (source_local and upstream is not None
                             and upstream.source_celltype is not None
                             and upstream.source_celltype != root_type):
                         upstream_type = upstream.source_celltype
-                        if upstream_type == "mixed" and root_type == "plain":
-                            return Expression(
-                                checksum,
-                                path=_path_string(source_local),
-                                input_celltype=upstream_type,
-                                celltype=celltype,
-                            )
                         base = Expression(
                             checksum,
                             input_celltype=upstream_type,
@@ -2221,13 +2558,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             celltype=celltype,
                         )
                     if edge.source_conversion_before and source_local:
-                        if root_type == "mixed" and source_type == "plain":
-                            return Expression(
-                                checksum,
-                                path=_path_string(source_local),
-                                input_celltype=root_type,
-                                celltype=celltype,
-                            )
                         base = Expression(
                             checksum,
                             input_celltype=root_type,
@@ -2240,6 +2570,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             celltype=celltype,
                         )
                     if source_local:
+                        if root_type in _DEEP_CELLTYPES:
+                            # The path is read at the deep index's celltype, not
+                            # at the member celltype the edge reports.
+                            return self._path_expression(checksum, root_type, source_local, celltype)
                         return Expression(
                             checksum,
                             path=_path_string(source_local),
@@ -2265,70 +2599,48 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 input_ref, input_type, local, _conversion_steps, celltype
             )
         base_celltype = _target_celltype if _conversion and _target_celltype else node_celltype
+        if (isinstance(input_ref, Expression) and not local and input_type == base_celltype
+                and input_ref.input_celltype in _DEEP_CELLTYPES):
+            # A deep step forms no pair, so the Expression constructor will not
+            # absorb an identity wrapper into it: the step is the recipe.
+            return input_ref
         expression = Expression(input_ref, input_celltype=input_type, celltype=base_celltype)
         if local:
-            return Expression(
-                expression,
-                path=_path_string(tuple(local)),
-                input_celltype=base_celltype,
-                celltype=celltype,
-            )
+            return self._path_expression(expression, base_celltype, tuple(local), celltype)
         return expression
 
     def _build_conversion_expression(self, checksum, root_type, local, steps, final_type):
-        """Build a recipe for a handle whose conversions and path are interleaved."""
+        """Build a recipe without evaluating any intermediate link."""
         current = checksum
         current_type = root_type
         path_index = 0
-        elided_output_type = None
-        conversion_count = 0
-        steps = tuple(sorted(steps, key=lambda item: item[0]))
-
-        def project(component):
-            nonlocal current, current_type, elided_output_type, conversion_count
-            if conversion_count and isinstance(current, Expression):
-                current = current.compute()
-                conversion_count = 0
-            next_type = elided_output_type or self._projected_path_celltype(current_type, component)
-            current = Expression(
-                current,
-                path=_path_string((component,)),
-                input_celltype=current_type,
-                celltype=next_type,
+        for position, converted_type in sorted(steps, key=lambda item: item[0]):
+            position = min(position, len(local))
+            segment = tuple(local[path_index:position])
+            if segment:
+                next_type = projected_celltype(current_type, segment)
+                current = self._path_expression(
+                    current, current_type, segment, next_type,
+                )
+                current_type = next_type
+                path_index = position
+            if converted_type != current_type:
+                current = Expression(
+                    current,
+                    input_celltype=current_type,
+                    celltype=converted_type,
+                )
+                current_type = converted_type
+        segment = tuple(local[path_index:])
+        if segment:
+            next_type = projected_celltype(current_type, segment)
+            current = self._path_expression(
+                current, current_type, segment, next_type,
             )
             current_type = next_type
-            elided_output_type = None
-
-        for position, converted_type in steps:
-            while path_index < position and path_index < len(local):
-                project(local[path_index])
-                path_index += 1
-            if converted_type != current_type:
-                if current_type == "mixed" and converted_type == "plain":
-                    if path_index == 0 and not isinstance(current, Expression):
-                        current_type = converted_type
-                    else:
-                        elided_output_type = converted_type
-                else:
-                    if conversion_count and isinstance(current, Expression):
-                        current = current.compute()
-                    current = Expression(
-                        current,
-                        input_celltype=current_type,
-                        celltype=converted_type,
-                    )
-                    current_type = converted_type
-                    conversion_count += 1
-        while path_index < len(local):
-            project(local[path_index])
-            path_index += 1
         if current_type != final_type:
-            if conversion_count and isinstance(current, Expression):
-                current = current.compute()
             current = Expression(
-                current,
-                input_celltype=current_type,
-                celltype=final_type,
+                current, input_celltype=current_type, celltype=final_type,
             )
         if isinstance(current, Expression):
             return current
@@ -2339,13 +2651,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         checksum = self._get_checksum(node_path, ())
         if checksum is None:
             raise ValueUnavailableError(f"Source {source!r} is not current")
-        node = self._graph.nodes[node_path]
         input_celltype = self._node_celltype(node_path)
-        return Expression(
-            checksum,
-            path=_path_string(local),
-            input_celltype=input_celltype,
-            celltype=self._celltype_for_path(node_path, local),
+        return self._path_expression(
+            checksum, input_celltype, local, self._celltype_for_path(node_path, local),
         )
 
     def _fused_projection_source(self, node_path, local):
@@ -2489,86 +2797,46 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if runtime:
                 entry["runtime"] = {"state": node.state, "block_reason": node.block_reason, "checksum": node.current_checksum.hex() if node.current_checksum else None, "exception": type(node.exception).__name__ if node.exception else None, "run": self._runtime_graph_entry(path)}
             nodes.append(entry)
-        import hashlib
         connections = []
         anonymous_nodes = {}
-        symbols = self._graph.anonymous_symbol_by_recipe
-        used_symbols = {symbol: recipe for recipe, symbol in symbols.items()}
 
-        def symbol_for(recipe):
-            symbol = symbols.get(recipe)
-            if symbol is None:
-                base = hashlib.sha1(repr(recipe).encode("utf-8")).hexdigest()[:5]
-                symbol = base
-                suffix = 1
-                while symbol in used_symbols and used_symbols[symbol] != recipe:
-                    symbol = f"{base}-{suffix}"
-                    suffix += 1
-                symbols[recipe] = symbol
-                used_symbols[symbol] = recipe
-            return symbol
-
-        def projected_celltype(celltype, path):
-            for component in path:
-                if isinstance(component, slice):
-                    continue
-                if celltype == "deepcell":
-                    celltype = "mixed"
-                elif celltype in {"deepfolder", "folder"}:
-                    celltype = "bytes"
-            return celltype
-
-        def add_live_entry(source_ref, source_key, celltype, path):
-            recipe = (source_key, celltype, tuple(path))
-            symbol = symbol_for(recipe)
-            anonymous_nodes[symbol] = {
-                "source": source_ref,
-                "celltype": celltype,
-                "path": _path_string(tuple(path)),
-            }
-            return {"symbol": symbol}, symbol
-
-        def add_anonymous_chain(source_node, local_path, conversion_steps=()):
-            source_ref = {"node": list(source_node)}
-            source_key = source_node
-            current_celltype = self._node_celltype(source_node)
-            position = 0
-            for step_position, converted_celltype in sorted(conversion_steps):
-                step_position = min(max(step_position, position), len(local_path))
-                path_segment = local_path[position:step_position]
-                if path_segment:
-                    current_celltype = projected_celltype(current_celltype, path_segment)
-                    source_ref, source_key = add_live_entry(
-                        source_ref, source_key, current_celltype, path_segment
-                    )
-                source_ref, source_key = add_live_entry(
-                    source_ref, source_key, converted_celltype, ()
-                )
-                current_celltype = converted_celltype
-                position = step_position
-            path_segment = local_path[position:]
-            if path_segment:
-                current_celltype = projected_celltype(current_celltype, path_segment)
-                source_ref, source_key = add_live_entry(
-                    source_ref, source_key, current_celltype, path_segment
-                )
+        def add_anonymous_chain(chain):
+            # cells.md, *Which entries are serialized*: an entry is written
+            # because an edge, or another written entry, names it.  Symbols
+            # were assigned when the edge was added; here they are looked up.
+            source_ref = None
+            for recipe in chain:
+                source_key, celltype, path = recipe
+                symbol = self._graph.symbol_of(recipe)
+                anonymous_nodes[symbol] = {
+                    "source": (
+                        {"node": list(source_key)}
+                        if isinstance(source_key, tuple)
+                        else {"symbol": source_key}
+                    ),
+                    "celltype": celltype,
+                    "path": _path_string(tuple(path)),
+                }
+                source_ref = {"symbol": symbol}
             return source_ref
 
-        live_handles = {
-            backend
-            for siblings in self._anonymous_handle_backends.values()
-            for backend in tuple(siblings)
-        }
-        for backend in live_handles:
-            if backend._stale or backend.node_path not in self._graph.nodes:
-                continue
-            add_anonymous_chain(
-                backend.node_path, backend.local_path, backend._conversion_steps
-            )
-
         for edge in sorted(self._graph.edges, key=lambda e: (e.source, e.target)):
+            if edge.source_conversion or self._graph.resolve_existing(edge.source)[1]:
+                # An edge with anonymous links registered their symbols when
+                # it was added; a miss means that a call site was missed.
+                assert edge.source_chain, (
+                    f"edge to {edge.target!r} was added without register_edge_symbols()"
+                )
+                for recipe in edge.source_chain:
+                    self._graph.symbol_of(recipe)
             connection = {"type": "connection", "target": list(edge.target)}
-            if not edge.source_conversion:
+            # cells.md, *Which entries are serialized*: a dummy edge from a
+            # single link that reads directly from a named node is saved as
+            # the target's own incoming link, which a running Context already
+            # looks it through as (``_incoming_for``).  A chain is saved as it
+            # is; a path that crosses a deep step is a chain of two links (the
+            # step is a fusion barrier).
+            if not edge.source_chain or self._graph.collapses_on_save(edge):
                 target_node, _ = self._graph.resolve_existing(edge.target)
                 if self._graph.nodes[target_node].kind == "cell":
                     source_node, source_local = self._graph.resolve_existing(edge.source)
@@ -2582,14 +2850,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 else:
                     connection["source"] = list(edge.source)
             else:
-                source_node, source_local = self._graph.resolve_existing(edge.source)
-                steps = edge.source_conversion_steps
-                if not steps:
-                    position = 0 if edge.source_conversion_before else len(source_local)
-                    steps = ((position, edge.source_celltype or self._node_celltype(source_node)),)
-                connection["source"] = add_anonymous_chain(
-                    source_node, source_local, steps
-                )
+                connection["source"] = add_anonymous_chain(edge.source_chain)
             connections.append(connection)
         return {
             "__seamless_workflow__": "0.5",
@@ -2678,9 +2939,26 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 )
             if copied_node.kind == "transformer":
                 self._retain_code_checksum(copied_path, copied_node.transformer_config.code_checksum)
+        from dataclasses import replace
+
         for edge in list(self._graph.edges):
             if edge.source[:len(source_prefix)] == source_prefix and edge.target[:len(source_prefix)] == source_prefix:
-                self._graph.edges.append(Edge(target_prefix + edge.source[len(source_prefix):], target_prefix + edge.target[len(source_prefix):]))
+                # Keep source_celltype and the conversion fields: the copy
+                # converts exactly as the original does.
+                copied = replace(
+                    edge,
+                    source=target_prefix + edge.source[len(source_prefix):],
+                    target=target_prefix + edge.target[len(source_prefix):],
+                    source_chain=(),
+                )
+                if edge.source_chain:
+                    # The same links, now hanging off the copied source node.
+                    source_node, _ = self._graph.resolve_existing(copied.source)
+                    links = [(celltype, path) for _, celltype, path in edge.source_chain]
+                    copied = replace(
+                        copied, source_chain=self._graph.assign_chain(source_node, links)
+                    )
+                self._graph.edges.append(self._graph.register_edge_symbols(copied))
         self._derive_all()
 
 

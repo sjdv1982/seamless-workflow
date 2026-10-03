@@ -46,6 +46,8 @@ class Reactive:
 
         if ('code',) in incoming:
             state, code = self._source_state(incoming[('code',)])
+            if state == 'complete' and code is not None:
+                self._edge_code_states[path] = code
             if state != 'complete':
                 unavailable('code', state)
         elif code is None:
@@ -63,15 +65,7 @@ class Reactive:
                     node.pin_states[pin] = ('blocked' if state in {'failed', 'blocked', 'unwired', 'blocked-by-miswiring'} else state, None, None)
                     unavailable(pin, state)
                     continue
-                source_node, source_local = self._graph.resolve_existing(edge.source)
-                if source_local:
-                    input_type = edge.source_celltype or self._celltype_for_path(
-                        source_node, source_local
-                    )
-                elif edge.source_conversion:
-                    input_type = edge.source_celltype or self._node_celltype(source_node)
-                else:
-                    input_type = self._node_celltype(source_node)
+                input_type = self._edge_input_celltype(edge)
             else:
                 producer = node.transformer_pin_producers.get(pin)
                 checksum = producer.checksum if producer else None
@@ -102,10 +96,10 @@ class Reactive:
                 unavailable(pin, 'failed')
                 continue
             if input_type != output_type:
-                # Input-side: a dispatched pin conversion is written by the
-                # executing side (checksum-reference-lifecycle.md, §1).
+                scratch = bool(cfg.meta.get('allow_input_fingertip')) and edge is not None
                 state, checksum, error = self._projection(
-                    checksum, (), input_type, output_type, scratch=False
+                    checksum, (), input_type, output_type,
+                    scratch=scratch, materialize=not scratch,
                 )
                 if compiled and error is not None:
                     error = ValueError(f"Pin {pin!r} conversion from {input_type!r} to {output_type!r}: {error}")
@@ -168,12 +162,31 @@ class Reactive:
             return
         key = (code.hex(), tuple((pin, cs.hex()) for pin, cs in sorted(pins.items())), cfg.config_token)
         current = self._runtime.current_runs.get(path)
+        force_value_run = False
         if current is not None and current.demand_key == key:
-            self._publish_run(path, current)
-            return
+            needs_value = (
+                current.result_checksum is not None
+                and current.dispatch_scratch is True
+                and self._feeds_non_scratch_holder(path)
+            )
+            if needs_value:
+                from seamless import CacheMissError
+
+                try:
+                    current.result_checksum.resolve()
+                except CacheMissError:
+                    force_value_run = True
+                else:
+                    self._publish_run(path, current)
+                    return
+            else:
+                self._publish_run(path, current)
+                return
         self._suspend(path)
         held = self._runtime.superseded_runs.get(path, ())
         for record in tuple(held):
+            if force_value_run and record is current:
+                continue
             if record.demand_key == key and record.phase != 'cancelled':
                 held.remove(record)
                 if record.result_checksum is not None or record.exception:
@@ -192,10 +205,13 @@ class Reactive:
                 return
         generation = self._runtime.next_generation()
         record = RunRecord(path, None, None, None, phase='running', generation=generation, demand_key=key)
+        record.dispatch_scratch = cfg.scratch and not self._feeds_non_scratch_holder(path)
         self._runtime.current_runs[path] = record
         self._replace_current_checksum(path, None)
         node.state, node.block_reason, node.exception = 'computing', None, None
-        frozen = self._freeze_transformer(path, concrete_args=pins, concrete_code=code)
+        frozen = self._freeze_transformer(
+            path, concrete_args=pins, concrete_code=code,
+            dispatch_scratch=record.dispatch_scratch)
         frozen = replace(frozen, signature=None)
         leases = frozen.leases
         owner = weakref.ref(self)

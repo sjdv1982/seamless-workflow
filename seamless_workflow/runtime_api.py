@@ -96,7 +96,8 @@ class RuntimeAPI:
             future.set_result(result)
             self._barriers.pop(future, None)
 
-    def _freeze_transformer(self, path, *, concrete_args=None, concrete_code=None):
+    def _freeze_transformer(self, path, *, concrete_args=None, concrete_code=None,
+                            dispatch_scratch=None):
         from seamless_transformer.frozen_transformer import FrozenTransformer
         from .builder_state import _path_string
         import inspect
@@ -117,31 +118,14 @@ class RuntimeAPI:
             if edge is not None:
                 if pin_state == 'failed':
                     _, checksum = self._source_state(edge)
-                    source_node, source_local = self._graph.resolve_existing(edge.source)
-                    if source_local:
-                        input_type = edge.source_celltype or self._celltype_for_path(
-                            source_node, source_local
-                        )
-                    elif edge.source_conversion:
-                        input_type = edge.source_celltype or self._node_celltype(source_node)
-                    else:
-                        input_type = self._node_celltype(source_node)
                     args[pin] = checksum
-                    input_celltypes[pin] = input_type
+                    input_celltypes[pin] = self._edge_input_celltype(edge)
                     continue
                 if pin in cfg.optional_pins:
                     from seamless.checksum.null import canonicalize_checksum, is_null
                     state, checksum = self._source_state(edge)
                     if state == 'complete' and checksum is not None:
-                        source_node, source_local = self._graph.resolve_existing(edge.source)
-                        if source_local:
-                            input_type = edge.source_celltype or self._celltype_for_path(
-                                source_node, source_local
-                            )
-                        elif edge.source_conversion:
-                            input_type = edge.source_celltype or self._node_celltype(source_node)
-                        else:
-                            input_type = self._node_celltype(source_node)
+                        input_type = self._edge_input_celltype(edge)
                         if is_null(canonicalize_checksum(checksum, input_type)):
                             continue
                 source = self._build_source_expression(edge.source)
@@ -172,13 +156,19 @@ class RuntimeAPI:
                 value for value in args.values() if isinstance(value, Checksum)
             )
         leases = tuple(Lease(cs) for cs in claims if isinstance(cs, Checksum))
+        literal_pins = frozenset(
+            set(node.transformer_pin_producers) | set(cfg.modules) |
+            ({'code'} if code_edge is None else set())
+        )
         return FrozenTransformer(
             codebuf=code, language=cfg.language, celltypes=copy.deepcopy(cfg.celltypes),
             optional_pins=frozenset(cfg.optional_pins), args=args,
             modules=copy.deepcopy(cfg.modules), globals=copy.deepcopy(cfg.globals),
             meta=copy.deepcopy(cfg.meta), environment=copy.deepcopy(cfg.environment),
-            scratch=cfg.scratch, direct_print=cfg.direct_print, local=cfg.local,
+            scratch=(cfg.scratch if dispatch_scratch is None else dispatch_scratch),
+            direct_print=cfg.direct_print, local=cfg.local,
             call_mode=cfg.call_mode, callable=cfg.callable,
             schema=cfg.schema, compilation=copy.deepcopy(cfg.compilation), objects=copy.deepcopy(cfg.objects), header=cfg.header,
             signature=signature, input_celltypes=input_celltypes,
+            literal_pins=literal_pins,
             leases=leases)

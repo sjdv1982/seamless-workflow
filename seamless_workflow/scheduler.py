@@ -37,6 +37,7 @@ class RunRecord:
     hold_kind: str | None = None
     demand_key: Any = None
     error: BaseException | None = None
+    dispatch_scratch: bool | None = None
 
 
 @dataclass

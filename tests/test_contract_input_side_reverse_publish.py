@@ -1,8 +1,8 @@
 """Contract test: a bound transformer's pin conversion reverse-publishes
 (contracts/internal/checksum-reference-lifecycle.md, §1, ruling 2026-09-30).
 
-A pin is an input-side owner. When its conversion is dispatched (the source
-buffer is on the hashserver only), the request carries scratch=False, so the
+A non-scratch pin is an input-side owner. When its conversion is dispatched
+(the source buffer is on the hashserver only), the request carries scratch=False, so the
 executing side writes the converted buffer to the hashserver.
 """
 import os

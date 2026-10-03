@@ -1,10 +1,7 @@
-"""Contract test: a scratch transformer's input side is published
-(contracts/internal/checksum-reference-lifecycle.md, ruling 2026-09-30).
+"""A scratch transformer with literal pins can run on a jobserver.
 
-Scratch governs a transformer's result only. Its pins, code and modules are
-input-side: they refhold and publish whatever the transformer's scratch, so a
-scratch transformation dispatched to a jobserver finds its inputs there. Its
-result is still never published.
+contracts/pins.md, *Scratch at the pin*: literal pins, code, and modules are
+published regardless of result scratch; the result remains scratch.
 """
 import os
 import subprocess

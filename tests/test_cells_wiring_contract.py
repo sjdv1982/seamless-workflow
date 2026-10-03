@@ -66,9 +66,10 @@ def test_join_member_conversion_matches_root_connection(make_context, join_type)
     ctx.root = Cell(join_type)
     ctx.root = ctx.source
     ctx.compute(timeout=10)
+    expected = [1, 2] if join_type == "plain" else "[1,2]"
     assert ctx.join.value == {"kept": True, "left": ctx.root.value}
-    assert ctx.root.value == [1, 2]
-    assert ctx.join.checksum == Buffer({"kept": True, "left": [1, 2]}, join_type).get_checksum()
+    assert ctx.root.value == expected
+    assert ctx.join.checksum == Buffer({"kept": True, "left": expected}, join_type).get_checksum()
 
 
 def test_heterogeneous_join_refuses_projected_source(make_context):

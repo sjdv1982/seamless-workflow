@@ -5,9 +5,8 @@ Ruling (contract-clarity-rulings.md, "Rulings requested by coverage subagents"):
 "Claims held for scratch nodes must not publish." That covers the result-side
 claims the Context holds for a scratch node: its current and superseded
 results, a copied node's result, and a scratch cell's literal. Amended
-2026-09-30: scratch governs a transformer's result only. Its pin, code and
-module claims are input-side, so they refhold and publish whatever the
-transformer's scratch (a dispatched or remotely fingertipped run needs them).
+2026-10-02: scratch governs a transformer's result only. Literal pin, code,
+and module claims publish; edge-fed pins follow allow_input_fingertip.
 
 §1 *Neutral claim*: a Context's snapshot and in-flight leases are neutral claims
 (protect, never publish, never change scratch status); a Context node's claim on

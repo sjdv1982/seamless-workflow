@@ -100,9 +100,6 @@ def evaluate_cell(root, root_type, inputs, target_type):
 
 
 def evaluate_projection(checksum, path, input_celltype, celltype, validator=None, validator_language=None):
-    if not path and validator is None and input_celltype == "text" and celltype == "mixed":
-        from .adapters import checksum_for_value
-        return checksum_for_value(checksum.resolve("mixed"), "mixed", checksum_is_value=True)
     from seamless.checksum.expression import evaluate_expression_local
     from .builder_state import _path_string
     result = evaluate_expression_local(checksum, _path_string(path), input_celltype, celltype,

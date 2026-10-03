@@ -284,7 +284,15 @@ def test_anonymous_handle_cannot_be_assigned_into_another_context(make_context, 
     assert ctx.own.value == (1 if kind == "projection" else {"x": 1, "y": [1, 2]})
 
 
-def test_assigning_to_a_new_name_takes_the_anonymous_node_over(make_context):
+def test_assigning_to_a_new_name_feeds_it_through_a_dummy_edge(make_context):
+    """cells.md, *Assigning an anonymous handle*: "A new name is fed through a dummy
+    edge. `x = ctx.b.as_celltype("plain"); ctx.a = x`, where `ctx.a` did not exist,
+    creates the named node `a` with the handle's `celltype` [...] **Nothing is renamed
+    and no handle is invalidated**: `x` stays a handle to its anonymous cell, every
+    other handle to the same recipe stays valid, and a later `ctx.d = x` feeds `d` the
+    same way." And: "For a handle whose link reads directly from a named node, such as
+    `ctx.b[3]` or `ctx.b.as_celltype("plain")`, `get_graph()` writes that link as `a`'s
+    own incoming edge"."""
     from seamless_workflow.errors import StaleWorkflowHandleError
     ctx = make_context()
     ctx.b = Cell("text")
@@ -296,20 +304,47 @@ def test_assigning_to_a_new_name_takes_the_anonymous_node_over(make_context):
     ctx.compute(timeout=10)
     assert ctx.a.celltype == "plain"
     assert ctx.a.value == [10, 20, 30, 40]
-    assert x.path == ""
-    assert x.value == [10, 20, 30, 40]
+    # Both handles stay valid anonymous handles over b.
+    assert x.celltype == y.celltype == "plain"
+    assert x.path == y.path == ""
+    assert x.value == y.value == [10, 20, 30, 40]
     graph = ctx.get_graph()
     assert graph["anonymous_nodes"] == {}
     assert sorted(node["path"] for node in graph["nodes"]) == [["a"], ["b"]]
-    with pytest.raises(StaleWorkflowHandleError):
-        _ = y.value
-    # x is now a handle to a: a later assignment of x is `ctx.d = ctx.a`.
+    assert graph["connections"] == [{"type": "connection", "target": ["a"], "source": ["b"]}]
+    # A later ctx.d = x feeds d the same way: its own direct edge from b.
     ctx.d = x
-    edges = ctx.get_graph()["connections"]
-    assert any(edge["target"] == ["d"] and edge["source"] == {"node": ["a"]} for edge in edges)
+    ctx.compute(timeout=10)
+    assert ctx.d.celltype == "plain"
+    assert ctx.d.value == [10, 20, 30, 40]
+    graph = ctx.get_graph()
+    assert graph["anonymous_nodes"] == {}
+    assert sorted((edge["target"], edge["source"]) for edge in graph["connections"]) == [
+        (["a"], ["b"]),
+        (["d"], ["b"]),
+    ]
+    restored = make_context()
+    restored.set_graph(graph)
+    restored.compute(timeout=10)
+    assert restored.a.value == restored.d.value == [10, 20, 30, 40]
+    assert restored.get_graph() == graph
+    # x was never a handle to `a`: deleting `a` leaves x and y reading b.
+    del ctx.a
+    assert x.value == y.value == [10, 20, 30, 40]
+    # StaleWorkflowHandleError remains for a handle to a deleted node.
+    del ctx.b
+    with pytest.raises(StaleWorkflowHandleError):
+        _ = x.value
 
 
 def test_assigning_to_an_existing_name_adds_an_edge_from_the_symbol(make_context):
+    """cells.md, *Assigning an anonymous handle*: "`ctx.a = x`, where `ctx.a` already
+    exists, adds an edge from `x`'s symbol to `a`. `a` keeps its own `celltype` and
+    converts into it [...] `x` stays exactly what it was: an anonymous handle. A later
+    `ctx.d = x` therefore adds another edge from the same symbol." On save, *Which
+    entries are serialized*: the identity edge into the new `d` "is saved as its
+    target's own incoming link", while the entry stays because the edge into
+    `existing` names it."""
     ctx = make_context()
     ctx.b = Cell("text")
     ctx.b.set("[10, 20, 30, 40]")
@@ -324,42 +359,98 @@ def test_assigning_to_an_existing_name_adds_an_edge_from_the_symbol(make_context
     graph = ctx.get_graph()
     symbols = list(graph["anonymous_nodes"])
     assert len(symbols) == 1
+    assert graph["anonymous_nodes"][symbols[0]] == {
+        "source": {"node": ["b"]}, "celltype": "plain", "path": "",
+    }
     targets = sorted(edge["target"] for edge in _graph_edges_from(graph, {"symbol": symbols[0]}))
-    assert targets == [["d"], ["existing"]]
+    assert targets == [["existing"]]
+    assert [edge["source"] for edge in graph["connections"] if edge["target"] == ["d"]] == [["b"]]
     # x is still an anonymous handle, not a handle to `existing` or `d`.
     assert x.celltype == "plain"
+    restored = make_context()
+    restored.set_graph(graph)
+    restored.compute(timeout=10)
+    assert restored.existing.value == restored.d.value == [10, 20, 30, 40]
+    assert restored.get_graph() == graph
 
 
-def test_as_celltype_handle_creates_anonymous_node_immediately(make_context):
+def test_held_as_celltype_handle_creates_no_entry(make_context):
+    """cells.md, *The handle and the node*: "A handle neither creates nor holds the
+    node. Evaluating `ctx.b.as_celltype("plain")` creates a handle to a recipe, and
+    nothing in the graph. The anonymous cell is created [...] when an edge or another
+    entry first refers to that recipe." *Which entries are serialized*: "An entry held
+    only by a live handle is runtime state and is excluded"."""
     ctx = make_context()
     ctx.b = Cell("text")
     ctx.b.set("[1]")
     held = ctx.b.as_celltype("plain")
     graph = ctx.get_graph()
     assert graph["__seamless_workflow__"] == "0.5"
-    assert len(graph["anonymous_nodes"]) == 1
-    entry, = graph["anonymous_nodes"].values()
-    assert entry == {"source": {"node": ["b"]}, "celltype": "plain", "path": ""}
+    assert graph["anonymous_nodes"] == {}
     assert held.celltype == "plain"
+    assert held.value == [1]
+    assert ctx.get_graph()["anonymous_nodes"] == {}
+    # An edge into a cell of a different celltype is not an identity, so the entry
+    # it names is saved.
+    ctx.existing = Cell("mixed")
+    ctx.existing = held
+    ctx.compute(timeout=10)
+    graph = ctx.get_graph()
+    (symbol, entry), = graph["anonymous_nodes"].items()
+    assert entry == {"source": {"node": ["b"]}, "celltype": "plain", "path": ""}
+    assert [edge["target"] for edge in _graph_edges_from(graph, {"symbol": symbol})] == [
+        ["existing"]
+    ]
 
 
-def test_projection_handle_creates_anonymous_node_immediately(make_context):
+def test_held_projection_handle_creates_no_entry(make_context):
+    """cells.md, *The handle and the node*: "A handle neither creates nor holds the
+    node." *Which entries are serialized*: "An entry held only by a live handle is
+    runtime state and is excluded", and a single link's identity edge is saved as the
+    target's own incoming link, with "the entry only if something else names it"."""
     ctx = make_context()
     ctx.b = Cell("plain")
-    ctx.b.set({"x": 1})
+    ctx.b.set({"x": [1, 2]})
     held = ctx.b["x"]
     graph = ctx.get_graph()
-    assert len(graph["anonymous_nodes"]) == 1
-    entry, = graph["anonymous_nodes"].values()
-    assert entry == {"source": {"node": ["b"]}, "celltype": "plain", "path": "x"}
-    assert held.value == 1
+    assert graph["anonymous_nodes"] == {}
+    assert held.value == [1, 2]
+    assert ctx.get_graph()["anonymous_nodes"] == {}
+    # A projection link may not also convert (cells.md, *Connecting*), so its edge
+    # into a cell is an identity: saved as the cell's own link, with no entry.
+    ctx.existing = Cell("plain")
+    ctx.existing = held
+    ctx.compute(timeout=10)
+    graph = ctx.get_graph()
+    assert graph["anonymous_nodes"] == {}
+    assert [edge["source"] for edge in graph["connections"] if edge["target"] == ["existing"]] == [
+        ["b", "x"]
+    ]
+    # Another entry that names the link -- a chain starting with it -- saves it.
+    ctx.chained = held.as_celltype("mixed")
+    ctx.compute(timeout=10)
+    assert ctx.chained.value == [1, 2]
+    entries = ctx.get_graph()["anonymous_nodes"]
+    assert {"source": {"node": ["b"]}, "celltype": "plain", "path": "x"} in entries.values()
 
 
-def test_projected_as_celltype_handle_creates_anonymous_node_immediately(make_context):
+def test_held_projected_as_celltype_handle_creates_no_entry(make_context):
+    """cells.md, *The handle and the node*: "A handle neither creates nor holds the
+    node." Once an edge refers to the chain, "every link of the chain is an anonymous
+    cell" and *Which entries are serialized*: "`get_graph()` includes every entry that
+    an edge, or another serialized entry, names"."""
     ctx = make_context()
     ctx.b = Cell("mixed")
     ctx.b.set({"a": [1, 2]})
     held = ctx.b["a"].as_celltype("plain")
+    graph = ctx.get_graph()
+    assert graph["anonymous_nodes"] == {}
+    assert held.value == [1, 2]
+    assert ctx.get_graph()["anonymous_nodes"] == {}
+    ctx.existing = Cell("mixed")
+    ctx.existing = held
+    ctx.compute(timeout=10)
+    assert ctx.existing.value == [1, 2]
     graph = ctx.get_graph()
     assert len(graph["anonymous_nodes"]) == 2
     path_symbol, path_entry = next(
@@ -367,8 +458,10 @@ def test_projected_as_celltype_handle_creates_anonymous_node_immediately(make_co
         for symbol, entry in graph["anonymous_nodes"].items()
         if entry["path"] == "a"
     )
-    conversion_entry, = (
-        entry for entry in graph["anonymous_nodes"].values() if entry["path"] == ""
+    conversion_symbol, conversion_entry = next(
+        (symbol, entry)
+        for symbol, entry in graph["anonymous_nodes"].items()
+        if entry["path"] == ""
     )
     assert path_entry == {
         "source": {"node": ["b"]},
@@ -380,13 +473,228 @@ def test_projected_as_celltype_handle_creates_anonymous_node_immediately(make_co
         "celltype": "plain",
         "path": "",
     }
-    assert held.value == [1, 2]
+    assert [edge["target"] for edge in _graph_edges_from(graph, {"symbol": conversion_symbol})] == [
+        ["existing"]
+    ]
 
     restored = make_context()
     restored.set_graph(graph)
+    restored.compute(timeout=10)
+    assert restored.existing.value == [1, 2]
     restored_held = restored.b["a"].as_celltype("plain")
     assert restored_held.value == [1, 2]
     assert restored.get_graph()["anonymous_nodes"] == graph["anonymous_nodes"]
+
+
+def test_held_transformer_result_handle_does_not_break_graph_reload(make_context):
+    """Review finding 7. workflow-context.md, *Graph serialization*: "`ctx.get_graph()`
+    returns the durable graph [...] never runtime state", and "An entry held only by a
+    live handle is runtime state and is excluded: after a reload nothing could reach
+    it"."""
+    def func(a):
+        return {"x": a, "y": [a, a]}
+
+    ctx = make_context()
+    ctx.inp = Cell("int")
+    ctx.inp.set(3)
+    ctx.tf = func
+    ctx.tf.pins.a = ctx.inp
+    ctx.compute(timeout=30)
+    held = ctx.tf.result["x"]
+    assert held.value == 3
+    graph = ctx.get_graph()
+    assert graph["anonymous_nodes"] == {}
+    restored = make_context()
+    restored.set_graph(graph)
+    restored.compute(timeout=30)
+    assert restored.tf.result.value == {"x": 3, "y": [3, 3]}
+    assert restored.get_graph() == graph
+
+
+def test_entry_whose_source_is_a_transformer_reloads(make_context):
+    """cells.md, *Anonymous cells*: an anonymous cell's source is "its parent: a named
+    node or another anonymous cell" -- a transformer is a named node.
+    workflow-context.md, *Graph serialization*: `set_graph` reloads what `get_graph`
+    wrote."""
+    def func(a):
+        return {"x": a, "y": [a, a]}
+
+    ctx = make_context()
+    ctx.inp = Cell("int")
+    ctx.inp.set(3)
+    ctx.tf = func
+    ctx.tf.pins.a = ctx.inp
+    ctx.out = Cell("mixed")
+    ctx.out = ctx.tf.result.as_celltype("plain")
+    ctx.compute(timeout=30)
+    assert ctx.out.value == {"x": 3, "y": [3, 3]}
+    graph = ctx.get_graph()
+    (symbol, entry), = graph["anonymous_nodes"].items()
+    assert entry == {"source": {"node": ["tf"]}, "celltype": "plain", "path": ""}
+    restored = make_context()
+    restored.set_graph(graph)
+    restored.compute(timeout=30)
+    assert restored.out.value == {"x": 3, "y": [3, 3]}
+    assert restored.get_graph() == graph
+
+
+def test_graph_does_not_depend_on_live_handles(make_context):
+    """workflow-context.md, *Graph serialization*: "`ctx.get_graph()` returns the durable
+    graph [...] never runtime state", and "An entry held only by a live handle is runtime
+    state and is excluded". The graph is the same before a handle exists, while it is
+    alive, and after it is gone."""
+    import gc
+
+    ctx = make_context()
+    ctx.b = Cell("text")
+    ctx.b.set("[10, 20, 30, 40]")
+    ctx.a = ctx.b.as_celltype("plain")[3]
+    ctx.compute(timeout=10)
+    before = ctx.get_graph()
+    assert before["anonymous_nodes"]
+    handles = [
+        ctx.b.as_celltype("mixed"),
+        ctx.b[0],
+        ctx.b.as_celltype("plain")[1],
+        ctx.b[2].as_celltype("plain"),
+    ]
+    values = [handle.value for handle in handles]
+    assert values[1:3] == ["[", 20]
+    during = ctx.get_graph()
+    del handles
+    gc.collect()
+    after = ctx.get_graph()
+    assert before == during == after
+
+
+@pytest.mark.parametrize("target", ["cell", "join slot", "pin"])
+def test_identity_edge_from_a_single_link_is_saved_as_the_targets_own_link(make_context, target):
+    """cells.md, *Which entries are serialized*: "A dummy edge from a single link is
+    saved as its target's own incoming link. When an edge comes from an anonymous cell
+    whose link reads directly from a named node, and the edge is an identity (the
+    celltype at the target -- a cell's, a join slot's or a pin's -- equals the anonymous
+    cell's), `get_graph()` writes that link as the target's incoming edge, and writes
+    the entry only if something else names it"."""
+    ctx = make_context()
+    ctx.b = Cell("text")
+    ctx.b.set("[10, 20, 30, 40]")
+    handle = ctx.b.as_celltype("plain")
+    if target == "cell":
+        ctx.t = Cell("plain")
+        ctx.t = handle
+        target_path = ["t"]
+        expected = [10, 20, 30, 40]
+
+        def read(c):
+            return c.t.value
+    elif target == "join slot":
+        ctx.t = Cell("plain")
+        ctx.t.set({})
+        ctx.t["k"] = handle
+        target_path = ["t", "k"]
+        expected = {"k": [10, 20, 30, 40]}
+
+        def read(c):
+            return c.t.value
+    else:
+        def identity(p):
+            return p
+
+        ctx.tf = identity
+        ctx.tf.celltypes.p = "plain"
+        ctx.tf.pins.p = handle
+        target_path = ["tf", "p"]
+        expected = [10, 20, 30, 40]
+
+        def read(c):
+            return c.tf.result.value
+    ctx.compute(timeout=30)
+    assert read(ctx) == expected
+    graph = ctx.get_graph()
+    assert graph["anonymous_nodes"] == {}
+    assert [edge["source"] for edge in graph["connections"] if edge["target"] == target_path] == [
+        ["b"]
+    ]
+    restored = make_context()
+    restored.set_graph(graph)
+    restored.compute(timeout=30)
+    assert read(restored) == expected
+    assert restored.get_graph() == graph
+
+
+@pytest.mark.parametrize("interleave", [False, True])
+@pytest.mark.parametrize("order", ["first-second", "second-first"])
+@pytest.mark.parametrize("source_celltype", ["text", "mixed"])
+def test_colliding_symbols_are_suffixed_in_arrival_order(
+    make_context, monkeypatch, source_celltype, order, interleave
+):
+    """cells.md, *Symbols*: "An anonymous cell's symbol is five hex characters derived
+    from `(source, celltype, path)`, assigned when the anonymous cell is created [...]
+    Two *different* recipes whose five characters collide are suffixed `-1`, `-2`, ...
+    in the order they were added." Saving in between assigns nothing, and whether the
+    link is evaluated (`text -> plain`) or elided (`mixed -> plain`, *Elidable and
+    elided*) makes no difference."""
+    import seamless_workflow.graph as graph_module
+
+    monkeypatch.setattr(graph_module, "_symbol_base", lambda recipe: "abcde")
+    ctx = make_context()
+    ctx.first = Cell(source_celltype)
+    ctx.first.set("[1, 2]" if source_celltype == "text" else [1, 2])
+    ctx.second = Cell(source_celltype)
+    ctx.second.set("[3, 4]" if source_celltype == "text" else [3, 4])
+    ctx.to_first = Cell("mixed")
+    ctx.to_second = Cell("mixed")
+    names = order.split("-")
+    for name in names:
+        setattr(ctx, "to_" + name, getattr(ctx, name).as_celltype("plain"))
+        if interleave:
+            ctx.get_graph()
+    ctx.compute(timeout=10)
+    assert ctx.to_first.value == [1, 2]
+    assert ctx.to_second.value == [3, 4]
+    graph = ctx.get_graph()
+    symbol_of = {
+        entry["source"]["node"][0]: symbol for symbol, entry in graph["anonymous_nodes"].items()
+    }
+    assert symbol_of == {names[0]: "abcde", names[1]: "abcde-1"}
+    restored = make_context()
+    restored.set_graph(graph)
+    restored.compute(timeout=10)
+    assert restored.to_first.value == [1, 2]
+    assert restored.get_graph() == graph
+
+
+def test_a_collapsed_link_still_claims_its_symbol(make_context, monkeypatch):
+    """cells.md, *Symbols*: a symbol is "assigned when the anonymous cell is created"
+    and "never changes once assigned". The anonymous cell behind an edge that is saved
+    as its target's own link (*Which entries are serialized*) is still created, so it
+    claims its symbol before a later colliding recipe, and that symbol is the one a
+    later save shows."""
+    import seamless_workflow.graph as graph_module
+
+    monkeypatch.setattr(graph_module, "_symbol_base", lambda recipe: "abcde")
+    ctx = make_context()
+    ctx.first = Cell("text")
+    ctx.first.set("[1, 2]")
+    ctx.second = Cell("text")
+    ctx.second.set("[3, 4]")
+    # An identity edge from first's link: collapsed on save, but the cell exists.
+    ctx.new = ctx.first.as_celltype("plain")
+    ctx.to_second = Cell("mixed")
+    ctx.to_second = ctx.second.as_celltype("plain")
+    ctx.compute(timeout=10)
+    graph = ctx.get_graph()
+    assert graph["anonymous_nodes"] == {
+        "abcde-1": {"source": {"node": ["second"]}, "celltype": "plain", "path": ""},
+    }
+    # A later edge that saves first's entry shows the symbol it got at creation.
+    ctx.to_first = Cell("mixed")
+    ctx.to_first = ctx.first.as_celltype("plain")
+    ctx.compute(timeout=10)
+    assert ctx.get_graph()["anonymous_nodes"] == {
+        "abcde": {"source": {"node": ["first"]}, "celltype": "plain", "path": ""},
+        "abcde-1": {"source": {"node": ["second"]}, "celltype": "plain", "path": ""},
+    }
 
 
 @pytest.mark.parametrize("target_exists", [False, True])
@@ -480,9 +788,12 @@ def test_projection_handle_starts_non_scratch(make_context, kind):
 
 # --- Round 8 rulings (register/cells-RULINGS.md) ----------------------------------------
 
-def test_handle_is_miswired_when_its_parent_is_retyped(make_context):
-    """Round 8, ruling 1: an anonymous entry's celltype is fixed at creation, so
-    retyping the parent makes a pathed handle miswired rather than silently re-reading."""
+def test_handle_follows_its_parent_when_the_parent_is_retyped(make_context):
+    """cells.md, *The input*: "**A bound handle's `celltype` follows its parent.**
+    Retyping the parent retypes every live handle over it, so a retype never leaves
+    a bound handle `miswired`; the celltype is fixed only when an edge creates the
+    handle's anonymous cell." (This replaces round 8, ruling 1, which made the
+    handle `miswired`.)"""
     ctx = make_context()
     ctx.b = Cell("text")
     ctx.b.set("[10, 20, 30, 40]")
@@ -492,11 +803,13 @@ def test_handle_is_miswired_when_its_parent_is_retyped(make_context):
     assert handle.value == ","
     ctx.b.celltype = "plain"
     ctx.compute(timeout=10)
-    assert handle.celltype == "text"
-    assert handle.state == "miswired"
-    assert handle.checksum is None
+    assert handle.celltype == "plain"
+    assert handle.value == 40
+    assert handle.state == "complete"
+    assert handle.checksum == Buffer(40, "plain").get_checksum()
     ctx.b.celltype = "text"
     ctx.compute(timeout=10)
+    assert handle.celltype == "text"
     assert handle.value == ","
 
 

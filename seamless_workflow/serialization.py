@@ -2,7 +2,9 @@
 import copy
 from seamless import Buffer, Checksum
 from .configuration import fingerprint
-from .graph import ContextGraph, Node, CellConfig, TransformerConfig, ConstantProducer, Edge
+from .graph import (
+    ContextGraph, Node, CellConfig, TransformerConfig, ConstantProducer, Edge, projected_celltype,
+)
 from .errors import PathError, DependencyError
 
 
@@ -33,17 +35,6 @@ def _parse_path_string(path):
     if node.id != "x":
         raise ValueError(f"Invalid path: {path!r}")
     return tuple(reversed(components))
-
-
-def _projected_celltype(celltype, path):
-    for component in path:
-        if isinstance(component, slice):
-            continue
-        if celltype == "deepcell":
-            celltype = "mixed"
-        elif celltype in {"deepfolder", "folder"}:
-            celltype = "bytes"
-    return celltype
 
 
 def prepare_graph(data):
@@ -167,27 +158,29 @@ def prepare_graph(data):
         if set(source_ref) == {"node"}:
             source_node = tuple(source_ref["node"])
             source_path = ()
-            source_celltype = graph.nodes[source_node].cell_config.celltype
+            source_celltype = graph.node_celltype(source_node)
             conversion_steps = ()
-            source_miswired = False
+            chain = ()
+            source_key = source_node
         else:
             (source_node, source_path, source_celltype,
-             conversion_steps, source_miswired) = resolve_anonymous_node(
-                source_ref["symbol"]
-            )
-        expected_celltype = _projected_celltype(source_celltype, path)
+             conversion_steps, chain) = resolve_anonymous_node(source_ref["symbol"])
+            source_key = source_ref["symbol"]
+        # The entry's recorded celltype is kept in the edge's chain.  Whether
+        # the link is ill-formed is not decided here: it is derived from the
+        # chain, by the same function a running Context uses
+        # (``ContextGraph.edge_miswiring``; node-state-lifecycle.md,
+        # *`miswired` is a static defect*: set_graph derives the state).
+        chain = chain + ((source_key, celltype, path),)
         source_path = source_path + path
-        if path:
-            if celltype != expected_celltype:
-                source_miswired = True
-        elif celltype != source_celltype:
+        if not path and celltype != source_celltype:
             conversion_steps = conversion_steps + ((len(source_path), celltype),)
         resolved = (
             source_node,
             source_path,
             celltype,
             conversion_steps,
-            source_miswired,
+            chain,
         )
         resolving_anonymous_nodes.remove(symbol)
         resolved_anonymous_nodes[symbol] = resolved
@@ -202,7 +195,7 @@ def prepare_graph(data):
         source_conversion = False
         source_conversion_before = False
         source_conversion_steps = ()
-        source_miswired = False
+        source_chain = ()
         if isinstance(source_ref, dict):
             source_path = tuple(entry.get("source_path", ()))
             if set(source_ref) == {"node"}:
@@ -218,11 +211,11 @@ def prepare_graph(data):
             elif set(source_ref) == {"symbol"}:
                 symbol = source_ref["symbol"]
                 (source_node, anonymous_path, anonymous_type,
-                 source_conversion_steps, source_miswired) = resolve_anonymous_node(
-                    symbol
-                )
+                 source_conversion_steps, source_chain) = resolve_anonymous_node(symbol)
                 source = source_node + anonymous_path + source_path
-                source_celltype = _projected_celltype(anonymous_type, source_path)
+                source_celltype = projected_celltype(anonymous_type, source_path)
+                if source_path:
+                    source_chain = source_chain + ((symbol, source_celltype, source_path),)
                 if source_conversion_steps:
                     source_conversion = True
                     source_conversion_before = source_conversion_steps[0][0] == 0
@@ -245,7 +238,11 @@ def prepare_graph(data):
             raise DependencyError(f'Multiple producers for {target!r}')
         graph.edges.append(Edge(source, target, source_celltype, source_conversion,
                                 source_conversion_before, source_conversion_steps,
-                                source_miswired))
+                                source_chain=source_chain))
+    # cells.md, *Symbols*: entries loaded from 0.5 keep their stored symbols;
+    # the links of every other edge (0.4 graphs, and single links saved as the
+    # target's own incoming edge) get theirs now, in file order.
+    graph.edges = [graph.register_edge_symbols(edge) for edge in graph.edges]
     visiting,done=set(),set()
     def visit(path):
         if path in visiting: raise DependencyError('Dependency cycle')

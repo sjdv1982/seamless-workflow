@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 
@@ -28,7 +28,6 @@ class BoundEndpoint:
     conversion: bool = False
     conversion_before: bool = False
     conversion_steps: tuple[tuple[int, str], ...] = ()
-    handle_id: object | None = field(default=None, compare=False, repr=False)
 
 
 __all__ = ["BoundEndpoint", "EndpointKind"]
