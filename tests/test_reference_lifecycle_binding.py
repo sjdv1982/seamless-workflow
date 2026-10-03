@@ -57,7 +57,7 @@ def test_binding_standalone_projection_chains_preserves_path_and_claims(chain, c
     gc.collect()
     assert ctx.result.value == [1, 2]
     with caplog.at_level("WARNING", logger="seamless.references"):
-        audit_reference_accounting(holders=[ctx])
+        audit_reference_accounting()
     assert "live claims" not in caplog.text
 
     del ctx
