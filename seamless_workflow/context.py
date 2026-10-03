@@ -691,17 +691,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             while isinstance(root, Expression):
                 links.append(root)
                 root = root._input_ref
-            # A direct Expression may project into a different result type in
-            # one operation. Splitting that into a Cell projection followed by
-            # a conversion changes both its value and its failure phase.
-            combined = any(
-                link.path and link.celltype != projected_celltype(
-                    link.input_celltype,
-                    tuple(item for _, item in parse_path(link.path)),
-                )
-                for link in links
-            )
-            if isinstance(root, Checksum) and not combined:
+            # A link that projects into a different result celltype becomes a
+            # path link followed by a conversion link, which fuse back into
+            # that one Expression (expressions.md, *Fusion*).
+            if isinstance(root, Checksum):
                 links.reverse()
                 root_type = links[0].input_celltype
                 source_path = self._graph.first_free("cell")
@@ -2853,13 +2846,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         for path, node in sorted(self._graph.nodes.items()):
             if node.kind == "cell":
                 entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "validator": node.cell_config.validator, "validator_language": node.cell_config.validator_language, "scratch": node.cell_config.scratch, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
-                if node.cell_root_expression is not None:
-                    # workflow-context.md, *Graph serialization*: a retained
-                    # root Expression is saved as its definition.
-                    from .serialization import expression_to_graph
-                    recipe = expression_to_graph(node.cell_root_expression)
-                    if recipe is not None:
-                        entry["expression"] = recipe
             else:
                 cfg = node.transformer_config
                 entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
