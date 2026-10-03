@@ -140,3 +140,21 @@ def test_sub_path_edge_into_another_celltype_is_a_path_error(make_context, cellt
     ctx.c = Cell(celltype)
     with pytest.raises(PathError, match="Cell subvalue connections require a container-capable Cell"):
         ctx.c["k"] = ctx.x
+
+
+@pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
+@pytest.mark.parametrize("value,valid", [({"k": "ab" * 32}, True), ({"n": {"k": "ab" * 32}}, False), (b"not JSON", False)])
+def test_bound_deep_buffer_validates_index_and_keeps_complete(make_context, celltype, value, valid):
+    index = _held(value, "plain" if isinstance(value, dict) else None)
+    ctx = make_context()
+    ctx.a = Cell(celltype, checksum=index.get_checksum())
+    ctx.compute(timeout=10)
+    for _ in range(2):
+        if valid:
+            assert ctx.a.buffer.get_checksum() == index.get_checksum()
+        else:
+            with pytest.raises(ValueError):
+                _ = ctx.a.buffer
+        assert ctx.a.state == "complete"
+        assert ctx.a.exception is None
+        assert ctx.a.checksum == index.get_checksum()

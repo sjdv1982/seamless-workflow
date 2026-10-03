@@ -7,6 +7,7 @@ test_canonical_handles.py for the bound (workflow Context) mode.
 import re
 
 import pytest
+from seamless.checksum.hash_type_validation import HashTypeValidationError
 from seamless import Buffer, Cell, Checksum
 from seamless_transformer import delayed
 from seamless_workflow import Context
@@ -488,3 +489,67 @@ def test_block_reason_lists_only_inputs_that_are_not_complete_or_waiting(
                "blocked-by-error"}
     if block_reason is not None:
         assert set(block_reason.values()) <= allowed
+
+
+@pytest.mark.parametrize("celltype", ["deepcell", "deepfolder", "folder"])
+@pytest.mark.parametrize("value,valid", [({"k": "ab" * 32}, True), ({"n": {"k": "ab" * 32}}, False)])
+def test_bound_deep_pin_buffer_validates_without_changing_state(celltype, value, valid):
+    index = Buffer(value, "plain")
+    index.tempref()
+    with Context() as ctx:
+        ctx.tf = identity
+        ctx.tf.celltypes.value = celltype
+        ctx.tf.pins.value.set_checksum(index.get_checksum())
+        pin = ctx.tf.pins.value
+        before = ctx.tf.block_reason
+        for _ in range(2):
+            if valid:
+                assert pin.buffer.get_checksum() == index.get_checksum()
+            else:
+                with pytest.raises(ValueError, match="nested"):
+                    _ = pin.buffer
+            assert pin.state == "complete"
+            assert pin.exception is None
+            assert pin.checksum == index.get_checksum()
+            assert ctx.tf.block_reason == before
+
+
+@pytest.mark.parametrize("celltype,content,attr", [
+    ("plain", b"not JSON", "buffer"),
+    ("plain", b"not JSON", "value"),
+    ("python", b"def broken(:\n", "value"),
+])
+def test_bound_result_read_failure_never_changes_pin_reporting(celltype, content, attr):
+    source = Buffer(content)
+    source.tempref()
+    with Context() as ctx:
+        ctx.tf = identity
+        ctx.tf.celltypes.value = celltype
+        ctx.tf.pins.value.set_checksum(source.get_checksum())
+        pin = ctx.tf.pins.value
+        before = ctx.tf.block_reason
+        for _ in range(2):
+            with pytest.raises(HashTypeValidationError):
+                getattr(pin, attr)
+            assert pin.state == "complete"
+            assert pin.exception is None
+            assert pin.checksum == source.get_checksum()
+            assert ctx.tf.block_reason == before
+
+
+def test_bound_failed_pin_reads_report_none_and_run_raises():
+    with Context() as ctx:
+        ctx.source = Cell("str")
+        ctx.source.set("not an integer")
+        ctx.tf = identity
+        ctx.tf.celltypes.value = "int"
+        ctx.tf.pins.value = ctx.source
+        ctx.compute(timeout=10)
+        pin = ctx.tf.pins.value
+        assert pin.state == "failed"
+        assert pin.checksum is None
+        assert pin.buffer is None
+        assert pin.value is None
+        assert pin.compute(timeout=10) is None
+        with pytest.raises(Exception):
+            pin.run(timeout=10)

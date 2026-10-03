@@ -344,9 +344,14 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 edge = self._incoming_edge(path, (pin,))
                 if edge is not None:
                     source_path, local = self._graph.resolve_existing(edge.source)
-                    if (local and not edge.source_conversion
-                            and not edge.source_conversion_steps
-                            and self._node_celltype(source_path) != celltype):
+                    links = anonymous_links(
+                        self._node_celltype(source_path), local,
+                        edge.source_conversion_steps,
+                    )
+                    source_type, projected_path = links[-1] if links else (
+                        self._node_celltype(source_path), (),
+                    )
+                    if projected_path and source_type != celltype:
                         raise TypeError("Cannot implicitly convert behind a projection; use as_celltype() before or after projecting")
             if cfg.compilation is not None:
                 removed_pins = node.transformer_config.pins - cfg.pins
@@ -685,7 +690,17 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             while isinstance(root, Expression):
                 links.append(root)
                 root = root._input_ref
-            if isinstance(root, Checksum):
+            # A direct Expression may project into a different result type in
+            # one operation. Splitting that into a Cell projection followed by
+            # a conversion changes both its value and its failure phase.
+            combined = any(
+                link.path and link.celltype != projected_celltype(
+                    link.input_celltype,
+                    tuple(item for _, item in parse_path(link.path)),
+                )
+                for link in links
+            )
+            if isinstance(root, Checksum) and not combined:
                 links.reverse()
                 root_type = links[0].input_celltype
                 source_path = self._graph.first_free("cell")

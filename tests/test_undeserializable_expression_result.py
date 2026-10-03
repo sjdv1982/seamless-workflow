@@ -10,21 +10,27 @@ This supersedes the recorded `failed` state of §8.4.
 
 import pytest
 
-from seamless import Cell
+from seamless import Cell, Expression
 from seamless.checksum.hash_type_validation import HashTypeValidationError
 
 
 @pytest.mark.parametrize("code,celltype", [("x = (", "python"), ("value: [", "yaml")])
 def test_bound_projection_stays_complete_and_every_read_raises(make_context, code, celltype):
     ctx = make_context()
-    ctx.a = Cell("plain")
-    ctx.a.set({"code": code})
-    ctx.b = ctx.a.code.as_celltype(celltype)
+    source = Cell("plain")
+    source.set({"code": code})
+    # An Expression projects directly into its result celltype. Cell
+    # as_celltype() closes the preceding projection into a separate link.
+    expression = Expression(
+        source, path="code", input_celltype="plain", celltype=celltype,
+    )
+    expected = expression.compute()
+    ctx.b = Cell(source=expression, celltype=celltype)
 
     ctx.compute(timeout=10)
     assert ctx.b.state == "complete"
     result = ctx.b.checksum
-    assert result is not None
+    assert result == expected
     for _ in range(2):
         with pytest.raises(HashTypeValidationError):
             _ = ctx.b.value

@@ -732,14 +732,16 @@ class BoundPinBackend:
                 if checksum is not None: checksum.tempref()
                 return checksum
             if checksum is None:
-                if error is not None:
-                    raise RuntimeError(str(error))
                 return None
             if field == 'buffer':
                 from seamless.checksum.hash_type_validation import validate_deserializable_as
-                validate_deserializable_as(checksum, lease.celltype)
+                from seamless.buffer_class import Buffer
+                celltype = Buffer._map_celltype(lease.celltype)
+                validate_deserializable_as(checksum, celltype)
                 buffer = checksum.resolve()
-                validate_deserializable_as(checksum, lease.celltype, buffer=buffer)
+                validate_deserializable_as(checksum, celltype, buffer=buffer)
+                if lease.celltype in _DEEP_CELLTYPES:
+                    buffer.get_value(lease.celltype)
                 return buffer
             value = checksum.resolve(lease.celltype)
             return value.content if lease.celltype == 'bytes' and hasattr(value, 'content') else value

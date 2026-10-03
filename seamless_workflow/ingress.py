@@ -339,12 +339,12 @@ def controller_method(method):
                 if name == '_get_value':
                     return checksum.resolve(celltype)
                 from seamless.checksum.hash_type_validation import validate_deserializable_as
-                deep = celltype in {'deepcell', 'deepfolder', 'folder'}
-                if not deep:
-                    validate_deserializable_as(checksum, celltype)
+                mapped = Buffer._map_celltype(celltype)
+                validate_deserializable_as(checksum, mapped)
                 buffer = checksum.resolve()
-                if not deep:
-                    validate_deserializable_as(checksum, celltype, buffer=buffer)
+                validate_deserializable_as(checksum, mapped, buffer=buffer)
+                if celltype in {'deepcell', 'deepfolder', 'folder'}:
+                    buffer.get_value(celltype)
                 return buffer
             finally:
                 lease._release_refholds()
