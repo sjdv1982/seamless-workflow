@@ -182,7 +182,9 @@ def test_context_holds_anonymous_current_for_a_non_elided_node():
         ctx.compute(timeout=10)
         assert ctx.c.value == payload["k"]
         assert ctx.get_graph().get("anonymous_nodes")
-        intermediate = ctx.b.checksum
+        # The intermediate is the canonical plain buffer, not the source text.
+        intermediate = Buffer(payload, "plain").get_checksum()
+        assert intermediate != ctx.b.checksum
         roles = [
             role
             for checksum, role in ctx._refheld_checksums()
