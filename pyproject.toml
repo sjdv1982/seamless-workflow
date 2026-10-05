@@ -11,8 +11,8 @@ requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Sjoerd de Vries"}]
 dependencies = [
-    "seamless-core>=0.1.4",
-    "seamless-transformer>=0.6.1",
+    "seamless-core>=0.2",
+    "seamless-transformer>=0.7.0",
 ]
 keywords = ["seamless", "workflow", "reactive", "checksum", "reproducible"]
 classifiers = [
