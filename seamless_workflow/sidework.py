@@ -88,14 +88,15 @@ class SideLoop:
 
 
 def evaluate_cell(root, root_type, inputs, target_type):
-    from seamless.checksum.expression import evaluate_expression_local
     from .context import _assign_path
     from .adapters import checksum_for_value
     value = root.resolve(root_type) if root is not None else {}
     for local, checksum, source_type in inputs:
         if isinstance(local[0], int) and not isinstance(value, (list, tuple)):
             raise TypeError("Integer Cell connection targets require an existing sequence")
-        _assign_path(value, local, checksum.resolve(source_type))
+        member = (checksum if target_type in {"deepcell", "deepfolder", "folder"}
+                  else checksum.resolve(source_type))
+        _assign_path(value, local, member)
     return checksum_for_value(value, target_type, checksum_is_value=True)
 
 

@@ -238,7 +238,11 @@ def prepare_graph(data):
             raise DependencyError(f'Multiple producers for {target!r}')
         graph.edges.append(Edge(source, target, source_celltype, source_conversion,
                                 source_conversion_before, source_conversion_steps,
-                                source_chain=source_chain))
+                                source_chain=source_chain,
+                                deep_member=bool(entry.get("deep_member", False)
+                                                 or (tl and graph.nodes[tn].kind == "cell"
+                                                     and graph.nodes[tn].cell_config.celltype
+                                                     in {"deepcell", "deepfolder", "folder"}))))
     # cells.md, *Symbols*: entries loaded from 0.5 keep their stored symbols;
     # the links of every other edge (0.4 graphs, and single links saved as the
     # target's own incoming edge) get theirs now, in file order.

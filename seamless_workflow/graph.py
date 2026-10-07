@@ -131,6 +131,7 @@ class Edge:
     # after that.  Empty for a source without a path or a conversion.  Derived
     # bookkeeping, so it takes no part in equality.
     source_chain: tuple[tuple[Any, str, Path], ...] = field(default=(), compare=False)
+    deep_member: bool = False
 
 
 def projected_celltype(celltype: str, path: Path) -> str:
@@ -533,6 +534,13 @@ class ContextGraph:
         source_key, celltype, path = chain[0]
         if not isinstance(source_key, tuple) or source_key not in self.nodes:
             return False
+        target_node, target_local = self.resolve_existing(edge.target)
+        target = self.nodes[target_node]
+        if (edge.source_conversion and target_local and target.kind == "cell"
+                and target.cell_config.celltype in DEEP_CELLTYPES):
+            # A deep slot takes a member checksum, not an implicit root
+            # conversion. Preserve the conversion that produces that member.
+            return False
         if path and not edge.source_conversion:
             return True
         return not path and celltype == self.edge_target_celltype(edge)
@@ -604,7 +612,8 @@ class ContextGraph:
         """
         if not self.looks_through(edge):
             return edge
-        return Edge(edge.source, edge.target, source_chain=edge.source_chain)
+        return Edge(edge.source, edge.target, source_chain=edge.source_chain,
+                    deep_member=edge.deep_member)
 
 
 __all__ = [

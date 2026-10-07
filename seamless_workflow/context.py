@@ -1248,8 +1248,16 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 raise PathError("Cell connection targets are limited to one point component")
             if self._graph.nodes[target.node_path].cell_config.celltype not in PIN_CELLTYPES:
                 raise PathError("Cell subvalue connections require a container-capable Cell")
+            target_type = self._graph.nodes[target.node_path].cell_config.celltype
+            if target_type in _DEEP_CELLTYPES:
+                member_type = "mixed" if target_type == "deepcell" else "bytes"
+                source_type = source_ep.celltype or self._node_celltype(source_ep.node_path)
+                if not isinstance(target.local_path[0], str):
+                    raise ValueError("Deep Cell connection targets require a string key")
+                if source_type != member_type:
+                    raise TypeError("Deep Cell connections require the member celltype")
             if source_ep.local_path:
-                target_type = self._graph.nodes[target.node_path].cell_config.celltype
+                target_type = projected_celltype(target_type, target.local_path)
                 source_type = source_ep.celltype or self._node_celltype(source_ep.node_path)
                 if target_type != source_type and not source_ep.conversion:
                     raise _projected_source_type_error(
@@ -1334,6 +1342,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         edge = Edge(
             tuple(source), tuple(target), source_celltype,
             source_conversion, source_conversion_before, tuple(source_conversion_steps),
+            deep_member=bool(target_local and target_config is not None
+                             and target_config.celltype in _DEEP_CELLTYPES),
         )
         # cells.md, *Symbols*: the edge creates its anonymous links, so their
         # symbols are assigned now, in arrival order.
@@ -1792,7 +1802,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             source, _ = self._graph.resolve_existing(edge.source)
             source_type = edge.source_celltype or self._node_celltype(source)
             _, source_local = self._graph.resolve_existing(edge.source)
-            if not source_local and not edge.source_conversion and source_type != cfg.celltype:
+            if (cfg.celltype not in _DEEP_CELLTYPES and not source_local
+                    and not edge.source_conversion and source_type != cfg.celltype):
                 state, checksum, error = self._projection(
                     checksum, (), source_type, cfg.celltype, scratch=cfg.scratch
                 )
@@ -2214,6 +2225,16 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             return "miswired", None
         if target_node.kind == "cell":
             target_type = target_node.cell_config.celltype
+            if edge.deep_member and target_type not in _DEEP_CELLTYPES:
+                return "miswired", None
+            if target_local:
+                if target_type not in PIN_CELLTYPES:
+                    return "miswired", None
+                if target_type in _DEEP_CELLTYPES:
+                    member_type = "mixed" if target_type == "deepcell" else "bytes"
+                    if (len(target_local) != 1 or not isinstance(target_local[0], str)
+                            or source_type != member_type):
+                        return "miswired", None
         elif target_node.kind == "transformer" and target_local != ("code",):
             target_type = target_node.transformer_config.celltypes.get(target_local[0], "mixed")
         if source_local and target_node.kind == "cell" and not target_local:
@@ -2886,6 +2907,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 for recipe in edge.source_chain:
                     self._graph.symbol_of(recipe)
             connection = {"type": "connection", "target": list(edge.target)}
+            if edge.deep_member:
+                connection["deep_member"] = True
             # cells.md, *Which entries are serialized*: a dummy edge from a
             # single link that reads directly from a named node is saved as
             # the target's own incoming link, which a running Context already
