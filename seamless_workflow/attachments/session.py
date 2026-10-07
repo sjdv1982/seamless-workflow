@@ -39,6 +39,7 @@ class Observation:
     leases: tuple = ()
     reason: str = ''
     no_value: bool = False
+    needs_canonical_write: bool = False
 
     def release(self):
         for lease in self.leases: lease._release_refholds()
@@ -52,6 +53,7 @@ class Delivery:
     celltype: str
     expected_fingerprint: object
     lease: object
+    force: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ class MountSession:
     fingerprint: object
     processed_ws: int = 0
     last_synced: str = None
+    written_pair: tuple = None
     pending: object = None
     in_flight: object = None
     delivery_seq: int = 0

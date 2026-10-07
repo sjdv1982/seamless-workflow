@@ -194,6 +194,7 @@ class FileSystemService:
                 if fingerprint is None:
                     return Observation(reg.session_id, ws, None, ABSENT, no_value=True)
                 no_value = False
+                needs_canonical_write = False
                 if reg.directory:
                     index, size = {}, 0
                     started = time.monotonic()
@@ -222,7 +223,9 @@ class FileSystemService:
                         from seamless.checksum.null import NULL_BUFFER
                         buf = Buffer(NULL_BUFFER)
                     else:
-                        buf = Buffer(canon_T(content, reg.celltype))
+                        canonical = canon_T(content, reg.celltype)
+                        needs_canonical_write = canonical != content
+                        buf = Buffer(canonical)
                 after = self._fingerprint(reg)
                 if fingerprint == after: break
                 time.sleep(.01 * (attempt + 1))
@@ -231,7 +234,7 @@ class FileSystemService:
             buf.tempref()
             leases.insert(0, MountLease(cs, f'mount:{reg.session_id}:observation'))
             return Observation(reg.session_id, ws, fingerprint, cs.hex(), buf, tuple(leases),
-                               no_value=no_value)
+                               no_value=no_value, needs_canonical_write=needs_canonical_write)
         except Exception as exc:
             for lease in leases: lease._release_refholds()
             return Observation(reg.session_id, ws, fingerprint, INVALID, reason=f'{type(exc).__name__}: {exc}')
@@ -381,6 +384,11 @@ class FileSystemService:
                 if reg.closed: raise RuntimeError('Mount was unregistered')
                 buf = self._resolve(transport_lease.checksum)
                 content = buf.content if hasattr(buf, 'content') else bytes(buf)
+                disk_checksum = delivery.checksum
+                if not reg.directory:
+                    content = canon_T(content, reg.celltype)
+                    from seamless import Buffer
+                    disk_checksum = Buffer(content).get_checksum().hex()
                 from seamless.checksum.null import NULL_BUFFER
                 if not reg.directory and content == NULL_BUFFER:
                     content = b''
@@ -391,7 +399,7 @@ class FileSystemService:
                 else:
                     reg.ws += 1
                     reg.baseline = self._fingerprint(reg)
-                    ack = DeliveryAck(reg.session_id, delivery.seq, reg.ws, 'written', delivery.checksum, reg.baseline)
+                    ack = DeliveryAck(reg.session_id, delivery.seq, reg.ws, 'written', disk_checksum, reg.baseline)
             except Exception as exc:
                 ack = DeliveryAck(reg.session_id, delivery.seq, reg.ws, 'error', reason=f'{type(exc).__name__}: {exc}')
             transport_lease._release_refholds()

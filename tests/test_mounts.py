@@ -66,7 +66,7 @@ def test_errors_recover_and_keep_graph_value(tmp_path):
         assert c.mounts.sync(timeout=5)[('a',)]['sense_error']
         p.write_text('{ "x": 2 }');c.mounts.sync(timeout=5)
         assert c.a.value=={'x':2} and c.b.value=={'x':2}
-        assert p.read_text()=='{ "x": 2 }'
+        assert Buffer(p.read_bytes()).get_checksum() == c.a.checksum
         p.write_text('bad');c.mounts.sync(timeout=5)
         c.a={'x':3};c.mounts.sync(timeout=5)
         assert c.a.exception is None

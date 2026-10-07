@@ -558,17 +558,31 @@ def test_rw_mode_deletion_does_not_recreate(tmp_path):
         assert p.read_text() == 'next\n'
 
 
-def test_foreign_sensed_value_is_not_written_back(tmp_path):
-    # "A foreign observation in a sensing mode installs the checksum, sets the belief
-    # and the actuation baseline in the same turn -- so the value is not written
-    # straight back"; "non-canonical bytes are never rewritten".
-    p = tmp_path / 'a.json'; p.write_text('{"a": 1}')
+@pytest.mark.parametrize('mode', ['r', 'rw'])
+@pytest.mark.parametrize('suffix', ['.json', '.json.gz'])
+def test_sensed_json_is_canonicalized_on_rw_mount(tmp_path, mode, suffix):
+    from seamless.checksum.canonical import canon_T
+
+    p = tmp_path / ('a' + suffix)
+    def write(raw):
+        p.write_bytes(gzip.compress(raw) if suffix.endswith('.gz') else raw)
+    def read():
+        return gzip.decompress(p.read_bytes()) if suffix.endswith('.gz') else p.read_bytes()
+
+    write(b'{"a":1}')
     with Context() as c:
-        c.a = Cell(celltype='plain'); c.a.mount(p, mode='rw')
-        p.write_text('{ "a" :   2 }'); c.mounts.sync(timeout=5)
-        assert c.a.value == {'a': 2}
-        assert c.mounts.sync(timeout=5)[('a',)]['in_sync']
-        assert p.read_text() == '{ "a" :   2 }'
+        c.a = Cell(celltype='plain')
+        c.a.mount(p, mode=mode)
+        assert c.mounts.sync(timeout=5).in_sync
+        assert read() == (canon_T(b'{"a":1}', 'plain') if mode == 'rw' else b'{"a":1}')
+        for raw in [b'{"a":1}', b'{ "a" : 2 }', b'{"a":2}']:
+            write(raw)
+            assert c.mounts.sync(timeout=5).in_sync
+            canonical = canon_T(raw, 'plain')
+            assert c.a.checksum == Buffer(canonical).get_checksum()
+            assert read() == (canonical if mode == 'rw' else raw)
+            if mode == 'rw':
+                assert Buffer(read()).get_checksum() == c.a.checksum
 
 
 def test_emptied_directory_reads_as_empty_index(tmp_path):
@@ -1233,3 +1247,36 @@ def test_graph_load_with_write_mounts_writes_files_and_blocks(tmp_path):
         c.set_graph(graph, mounts=False)
         assert c.a.value == 'written' and c.a.mount.spec is None
         assert not p.exists()
+
+
+@pytest.mark.parametrize('mode', ['rw', 'w'])
+@pytest.mark.parametrize('suffix', ['.json', '.json.gz'])
+def test_noncanonical_node_write_preserves_identity(tmp_path, mode, suffix):
+    from seamless.checksum.canonical import canon_T
+
+    raw = b'{"a":1}'
+    buffer = Buffer(raw)
+    buffer.tempref()
+    checksum = buffer.get_checksum()
+    canonical = canon_T(raw, 'plain')
+    p = tmp_path / ('a' + suffix)
+    with Context() as c:
+        c.a = Cell(celltype='plain')
+        c.a.checksum = checksum
+        c.a.mount(p, mode=mode, authority='cell')
+        for _ in range(2):
+            report = c.mounts.sync(timeout=5)
+            assert report.in_sync
+            assert c.a.checksum == checksum
+            assert report[('a',)]['disk_checksum'] == Buffer(canonical).get_checksum().hex()
+        content = gzip.decompress(p.read_bytes()) if suffix.endswith('.gz') else p.read_bytes()
+        assert content == canonical
+        if mode == 'rw':
+            formatted = b'{ "a": 1 }'
+            p.write_bytes(gzip.compress(formatted) if suffix.endswith('.gz') else formatted)
+            assert c.mounts.sync(timeout=5).in_sync
+            assert c.a.checksum == checksum
+            replacement = b'{"a":2}'
+            p.write_bytes(gzip.compress(replacement) if suffix.endswith('.gz') else replacement)
+            assert c.mounts.sync(timeout=5).in_sync
+            assert c.a.value == {'a': 2}

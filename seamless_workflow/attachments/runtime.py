@@ -87,7 +87,9 @@ class AttachmentRuntime:
             elif action == 'error': self._mount_sense_error(session, observation.reason or 'Required file is missing')
             elif action == 'write': self._mount_request(session, checksum)
             if checksum == observation.checksum: self._mount_hold_leaves(session, observation)
-            if action != 'write': session.initial.set_result(None)
+            if spec.mode == 'rw' and observation.needs_canonical_write and action in {'sense', 'nothing'}:
+                self._mount_request(session, observation.checksum if action == 'sense' else checksum, force=True)
+            if action != 'write' and session.pending is None: session.initial.set_result(None)
             self._effects.append(lambda: registration.service.activate(registration))
             self._mount_event(session, 'attach', action=action)
             self._derive_all()
@@ -148,6 +150,9 @@ class AttachmentRuntime:
             elif kind == 'unchanged' and session.sense_error and observation.checksum not in {ABSENT, INVALID}:
                 self._mount_sense(session, observation)
             node = self._graph.nodes[session.node_path]
+            if session.spec.mode == 'rw' and observation.needs_canonical_write and kind in {'foreign', 'unchanged'} and session.sense_error is None:
+                source = observation.checksum if kind == 'foreign' or node.state != 'complete' else node.current_checksum.hex()
+                self._mount_request(session, source, force=True)
             if node.current_checksum and node.current_checksum.hex() == observation.checksum:
                 self._mount_hold_leaves(session, observation)
             if reassert(session.spec.mode, node.state, kind) and session.state == 'active':
@@ -163,12 +168,12 @@ class AttachmentRuntime:
             if session is not None: session.error = MountError(str(exc))
         finally: observation.release()
 
-    def _mount_request(self, session, checksum):
+    def _mount_request(self, session, checksum, *, force=False):
         if session.state != 'active' or checksum is None: return
         session.delivery_seq += 1
         if session.pending: session.pending.lease._release_refholds()
         lease = MountLease(Checksum(checksum), f'mount:{session.session_id}:delivery:{session.delivery_seq}', session.celltype)
-        session.pending = Delivery(session.session_id, session.delivery_seq, checksum, session.celltype, session.fingerprint, lease)
+        session.pending = Delivery(session.session_id, session.delivery_seq, checksum, session.celltype, session.fingerprint, lease, force=force)
         session.last_synced = checksum
         session.retry_at = 0
         self._mount_activity += 1
@@ -184,7 +189,7 @@ class AttachmentRuntime:
             delivery.checksum == null_checksum and session.disk == ABSENT)
         if getattr(session.registration, 'directory', False) and delivery.checksum == null_checksum:
             equivalent = True
-        if equivalent:
+        if equivalent and not delivery.force:
             delivery.lease._release_refholds()
             if not session.initial.done(): session.initial.set_result(None)
             return
@@ -217,6 +222,7 @@ class AttachmentRuntime:
             if ack.ws > session.processed_ws:
                 session.disk, session.fingerprint = ack.checksum, ack.fingerprint
                 session.processed_ws = ack.ws
+                session.written_pair = (delivery.checksum, ack.checksum)
             if session.state != 'tripped': session.error = None
             session.retry_delay = 1
             delivery.lease._release_refholds()
@@ -271,7 +277,7 @@ class AttachmentRuntime:
         node = self._graph.nodes[path]
         checksum = node.current_checksum.hex() if node.state == 'complete' and node.current_checksum else None
         from seamless.checksum.null import NULL_CHECKSUM
-        equivalent = checksum == session.disk or (
+        equivalent = checksum == session.disk or session.written_pair == (checksum, session.disk) or (
             checksum == Checksum(NULL_CHECKSUM).hex() and session.disk == ABSENT)
         return dict(state=session.state, node_checksum=checksum, disk_checksum=session.disk,
                     in_sync=checksum is not None and equivalent and session.sense_error is None,
