@@ -44,7 +44,7 @@ def int_cell(ctx, name="a", value=1):
 
 
 def transport(ctx, name="a"):
-    return ctx._mount_sessions[(name,)].registration.service
+    return ctx._mount_sessions[((name,), "widget")].registration.service
 
 
 def test_section_seven_two_sliders_transformer_and_output():
@@ -226,7 +226,7 @@ def test_invalid_widget_value_fails_cell_and_valid_value_recovers():
         report = sync(ctx)
         assert ctx.a.state == "failed" and isinstance(ctx.a.exception, str)
         assert "widget-" in ctx.a.exception
-        assert report[("a",)]["sense_error"] is not None
+        assert report[(("a",), "widget")]["sense_error"] is not None
         assert t.error is None
         widget.value = "11"
         sync(ctx)
@@ -305,7 +305,7 @@ def test_no_downgrade_after_unlink_and_destroy_allows_incoming_edge():
         assert ctx.a.value == 9
 
 
-@pytest.mark.parametrize("operation", ["destroy", "unmount", "reload", "close", "delete", "empty_builder"])
+@pytest.mark.parametrize("operation", ["destroy", "reload", "close", "delete", "empty_builder"])
 def test_every_detach_unlinks_and_old_hub_is_inert(operation):
     ctx = Context()
     try:
@@ -316,8 +316,6 @@ def test_every_detach_unlinks_and_old_hub_is_inert(operation):
         sync(ctx)
         if operation == "destroy":
             t.destroy()
-        elif operation == "unmount":
-            del ctx.a.mount
         elif operation == "reload":
             ctx.set_graph(ctx.get_graph())
         elif operation == "close":
@@ -330,7 +328,7 @@ def test_every_detach_unlinks_and_old_hub_is_inert(operation):
         assert t.value == 1 and b.value == 1
         t.value = 8
         assert a.value == 7 and b.value == 1
-        if operation in {"destroy", "unmount", "reload", "empty_builder"}:
+        if operation in {"destroy", "reload", "empty_builder"}:
             fresh = traitlet(ctx.a)
             assert fresh is not t
             ctx.a = 9
@@ -340,18 +338,23 @@ def test_every_detach_unlinks_and_old_hub_is_inert(operation):
         ctx.close()
 
 
-def test_widget_session_never_serialized_and_file_mount_is_exclusive(tmp_path):
+def test_widget_session_never_serialized_and_file_mount_coexists(tmp_path):
     with Context() as ctx:
         int_cell(ctx)
         t = traitlet(ctx.a)
         t.link(Value())
         assert all("mount" not in node for node in ctx.get_graph()["nodes"])
-        with pytest.raises(ValueError, match="Cell is already mounted; unmount first"):
-            ctx.a.mount(tmp_path / "value", mode="w")
+        path = tmp_path / "value"
+        ctx.a.mount(path, mode="w")
+        assert traitlet(ctx.a) is t
+        ctx.a = 7
+        sync(ctx)
+        assert t.value == 7 and path.read_text().strip() == "7"
         t.destroy()
-        ctx.a.mount(tmp_path / "value", mode="w")
-        with pytest.raises(ValueError, match="Cell is already mounted; unmount first"):
-            traitlet(ctx.a)
+        assert ctx.a.mount.spec is not None
+        fresh = traitlet(ctx.a)
+        assert fresh is not t
+
 
 
 @pytest.mark.parametrize("kind", ["standalone", "subpath", "result", "missing", "transformer"])
@@ -501,7 +504,7 @@ def test_missing_payload_is_delivery_error_on_hub_not_cell():
         assert isinstance(t.error, MountError)
         assert "widget-" in str(t.error) and "CacheMissError" in str(t.error)
         assert ctx.a.exception is None
-        assert isinstance(report[("a",)]["error"], MountError)
+        assert isinstance(report[(("a",), "widget")]["error"], MountError)
         ctx.a = "available"
         sync(ctx)
         assert t.value == "available" and t.error is None

@@ -493,16 +493,28 @@ def test_echo_of_in_flight_delivery_is_adopted():
     with Context() as c, record_attachments(c) as log:
         c.a = Cell(celltype='text'); c.a.set('one')
         d = ManualDriver().attach(c.a, 'one')
-        c.a = 'two'; c.get_graph()
-        delivery = d.deliveries.popleft()
-        d.observe('two'); c.get_graph()
-        assert c.a.value == 'two'
-        assert c.a.mount.status['disk_checksum'] == Buffer('two', 'text').get_checksum().hex()
-        assert c.a.mount.status['in_flight']
-        d.ack(delivery); c.get_graph()
-        assert c.a.mount.status['in_sync']
-        classes = [dict(e[3])['classification'] for e in log.entries() if e[2] == 'observation']
-        assert classes == ['echo']
+        delivery = None
+        try:
+            c.a = 'two'; c.get_graph()
+            delivery = d.deliveries.popleft()
+            d.observe('two'); c.get_graph()
+            assert c.a.value == 'two'
+            status = c._controller.call('_mount_status', ('a',), driver='manual')
+            assert status['disk_checksum'] == Buffer('two', 'text').get_checksum().hex()
+            assert status['in_flight']
+            d.ack(delivery); c.get_graph()
+            status = c._controller.call('_mount_status', ('a',), driver='manual')
+            assert status['in_sync']
+            classes = [dict(e[3])['classification'] for e in log.entries() if e[2] == 'observation']
+            assert classes == ['echo']
+        finally:
+            status = c._controller.call('_mount_status', ('a',), driver='manual')
+            if status is not None and status['in_flight'] and delivery is not None:
+                d.ack(delivery); c.get_graph()
+            future = c._controller.call('_mount_detach', ('a',), driver='manual',
+                                        registration=d.registration, delete=False)
+            if future is not None:
+                future.result(timeout=5)
 
 
 def test_identical_rewrite_and_touch_are_unchanged(tmp_path):
@@ -671,7 +683,7 @@ def test_null_value_with_absent_file_is_in_sync(tmp_path):
     with Context() as c:
         c.a = Cell(celltype='text'); c.a.set(None); c.a.mount(p, mode='w')
         report = c.mounts.sync(timeout=5)
-        assert report[('a',)]['in_sync'] and report.in_sync
+        assert report[(('a',), 'file')]['in_sync'] and report.in_sync
         assert not p.exists()
 
 
@@ -784,7 +796,7 @@ def test_detector_trip_stops_actuation_and_keeps_registration(tmp_path):
         for n in range(3):
             p.write_text(f'theirs{n}'); c.mounts.sync(timeout=5)
         assert c.a.mount.status['state'] == 'tripped'
-        assert c.mounts.errors[('a',)] is c.a.mount.error
+        assert c.mounts.errors[(('a',), 'file')] is c.a.mount.error
         # "The file driver's error message names the path and the two alternating
         # checksums" (the rest of the message is prose, per *Implementation status*).
         from seamless_workflow.attachments import ConflictError
@@ -880,7 +892,7 @@ def test_null_directory_reports_no_error(tmp_path):
         c.a = Cell(celltype='folder'); c.a.mount(p, mode='rw')
         c.a.set(None); report = c.mounts.sync(timeout=5)
         assert not report.in_sync and report.errors == {} and c.mounts.errors == {}
-        assert report[('a',)]['error'] is None and report[('a',)]['sense_error'] is None
+        assert report[(('a',), 'file')]['error'] is None and report[(('a',), 'file')]['sense_error'] is None
         cs = _leaf(b'y')
         c.a = {'b': cs}; report = c.mounts.sync(timeout=5)
         assert report.in_sync
@@ -919,14 +931,14 @@ def test_sync_report_shape_errors_and_in_sync(tmp_path):
         c.b = Cell(celltype='plain'); c.b.mount(bad, mode='r')
         report = c.mounts.sync(timeout=5)
         assert isinstance(report, SyncReport) and isinstance(report, dict)
-        assert set(report) == {('g',), ('b',)}
-        assert report[('g',)]['in_sync'] and not report[('b',)]['in_sync']
+        assert set(report) == {(('g',), 'file'), (('b',), 'file')}
+        assert report[(('g',), 'file')]['in_sync'] and not report[(('b',), 'file')]['in_sync']
         assert not report.in_sync
-        assert set(report.errors) == {('b',)} and isinstance(report.errors[('b',)], MountError)
+        assert set(report.errors) == {(('b',), 'file')} and isinstance(report.errors[(('b',), 'file')], MountError)
         assert c.mounts.errors == report.errors
         # detached copies: later changes do not alter the report
         bad.write_text('{"a": 1}'); c.mounts.sync(timeout=5)
-        assert report[('b',)]['sense_error'] is not None
+        assert report[(('b',), 'file')]['sense_error'] is not None
         assert c.mounts.errors == {}
         assert c.mounts.sync(timeout=5).in_sync
 
@@ -936,7 +948,7 @@ def test_report_in_sync_false_when_a_mount_has_an_error(tmp_path):
     with Context() as c:
         c.a = Cell(celltype='text'); c.a.set('v'); c.a.mount(p, mode='w')
         report = c.mounts.sync(timeout=5)
-        assert isinstance(report.errors[('a',)], MountError)
+        assert isinstance(report.errors[(('a',), 'file')], MountError)
         assert not report.in_sync
 
 
@@ -1268,7 +1280,7 @@ def test_noncanonical_node_write_preserves_identity(tmp_path, mode, suffix):
             report = c.mounts.sync(timeout=5)
             assert report.in_sync
             assert c.a.checksum == checksum
-            assert report[('a',)]['disk_checksum'] == Buffer(canonical).get_checksum().hex()
+            assert report[(('a',), 'file')]['disk_checksum'] == Buffer(canonical).get_checksum().hex()
         content = gzip.decompress(p.read_bytes()) if suffix.endswith('.gz') else p.read_bytes()
         assert content == canonical
         if mode == 'rw':

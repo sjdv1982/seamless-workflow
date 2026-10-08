@@ -9,7 +9,7 @@ class ConflictError(MountError): pass
 
 
 class SyncReport(dict):
-    """Detached status snapshots keyed by Context node path."""
+    """Detached status snapshots keyed by (Context node path, driver)."""
     @property
     def errors(self):
         return {path: status['error'] or status['sense_error'] for path, status in self.items()
@@ -89,4 +89,5 @@ class MountSession:
     initial: object = field(default_factory=Future)
     retry_at: float = 0
     retry_delay: float = 1
+    last_delivery_at: float = 0
     leaf_leases: tuple = ()

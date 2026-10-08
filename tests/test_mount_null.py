@@ -170,4 +170,4 @@ def test_null_directory_keeps_tree_and_is_out_of_sync(tmp_path):
         ctx.value = Cell(celltype="folder"); ctx.value.mount(path, mode="rw")
         ctx.value.set(None); report = ctx.mounts.sync(timeout=5)
         assert (path / "a").read_bytes() == b"content"
-        assert not report[("value",)]["in_sync"]
+        assert not report[(("value",), "file")]["in_sync"]

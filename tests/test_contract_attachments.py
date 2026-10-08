@@ -31,12 +31,29 @@ def fail_on_two(x):
     return x * 10
 
 
-def _status(ctx, name):
-    return ctx._controller.call("_mount_status", (name,), klass=4)
+def _status(ctx, name, driver="manual"):
+    return ctx._controller.call("_mount_status", (name,), driver=driver, klass=4)
 
 
-def _session(ctx, name):
-    return ctx._mount_sessions[(name,)]
+def _session(ctx, name, driver="file"):
+    return ctx._mount_sessions[((name,), driver)]
+
+
+def _wait_delivery(driver, timeout=5):
+    deadline = time.monotonic() + timeout
+    while not driver.deliveries and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert driver.deliveries, "timed out waiting for paced ManualDriver delivery"
+    return driver.deliveries.popleft()
+
+
+def _detach_manual(ctx, driver, path=("a",)):
+    future = ctx._controller.call(
+        "_mount_detach", tuple(path), driver="manual",
+        registration=driver.registration, delete=False,
+    )
+    if future is not None:
+        future.result(timeout=5)
 
 
 # --------------------------------------------------------------------------
@@ -329,12 +346,13 @@ def test_late_observation_from_old_session_is_discarded():
         c.a.set("one")
         old_driver = ManualDriver().attach(c.a, "one")
         late = old_driver.observation("from-the-old-session")
-        del c.a.mount
-        ManualDriver().attach(c.a, "one")
+        _detach_manual(c, old_driver)
+        new_driver = ManualDriver().attach(c.a, "one")
         old_driver.registration.sink("_mount_observed", late)
         c.get_graph()
         assert c.a.value == "one"
         assert late.leases[0].released
+        _detach_manual(c, new_driver)
 
 
 def test_only_file_driver_is_serializable():
@@ -343,9 +361,9 @@ def test_only_file_driver_is_serializable():
     with Context() as c:
         c.a = Cell(celltype="text")
         c.a.set("a")
-        ManualDriver().attach(c.a, "a")
+        driver = ManualDriver().attach(c.a, "a")
         assert "mount" not in c.get_graph()["nodes"][0]
-        del c.a.mount
+        _detach_manual(c, driver)
 
 
 def test_set_graph_detaches_without_deleting_nonpersistent_file(tmp_path):
@@ -458,17 +476,17 @@ def test_sense_supersedes_undispatched_pending_delivery_not_in_flight():
         in_flight = d.deliveries.popleft()
         c.a = "three"
         c.get_graph()
-        pending = _session(c, "a").pending
+        pending = _session(c, "a", driver="manual").pending
         assert pending is not None
         d.observe("foreign")
         c.get_graph()
         assert c.a.value == "foreign"
-        assert _session(c, "a").pending is None and pending.lease.released
-        assert _session(c, "a").in_flight is in_flight  # never cancelled
+        assert _session(c, "a", driver="manual").pending is None and pending.lease.released
+        assert _session(c, "a", driver="manual").in_flight is in_flight  # never cancelled
         d.ack(in_flight)
         c.get_graph()
         assert not d.deliveries
-        del c.a.mount
+        _detach_manual(c, d)
 
 
 def test_sense_and_user_write_have_equal_authority():
@@ -484,7 +502,7 @@ def test_sense_and_user_write_have_equal_authority():
         d.observe("sensed-again")
         c.get_graph()
         assert c.a.value == "sensed-again"
-        del c.a.mount
+        _detach_manual(c, d)
 
 
 def test_python_syntax_error_in_sensed_value_fails_downstream(tmp_path):
@@ -558,7 +576,7 @@ def test_only_complete_actuates_failed_upstream_keeps_resource(tmp_path):
         report = c.mounts.sync(timeout=10)  # resolves although the node is not complete
         assert c.out.state != "complete"
         assert p.read_text() == "10\n" and p.stat().st_mtime_ns == before
-        assert report[("out",)]["in_sync"] is False and report[("out",)]["error"] is None
+        assert report[(("out",), "file")]["in_sync"] is False and report[(("out",), "file")]["error"] is None
 
 
 def test_pending_equivalent_to_resource_is_dropped_on_ack():
@@ -614,7 +632,7 @@ def test_sense_error_typing_and_prefix(tmp_path):
         assert str(status["sense_error"]) == c.a.exception
         assert c.a.mount.error is None  # sense errors live on the cell, not .error
         assert c.b.state == "blocked" and c.b.block_reason == "blocked-by-error"
-        assert isinstance(c.mounts.errors[("a",)], MountError)
+        assert isinstance(c.mounts.errors[(("a",), "file")], MountError)
         del c.a.mount
         assert c.a.state == "complete" and c.a.value == {"x": 1}
 
@@ -642,7 +660,7 @@ def test_clear_exception_on_sense_error_requests_reobservation():
         d.observe("fixed")
         c.get_graph()
         assert c.a.state == "complete" and c.a.value == "fixed"
-        del c.a.mount
+        _detach_manual(c, d)
 
 
 def test_delivery_backoff_doubles_and_caps_at_60s():
@@ -651,19 +669,19 @@ def test_delivery_backoff_doubles_and_caps_at_60s():
         c.a.set("one")
         d = ManualDriver().attach(c.a, "one", mode="w")
         c.a = "two"
-        session = _session(c, "a")
+        session = _session(c, "a", driver="manual")
         delays = []
         for _ in range(8):
-            d.ack(d.deliveries.popleft(), outcome="error")
+            d.ack(_wait_delivery(d), outcome="error")
             c.get_graph()
-            assert c.a.exception is None and isinstance(c.a.mount.error, MountError)
+            assert c.a.exception is None and isinstance(_status(c, "a")["error"], MountError)
             delays.append(round(session.retry_at - time.monotonic()))
             session.retry_at = 0  # make the retry due
             c.get_graph()
         assert delays == [1, 2, 4, 8, 16, 32, 60, 60]
-        d.ack(d.deliveries.popleft())
+        d.ack(_wait_delivery(d))
         c.get_graph()
-        assert c.a.mount.error is None and session.retry_delay == 1
+        assert _status(c, "a")["error"] is None and session.retry_delay == 1
 
 
 def test_failed_delivery_retries_without_any_context_call(tmp_path):
@@ -710,10 +728,10 @@ def test_tripped_attachment_is_paused_not_dead():
         c.get_graph()
         from seamless import Buffer
         assert _status(c, "a")["disk_checksum"] == Buffer("theirs9", "text").get_checksum().hex()
-        c.a.mount.clear_error()
+        c._controller.call("_mount_clear_error", ("a",), driver="manual", klass=4)
         c.get_graph()
-        assert _status(c, "a")["state"] == "active" and c.a.mount.error is None
-        delivery = d.deliveries.popleft()
+        assert _status(c, "a")["state"] == "active" and _status(c, "a")["error"] is None
+        delivery = _wait_delivery(d)
         assert delivery.lease.checksum.resolve("text") == "new"
         d.ack(delivery)
         c.get_graph()
@@ -867,7 +885,7 @@ def test_miswired_upstream_does_not_actuate_and_barrier_settles(tmp_path):
         # node-state side, and the barrier resolves on a non-complete actuating node
         assert c.out.state == "blocked" and c.out.block_reason == "blocked-by-miswiring"
         report = c.mounts.sync(timeout=5)
-        assert report[("out",)]["in_sync"] is False and report[("out",)]["error"] is None
+        assert report[(("out",), "file")]["in_sync"] is False and report[(("out",), "file")]["error"] is None
 
 
 # --------------------------------------------------------------------------
@@ -906,9 +924,9 @@ def test_user_write_clears_the_sense_error():
         c.a = "user"
         assert c.a.state == "complete" and c.a.value == "user"
         assert c.a.exception is None and _status(c, "a")["sense_error"] is None
-        d.ack(d.deliveries.popleft())
+        d.ack(_wait_delivery(d))
         c.get_graph()
-        del c.a.mount
+        _detach_manual(c, d)
 
 
 def test_sense_error_masks_but_keeps_stored_value(tmp_path):
@@ -939,7 +957,7 @@ def test_disappearance_does_not_clear_the_node(tmp_path):
         p.unlink()
         report = c.mounts.sync(timeout=10)
         assert c.a.checksum == cs and c.a.value == "hello"
-        assert report[("a",)]["state"] == "active"  # still monitoring
+        assert report[(("a",), "file")]["state"] == "active"  # still monitoring
         p.write_text("back")
         c.mounts.sync(timeout=10)
         assert c.a.value == "back"
@@ -966,7 +984,7 @@ def test_waiting_node_does_not_actuate():
         assert delivery.lease.checksum.resolve("int") == 2
         d.ack(delivery)
         c.get_graph()
-        del c.out.mount
+        _detach_manual(c, d, path=("out",))
 
 
 def test_latest_discipline_replaces_pending_and_releases_its_claim():
@@ -981,16 +999,16 @@ def test_latest_discipline_replaces_pending_and_releases_its_claim():
         in_flight = d.deliveries.popleft()
         c.a = "three"
         c.get_graph()
-        replaced = _session(c, "a").pending
+        replaced = _session(c, "a", driver="manual").pending
         c.a = "four"
         c.a = "five"
         c.get_graph()
         assert replaced.lease.released
-        assert _session(c, "a").in_flight is in_flight
+        assert _session(c, "a", driver="manual").in_flight is in_flight
         assert not d.deliveries
         d.ack(in_flight)
         c.get_graph()
-        last = d.deliveries.popleft()
+        last = _wait_delivery(d)
         assert last.lease.checksum.resolve("text") == "five"
         assert not d.deliveries
         d.ack(last)
@@ -1008,15 +1026,15 @@ def test_failed_delivery_retries_immediately_on_value_change():
         c.a = "two"
         d.ack(d.deliveries.popleft(), outcome="error")
         c.get_graph()
-        assert _session(c, "a").retry_at > time.monotonic() + 0.5  # backoff not yet due
+        assert _session(c, "a", driver="manual").retry_at > time.monotonic() + 0.5  # backoff not yet due
         assert not d.deliveries
         c.a = "three"
         c.get_graph()
-        delivery = d.deliveries.popleft()
+        delivery = _wait_delivery(d)
         assert delivery.lease.checksum.resolve("text") == "three"
         d.ack(delivery)
         c.get_graph()
-        assert c.a.mount.error is None
+        assert _status(c, "a")["error"] is None
 
 
 def test_delivery_resolves_never_computes_cache_miss_is_a_delivery_error(tmp_path):
@@ -1033,7 +1051,7 @@ def test_delivery_resolves_never_computes_cache_miss_is_a_delivery_error(tmp_pat
         assert isinstance(c.a.mount.error, MountError)
         assert "CacheMissError" in str(c.a.mount.error)
         report = c.mounts.sync(timeout=10)
-        assert isinstance(report[("a",)]["error"], MountError)
+        assert isinstance(report[(("a",), "file")]["error"], MountError)
         assert not p.exists()
 
 
@@ -1046,7 +1064,7 @@ def test_barrier_resolves_with_a_sense_error(tmp_path):
         c.a = Cell(celltype="plain")
         c.a.mount(p, mode="r")
         report = c.mounts.sync(timeout=10)
-        assert isinstance(report[("a",)]["sense_error"], MountError)
+        assert isinstance(report[(("a",), "file")]["sense_error"], MountError)
 
 
 def test_barrier_timeout_raises_withdraws_and_cancels_nothing():
@@ -1060,11 +1078,11 @@ def test_barrier_timeout_raises_withdraws_and_cancels_nothing():
         in_flight = d.deliveries[0]
         with pytest.raises(TimeoutError):
             c.mounts.sync(timeout=0.3)
-        assert _session(c, "a").in_flight is in_flight  # nothing cancelled
+        assert _session(c, "a", driver="manual").in_flight is in_flight  # nothing cancelled
         d.ack(d.deliveries.popleft())
         c.get_graph()
         assert not _status(c, "a")["in_flight"]
-        del c.a.mount
+        _detach_manual(c, d)
 
 
 def slow_ident(x):

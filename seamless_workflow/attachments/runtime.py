@@ -2,11 +2,14 @@
 from dataclasses import dataclass, replace
 from concurrent.futures import Future
 import time
+from threading import Timer
 from seamless import Checksum
 from .policy import ABSENT, INVALID, decide_initial, classify_observation, detector, reassert
 from .session import MountSession, MountError, ConflictError, MountLease, Delivery, SyncReport
 from .spec import validate_celltype
 from ..errors import AuthorityError, NodeError
+
+DELIVERY_INTERVAL = 2 / 3
 
 
 @dataclass
@@ -22,7 +25,12 @@ class SyncPredicate:
         self.waiting.intersection_update(s.session_id for s in ctx._mount_sessions.values())
         if self.waiting: return False, None
         if any(n.state in {'waiting', 'computing'} for n in ctx._graph.nodes.values()): return False, None
-        if any(s.in_flight or (s.pending and not s.error) for s in ctx._mount_sessions.values()): return False, None
+        if any(
+            s.in_flight
+            or (s.pending and (s.error is None or s.retry_at == 0))
+            for s in ctx._mount_sessions.values()
+        ):
+            return False, None
         if self.activity != ctx._mount_activity:
             self.start(ctx)
             return False, None
@@ -41,17 +49,47 @@ class AttachmentRuntime:
     def _mount_register_log(self, log): self._mount_logs.add(log)
     def _mount_unregister_log(self, log): self._mount_logs.discard(log)
 
+    def _mount_sessions_for(self, path):
+        path = tuple(path)
+        return tuple(
+            session for (node_path, _), session in self._mount_sessions.items()
+            if node_path == path
+        )
+
+    def _mount_has_sensing(self, path):
+        node = self._graph.nodes.get(tuple(path))
+        if node is None:
+            return False
+        if node.mount is not None and 'r' in node.mount.mode:
+            return True
+        if any('r' in spec.mode for spec in node.attachments.values()):
+            return True
+        return any('r' in session.spec.mode for session in self._mount_sessions_for(path))
+
+    def _mount_has_attachments(self, path):
+        node = self._graph.nodes.get(tuple(path))
+        return bool(
+            (node is not None and (node.mount is not None or node.attachments))
+            or self._mount_sessions_for(path)
+        )
+
     def _mount_registrations(self):
         return tuple(s.registration for s in self._mount_sessions.values())
 
-    def _mount_transport(self, path):
-        session = self._mount_sessions.get(path)
+    def _mount_transport(self, path, driver='widget'):
+        session = self._mount_sessions.get((tuple(path), driver))
         return None if session is None else session.registration.service
 
     def _mount_validate(self, path, spec):
+        path = tuple(path)
         node = self._graph.nodes.get(path)
         if node is None or node.kind != 'cell': raise NodeError('Mounts require an existing whole cell node')
-        if node.mount is not None: raise ValueError('Cell is already mounted; unmount first')
+        if spec.driver == 'file':
+            occupied = node.mount is not None
+        else:
+            occupied = spec.driver in node.attachments
+        if occupied or (path, spec.driver) in self._mount_sessions:
+            raise ValueError('Cell is already mounted; unmount first')
         incoming = self._incoming_for(path)
         if 'r' in spec.mode and incoming: raise AuthorityError('Sensing mount cannot have incoming edges; unmount first')
         celltype = node.cell_config.celltype
@@ -59,6 +97,7 @@ class AttachmentRuntime:
         return celltype
 
     def _mount_event(self, session, kind, **detail):
+        detail.setdefault('driver', session.spec.driver)
         event = (session.session_id, session.node_path, kind, tuple(sorted(detail.items())))
         self._mount_events.append(event)
         for log in self._mount_logs: log._append(event)
@@ -68,13 +107,17 @@ class AttachmentRuntime:
             celltype = self._mount_validate(path, spec)
             if celltype != registration.celltype: raise ValueError('Celltype changed during mount preparation')
             node = self._graph.nodes[path]
-            node.mount_inactive = False
+            if spec.driver == 'file':
+                node.mount_inactive = False
             checksum = node.current_checksum.hex() if node.state == 'complete' and node.current_checksum else None
             session = MountSession(registration.session_id, path, spec, registration, celltype,
                                    observation.checksum, observation.fingerprint,
                                    processed_ws=observation.ws, last_synced=checksum)
-            node.mount = spec
-            self._mount_sessions[path] = session
+            if spec.driver == 'file':
+                node.mount = spec
+            else:
+                node.attachments[spec.driver] = spec
+            self._mount_sessions[(path, spec.driver)] = session
             from seamless.checksum.null import NULL_CHECKSUM
             null_checksum = Checksum(NULL_CHECKSUM).hex()
             action = decide_initial(spec, observation.checksum, checksum,
@@ -151,7 +194,12 @@ class AttachmentRuntime:
                 self._mount_sense_error(session, 'Required file is missing')
             elif kind == 'absent':
                 session.sense_error = None
-            elif kind == 'unchanged' and session.sense_error and observation.checksum not in {ABSENT, INVALID}:
+            elif (
+                kind == 'unchanged'
+                and 'r' in session.spec.mode
+                and session.sense_error is not None
+                and observation.checksum not in {ABSENT, INVALID}
+            ):
                 self._mount_sense(session, observation)
             node = self._graph.nodes[session.node_path]
             if session.spec.mode == 'rw' and observation.needs_canonical_write and kind in {'foreign', 'unchanged'} and session.sense_error is None:
@@ -185,8 +233,9 @@ class AttachmentRuntime:
 
     def _mount_dispatch(self, session):
         if session.in_flight or not session.pending or session.state != 'active': return
-        if session.retry_at > time.monotonic(): return
-        delivery, session.pending = session.pending, None
+        now = time.monotonic()
+        if session.retry_at > now: return
+        delivery = session.pending
         from seamless.checksum.null import NULL_CHECKSUM
         null_checksum = Checksum(NULL_CHECKSUM).hex()
         equivalent = delivery.checksum == session.disk or (
@@ -194,19 +243,23 @@ class AttachmentRuntime:
         if getattr(session.registration, 'directory', False) and delivery.checksum == null_checksum:
             equivalent = True
         if equivalent and not delivery.force:
+            session.pending = None
             delivery.lease._release_refholds()
             if not session.initial.done(): session.initial.set_result(None)
             return
+        if now < session.last_delivery_at + DELIVERY_INTERVAL: return
+        delivery, session.pending = session.pending, None
         delivery = replace(delivery, expected_fingerprint=session.fingerprint)
         session.in_flight = delivery
+        session.last_delivery_at = now
         self._mount_event(session, 'dispatch', seq=delivery.seq)
         self._effects.append(lambda: session.registration.service.deliver(session.registration, delivery))
 
     def _mount_after_turn(self):
-        for session in tuple(self._mount_sessions.values()):
+        for (node_path, driver), session in tuple(self._mount_sessions.items()):
             node = self._graph.nodes.get(session.node_path)
             if node is None or node.kind != 'cell':
-                self._mount_detach(session.node_path)
+                self._mount_detach(session.node_path, driver=driver)
                 continue
             if 'w' in session.spec.mode and node.state == 'complete' and node.current_checksum is not None:
                 checksum = node.current_checksum.hex()
@@ -214,6 +267,46 @@ class AttachmentRuntime:
                     session.last_synced = checksum
                     if checksum != session.disk: self._mount_request(session, checksum)
             self._mount_dispatch(session)
+        self._mount_schedule_wakeup()
+
+    def _mount_schedule_wakeup(self):
+        now = time.monotonic()
+        deadlines = [
+            max(session.retry_at, session.last_delivery_at + DELIVERY_INTERVAL)
+            for session in self._mount_sessions.values()
+            if session.pending is not None and session.state == 'active'
+            and not session.in_flight
+            and (not self._closing or (
+                session.spec.persistent and session.error is None
+            ))
+        ]
+        deadline = min(deadlines) if deadlines else None
+        current = self._mount_wake_deadline
+        timer = self._mount_wake_timer
+        if deadline is None:
+            if timer is not None:
+                timer.cancel()
+            self._mount_wake_timer = None
+            self._mount_wake_deadline = None
+            return
+        if timer is not None and timer.is_alive() and current is not None and current <= deadline:
+            return
+        if timer is not None:
+            timer.cancel()
+        controller = self._controller
+        timer = Timer(
+            max(0, deadline - now),
+            controller.notify,
+            args=('_mount_tick', (None,)),
+            kwargs={'klass': 5, 'internal': True},
+        )
+        timer.daemon = True
+        self._mount_wake_timer = timer
+        self._mount_wake_deadline = deadline
+        timer.start()
+
+    def _mount_wakeup(self):
+        self._controller.notify('_mount_tick', (None,), klass=5, internal=True)
 
     def _mount_delivered(self, ack):
         from .session import DeliveryAck
@@ -250,12 +343,33 @@ class AttachmentRuntime:
                 self._mount_dispatch(session)
             effects, self._effects = self._effects, []
             for effect in effects: effect()
+            self._mount_schedule_wakeup()
             if self._mount_close_future is not None and not self._mount_close_future.done() and not self._mount_close_busy():
                 self._mount_close_future.set_result(None)
 
-    def _mount_tick(self, session_id):
-        # The normal post-turn pass dispatches retries when their backoff expires.
-        pass
+    def _mount_tick(self, session_id=None):
+        # Both the transport poll and the Context-owned deadline timer wake the
+        # ordinary post-turn dispatcher. Clear the expired timer before it
+        # decides whether another wakeup is needed.
+        timer = self._mount_wake_timer
+        if timer is not None:
+            timer.cancel()
+        self._mount_wake_timer = None
+        self._mount_wake_deadline = None
+        if self._closing:
+            for session in self._mount_sessions.values():
+                if session.spec.persistent and session.pending and not session.error:
+                    self._mount_dispatch(session)
+            effects, self._effects = self._effects, []
+            for effect in effects:
+                effect()
+            self._mount_schedule_wakeup()
+            if (
+                self._mount_close_future is not None
+                and not self._mount_close_future.done()
+                and not self._mount_close_busy()
+            ):
+                self._mount_close_future.set_result(None)
 
     def _mount_cut(self, payload):
         if not isinstance(payload, tuple) or len(payload) != 3: return
@@ -271,15 +385,23 @@ class AttachmentRuntime:
         return future
 
     def _mount_report(self):
-        return SyncReport({path: self._mount_status(path) for path in self._mount_sessions})
+        return SyncReport({
+            key: self._mount_status(*key)
+            for key in self._mount_sessions
+        })
 
-    def _mount_status(self, path, registration=None):
-        session = self._mount_sessions.get(path)
+    def _mount_status(self, path, driver='file', registration=None):
+        if registration is not None:
+            driver = registration.spec.driver
+        path = tuple(path)
+        session = self._mount_sessions.get((path, driver))
         if registration is not None and (
             session is None or session.registration is not registration
         ):
             return None
         if session is None:
+            if driver != 'file':
+                return None
             node = self._graph.nodes[path]
             return {"state": "inactive"} if node.mount_inactive else None
         node = self._graph.nodes[path]
@@ -292,11 +414,15 @@ class AttachmentRuntime:
                     pending=session.pending is not None, in_flight=session.in_flight is not None,
                     sense_error=session.sense_error, error=session.error)
 
-    def _mount_clear_error(self, path, registration=None):
+    def _mount_clear_error(self, path, driver='file', registration=None):
+        if registration is not None:
+            driver = registration.spec.driver
+        path = tuple(path)
+        key = (path, driver)
         if registration is None:
-            session = self._mount_sessions[path]
+            session = self._mount_sessions[key]
         else:
-            session = self._mount_sessions.get(path)
+            session = self._mount_sessions.get(key)
             if session is None or session.registration is not registration:
                 return None
         session.error, session.state, session.reasserts = None, 'active', ()
@@ -305,12 +431,16 @@ class AttachmentRuntime:
         if 'w' in session.spec.mode and node.state == 'complete' and node.current_checksum:
             self._mount_request(session, node.current_checksum.hex())
 
-    def _mount_detach(self, path, registration=None, *, delete=True, derive=True):
-        session = self._mount_sessions.get(path)
+    def _mount_detach(self, path, driver='file', registration=None, *, delete=True, derive=True):
+        path = tuple(path)
+        if registration is not None:
+            driver = registration.spec.driver
+        key = (path, driver)
+        session = self._mount_sessions.get(key)
         if session is not None and registration is not None and session.registration is not registration:
             return None
         if session is None: return None
-        self._mount_sessions.pop(path, None)
+        self._mount_sessions.pop(key, None)
         session.state = 'closing'
         if session.pending: session.pending.lease._release_refholds(); session.pending = None
         # An in-flight operation retains a transport read claim until it finishes.
@@ -318,18 +448,44 @@ class AttachmentRuntime:
         for lease in session.leaf_leases: lease._release_refholds()
         if not session.initial.done(): session.initial.set_result(None)
         node = self._graph.nodes.get(path)
-        if node is not None: node.mount = None
+        if node is not None:
+            if driver == 'file':
+                node.mount = None
+                node.mount_inactive = False
+            else:
+                node.attachments.pop(driver, None)
         future = session.registration.service.unregister(session.registration,
                     delete=delete and not session.spec.persistent, expected=session.fingerprint)
         if derive: self._derive_all()
         return future
 
+    def _mount_detach_all(self, path, *, delete=True, derive=True):
+        path = tuple(path)
+        futures = []
+        for (node_path, driver) in tuple(self._mount_sessions):
+            if node_path != path:
+                continue
+            future = self._mount_detach(
+                path, driver=driver, delete=delete, derive=False
+            )
+            if future is not None:
+                futures.append(future)
+        if derive:
+            self._derive_all()
+        return futures
+
     def _mount_close_prepare(self):
+        timer = self._mount_wake_timer
+        if timer is not None:
+            timer.cancel()
+        self._mount_wake_timer = None
+        self._mount_wake_deadline = None
         for session in self._mount_sessions.values():
             session.registration.active = False
             if session.spec.persistent and not session.error: self._mount_dispatch(session)
         effects, self._effects = self._effects, []
         for effect in effects: effect()
+        self._mount_schedule_wakeup()
 
     def _mount_close_wait(self):
         if self._mount_close_future is None: self._mount_close_future = Future()
@@ -341,4 +497,9 @@ class AttachmentRuntime:
         return any(s.in_flight or (s.pending and not s.error and s.spec.persistent) for s in self._mount_sessions.values())
 
     def _mount_close_finish(self):
-        return [self._mount_detach(path, derive=False) for path in tuple(self._mount_sessions)]
+        futures = []
+        for path, driver in tuple(self._mount_sessions):
+            future = self._mount_detach(path, driver=driver, derive=False)
+            if future is not None:
+                futures.append(future)
+        return futures

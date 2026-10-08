@@ -200,6 +200,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         object.__setattr__(self, "_mount_activity", 0)
         object.__setattr__(self, "_mount_cut_seq", 0)
         object.__setattr__(self, "_mount_close_future", None)
+        object.__setattr__(self, "_mount_wake_timer", None)
+        object.__setattr__(self, "_mount_wake_deadline", None)
         from collections import deque
         object.__setattr__(self, "_mount_events", deque(maxlen=1024))
         object.__setattr__(self, "_mount_logs", set())
@@ -325,7 +327,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if self._revisions.get(path, 0) != revision: return False
         node = self._graph.nodes[path]
         if node.kind == "cell":
-            if node.mount and cfg.celltype != node.cell_config.celltype:
+            if self._mount_has_attachments(path) and cfg.celltype != node.cell_config.celltype:
                 raise ValueError("Mounted celltype cannot change; unmount first")
             edge = self._incoming_edge(path, ())
             if edge is not None:
@@ -596,9 +598,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         path = tuple(path)
         cleanup_futures = []
         for node_path in self._graph.descendants(path):
-            future = self._mount_detach(node_path, derive=False)
-            if future is not None:
-                cleanup_futures.append(future)
+            cleanup_futures.extend(
+                self._mount_detach_all(node_path, derive=False)
+            )
             for lease in self._mount_node_leaves.pop(node_path, ()): lease._release_refholds()
             node = self._graph.nodes.pop(node_path, None)
             if node is None:
@@ -645,13 +647,18 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _replace_cell_from_builder(self, path, cell):
         node = self._graph.nodes[path]
-        if node.mount and cell.celltype != node.cell_config.celltype:
+        sessions = self._mount_sessions_for(path)
+        attached = bool(node.mount is not None or node.attachments or sessions)
+        if attached and cell.celltype != node.cell_config.celltype:
             raise ValueError("Mounted celltype cannot change; unmount first")
-        if node.mount is not None:
-            self._mount_detach(path, delete=False, derive=False)
+        if attached:
+            for session in sessions:
+                self._mount_detach(
+                    path, driver=session.spec.driver, delete=False, derive=False
+                )
             node.mount = None
+            node.attachments.clear()
             node.mount_inactive = False
-        session = self._mount_sessions.get(path)
         input_ref = cell._input_ref
         new_config = CellConfig(
             cell.celltype,
@@ -751,7 +758,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._remove_edges_targeting(path, (), descendants=True)
         if node.cell_config is not new_config and input_ref is not None:
             node.cell_config = new_config
-        if session: session.sense_error = None
         if not isinstance(cell, PreparedCell):
             object.__setattr__(cell, "_workflow_backend", BoundCellBackend(self, path))
             cell._release_refholds()
@@ -940,10 +946,11 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._set_cell_root_with_edges(path, checksum, celltype, clear_edges=True)
 
     def _set_cell_root_with_edges(self, path, checksum, celltype, *, clear_edges):
-        session = self._mount_sessions.get(path)
-        if session and checksum is None:
+        sessions = self._mount_sessions_for(path)
+        if sessions and checksum is None:
             raise AuthorityError("Cannot clear a mounted cell; unmount first")
-        if session: session.sense_error = None
+        for session in sessions:
+            session.sense_error = None
         if checksum is None:
             for lease in self._mount_node_leaves.pop(path, ()): lease._release_refholds()
         node = self._graph.nodes[path]
@@ -1328,8 +1335,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 raise DependencyError("A root connection cannot be combined with sub-path connections")
             if not target_local and any(local for local in incoming):
                 raise DependencyError("A root connection cannot be combined with sub-path connections")
-        mount = self._graph.nodes[target_node].mount
-        if mount and "r" in mount.mode:
+        if self._mount_has_sensing(target_node):
             raise AuthorityError("Sensing mount is the producer; unmount first")
         if source_node == target_node:
             raise DependencyError("Self-dependencies are not supported")
@@ -1684,10 +1690,14 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._derive_transformer(path, node)
 
     def _derive_cell(self, path, node):
-        session = self._mount_sessions.get(path)
-        if session and session.sense_error:
+        sense_errors = [
+            session.sense_error
+            for session in self._mount_sessions_for(path)
+            if session.sense_error is not None
+        ]
+        if sense_errors:
             self._replace_current_checksum(path, None)
-            node.state, node.block_reason, node.exception = "failed", None, session.sense_error
+            node.state, node.block_reason, node.exception = "failed", None, sense_errors[0]
             return
         incoming = self._incoming_for(path)
         cfg = node.cell_config
@@ -2800,9 +2810,15 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         return Cell._from_backend(BoundCellBackend(self, node_path, local, readonly=True))
 
     def _clear_exception(self, node_path):
-        session = self._mount_sessions.get(node_path)
-        if session and session.sense_error:
-            self._effects.append(lambda: session.registration.service.poll(session.registration, force=True))
+        sessions = [
+            session for session in self._mount_sessions_for(node_path)
+            if session.sense_error is not None
+        ]
+        if sessions:
+            for session in sessions:
+                self._effects.append(
+                    lambda s=session: s.registration.service.poll(s.registration, force=True)
+                )
             return
         node = self._graph.nodes[node_path]
         errors = [node.exception]
@@ -2969,7 +2985,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             raise
         for record in list(self._runtime.current_runs.values()) + [r for q in self._runtime.superseded_runs.values() for r in q]:
             if record.et is not None: self._effects.append(record.et.cancel)
-        for path in tuple(self._mount_sessions): self._mount_detach(path, delete=False, derive=False)
+        for path, driver in tuple(self._mount_sessions):
+            self._mount_detach(path, driver=driver, delete=False, derive=False)
         for path, leases in tuple(self._mount_node_leaves.items()):
             old, new = self._graph.nodes.get(path), graph.nodes.get(path)
             if (old is None or new is None or old.cell_root_producer is None or new.cell_root_producer is None

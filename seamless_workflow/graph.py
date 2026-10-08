@@ -114,6 +114,7 @@ class Node:
     exception: BaseException | None = None
     mount: object = None
     mount_inactive: bool = False
+    attachments: dict = field(default_factory=dict, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

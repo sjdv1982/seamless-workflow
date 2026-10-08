@@ -63,7 +63,7 @@ def test_errors_recover_and_keep_graph_value(tmp_path):
         assert isinstance(c.a.exception, str) and isinstance(c.a.mount.status["sense_error"], MountError)
         assert c.b.block_reason=='blocked-by-error'
         assert c.get_graph()['nodes'][0]['value']['checksum']==old
-        assert c.mounts.sync(timeout=5)[('a',)]['sense_error']
+        assert c.mounts.sync(timeout=5)[(('a',), 'file')]['sense_error']
         p.write_text('{ "x": 2 }');c.mounts.sync(timeout=5)
         assert c.a.value=={'x':2} and c.b.value=={'x':2}
         assert Buffer(p.read_bytes()).get_checksum() == c.a.checksum
@@ -118,14 +118,21 @@ def test_stale_ack_order_and_foreign_revert():
 
 
 def test_manual_latest_and_unmount():
+    from time import monotonic, sleep
     with Context() as c:
         c.a=Cell(celltype='text');c.a.set('a');d=ManualDriver().attach(c.a,'a')
         c.a='b';first=d.deliveries.popleft()
         c.a='c';c.a='d'
         d.ack(first);c.get_graph()
+        deadline=monotonic()+5
+        while not d.deliveries and monotonic()<deadline:
+            sleep(.01)
+        assert d.deliveries, 'paced ManualDriver delivery did not arrive'
         latest=d.deliveries.popleft()
         assert latest.lease.checksum.resolve('text')=='d'
-        del c.a.mount
+        future=c._controller.call('_mount_detach',('a',),driver='manual',
+                                  registration=d.registration,delete=False)
+        if future is not None: future.result()
         d.ack(latest);c.get_graph();assert c.a.value=='d'
         assert first.lease.released and latest.lease.released
 
@@ -174,15 +181,18 @@ def test_directory_and_async_sync(tmp_path):
         assert c.a.value['a']==Buffer(b'first').get_checksum().hex()
         (p/'b').write_bytes(b'second')
         report=asyncio.run(c.mounts.synchronization(timeout=5))
-        assert report[('a',)]['in_sync'] and 'b' in c.a.value
+        assert report[(('a',), 'file')]['in_sync'] and 'b' in c.a.value
 
 
 def test_sync_timeout_does_not_cancel_mount():
     with Context() as c:
         c.a=Cell(celltype='text');c.a.set('x');d=ManualDriver().attach(c.a,'x')
         with pytest.raises(TimeoutError): c.mounts.sync(timeout=.01)
-        assert c.a.mount.spec is not None
-        del c.a.mount
+        session = c._mount_sessions[(('a',), 'manual')]
+        assert session.state == 'active' and not d.registration.closed
+        future=c._controller.call('_mount_detach',('a',),driver='manual',
+                                  registration=d.registration,delete=False)
+        if future is not None: future.result()
 
 
 def test_mount_turns_do_not_materialize(tmp_path):
@@ -203,7 +213,7 @@ def test_failed_write_retries_and_recovers(tmp_path):
     with Context() as c:
         c.a=Cell(celltype='text');c.a.set('value');c.a.mount(p,mode='w')
         assert c.a.exception is None and isinstance(c.a.mount.error,MountError)
-        assert c.mounts.sync(timeout=5)[('a',)]['error']
+        assert c.mounts.sync(timeout=5)[(('a',), 'file')]['error']
         p.parent.mkdir()
         # A new user value supersedes the retry and must attempt immediately.
         c.a='recovered';c.mounts.sync(timeout=5)
@@ -245,7 +255,9 @@ def test_refholder_audit_after_inflight_unmount():
     with Context() as c:
         c.a=Cell(celltype='text');c.a.set('a');d=ManualDriver().attach(c.a,'a')
         c.a='b';delivery=d.deliveries.popleft()
-        del c.a.mount
+        future=c._controller.call('_mount_detach',('a',),driver='manual',
+                                  registration=d.registration,delete=False)
+        if future is not None: future.result()
         d.ack(delivery);c.get_graph()
         audit_reference_accounting()
     audit_reference_accounting()
@@ -281,6 +293,10 @@ def test_widget_driver_round_trip_and_cleanup():
         c.a=3;c.mounts.sync(timeout=5);assert widget.value==3
         assert 'mount' not in c.get_graph()['nodes'][0]
         del c.a.mount
+        assert widget.callbacks != []
+        future=c._controller.call('_mount_detach',('a',),driver='widget',
+                                  registration=driver.registration,delete=False)
+        if future is not None: future.result()
         assert widget.callbacks==[]
 
 
@@ -291,7 +307,7 @@ def test_directory_compressed_leaf_update(tmp_path):
         c.a=Cell(celltype='folder');c.a.mount(p)
         leaf=Buffer(b'new');cs=leaf.get_checksum();leaf.tempref()
         c.a={'a':cs.hex()};report=c.mounts.sync(timeout=5)
-        assert report[('a',)]['in_sync']
+        assert report[(('a',), 'file')]['in_sync']
         assert gzip.decompress((p/'a.gz').read_bytes())==b'new'
         assert not (p/'a').exists()
 
@@ -370,7 +386,7 @@ def test_zstandard_roundtrip(tmp_path):
         c.a=Cell(celltype='text');c.a.set('hello');c.a.mount(p)
         assert zstandard.ZstdDecompressor().decompress(p.read_bytes())==b'hello\n'
         p.write_bytes(zstandard.ZstdCompressor().compress(b'updated'))
-        assert c.mounts.sync(timeout=5)[('a',)]['in_sync']
+        assert c.mounts.sync(timeout=5)[(('a',), 'file')]['in_sync']
         assert c.a.value=='updated'
 
 
