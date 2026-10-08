@@ -52,6 +52,8 @@ class TransformerConfig:
     scratch: bool = False
     local: bool | None = None
     direct_print: bool = False
+    # Operational only: passed on to each fired Transformation, never part of demand.
+    streaming: bool = False
     call_mode: Literal["delayed", "direct"] = "delayed"
 
     def signature_parameters(self) -> set[str] | None:

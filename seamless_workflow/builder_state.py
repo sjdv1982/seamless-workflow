@@ -990,6 +990,10 @@ class BoundTransformerBackend:
     @direct_print.setter
     def direct_print(self, value): self.context._set_node_config(self.node_path, "direct_print", value)
     @property
+    def streaming(self): return self.cfg.streaming
+    @streaming.setter
+    def streaming(self, value): self.context._set_node_config(self.node_path, "streaming", value)
+    @property
     def local(self): return self.cfg.local
     @local.setter
     def local(self, value): self.context._set_node_config(self.node_path, "local", value)

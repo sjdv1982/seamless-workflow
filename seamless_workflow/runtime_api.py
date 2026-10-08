@@ -166,7 +166,7 @@ class RuntimeAPI:
             modules=copy.deepcopy(cfg.modules), globals=copy.deepcopy(cfg.globals),
             meta=copy.deepcopy(cfg.meta), environment=copy.deepcopy(cfg.environment),
             scratch=(cfg.scratch if dispatch_scratch is None else dispatch_scratch),
-            direct_print=cfg.direct_print, local=cfg.local,
+            direct_print=cfg.direct_print, local=cfg.local, streaming=cfg.streaming,
             call_mode=cfg.call_mode, callable=cfg.callable,
             schema=cfg.schema, compilation=copy.deepcopy(cfg.compilation), objects=copy.deepcopy(cfg.objects), header=cfg.header,
             signature=signature, input_celltypes=input_celltypes,

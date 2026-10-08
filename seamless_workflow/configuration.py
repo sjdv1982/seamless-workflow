@@ -61,7 +61,7 @@ def update_config(original, field, value, key=None, delete=False):
         if field not in cfg.__dataclass_fields__ or field in {'config_token', 'callable'}:
             raise AttributeError(field)
         if field == 'optional_pins': value = set(value or ())
-        if field in {'scratch','direct_print'}: value = bool(value)
+        if field in {'scratch','direct_print','streaming'}: value = bool(value)
         if field == 'language' and value is None: value = 'python'
         if field == 'local': cfg.meta['local'] = value
         if field == 'celltype':
@@ -96,4 +96,5 @@ def fingerprint(cfg):
     fields = ('language','celltypes','optional_pins','modules','globals','meta','environment',
               'scratch','local','direct_print','schema','compilation','objects','header')
     # Code and input checksums are separate components of runtime demand.
+    # `streaming` is deliberately absent: toggling it must never re-run a node.
     cfg.config_token = Buffer(_plain({k:getattr(cfg,k) for k in fields}), 'mixed').get_checksum().hex()

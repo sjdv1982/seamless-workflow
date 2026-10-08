@@ -780,6 +780,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             scratch=frozen.scratch,
             local=frozen.local,
             direct_print=frozen.direct_print,
+            streaming=frozen.streaming,
             call_mode="direct" if direct else frozen.call_mode,
             schema=frozen.schema, compilation=copy.deepcopy(frozen.compilation),
             objects=copy.deepcopy(frozen.objects), header=frozen.header,
