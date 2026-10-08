@@ -44,6 +44,10 @@ class AttachmentRuntime:
     def _mount_registrations(self):
         return tuple(s.registration for s in self._mount_sessions.values())
 
+    def _mount_transport(self, path):
+        session = self._mount_sessions.get(path)
+        return None if session is None else session.registration.service
+
     def _mount_validate(self, path, spec):
         node = self._graph.nodes.get(path)
         if node is None or node.kind != 'cell': raise NodeError('Mounts require an existing whole cell node')
@@ -269,8 +273,12 @@ class AttachmentRuntime:
     def _mount_report(self):
         return SyncReport({path: self._mount_status(path) for path in self._mount_sessions})
 
-    def _mount_status(self, path):
+    def _mount_status(self, path, registration=None):
         session = self._mount_sessions.get(path)
+        if registration is not None and (
+            session is None or session.registration is not registration
+        ):
+            return None
         if session is None:
             node = self._graph.nodes[path]
             return {"state": "inactive"} if node.mount_inactive else None
@@ -284,17 +292,25 @@ class AttachmentRuntime:
                     pending=session.pending is not None, in_flight=session.in_flight is not None,
                     sense_error=session.sense_error, error=session.error)
 
-    def _mount_clear_error(self, path):
-        session = self._mount_sessions[path]
+    def _mount_clear_error(self, path, registration=None):
+        if registration is None:
+            session = self._mount_sessions[path]
+        else:
+            session = self._mount_sessions.get(path)
+            if session is None or session.registration is not registration:
+                return None
         session.error, session.state, session.reasserts = None, 'active', ()
         session.retry_at = 0
         node = self._graph.nodes[path]
         if 'w' in session.spec.mode and node.state == 'complete' and node.current_checksum:
             self._mount_request(session, node.current_checksum.hex())
 
-    def _mount_detach(self, path, *, delete=True, derive=True):
-        session = self._mount_sessions.pop(path, None)
+    def _mount_detach(self, path, registration=None, *, delete=True, derive=True):
+        session = self._mount_sessions.get(path)
+        if session is not None and registration is not None and session.registration is not registration:
+            return None
         if session is None: return None
+        self._mount_sessions.pop(path, None)
         session.state = 'closing'
         if session.pending: session.pending.lease._release_refholds(); session.pending = None
         # An in-flight operation retains a transport read claim until it finishes.
