@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seamless shared sliders</title>
+  <style>
+    body { font: 1rem system-ui, sans-serif; margin: 2rem auto; max-width: 38rem; padding: 0 1rem; }
+    label { align-items: center; display: grid; gap: 1rem; grid-template-columns: 5rem 1fr 3rem; margin: 1.25rem 0; }
+    output { font-variant-numeric: tabular-nums; }
+    #status { color: #555; min-height: 1.5em; }
+  </style>
+</head>
+<body>
+  <h1>Seamless shared sliders</h1>
+  <p>Change either input here or in the Python Context/Jupyter notebook.</p>
+  <label for="a">A
+    <input id="a" type="range" min="-10" max="30" value="10" disabled>
+    <output id="a-value">10</output>
+  </label>
+  <label for="b">B
+    <input id="b" type="range" min="-10" max="30" value="20" disabled>
+    <output id="b-value">20</output>
+  </label>
+  <p>Sum: <output id="c"></output></p>
+  <p id="status" role="status">Connecting…</p>
+
+  <script src="/seamless-client.js"></script>
+  <script>
+    const shared = connect_seamless();
+    const inputs = ["a", "b"];
+    const initialValues = new Set();
+    const showNumber = value => value == null ? "" : String(Number(String(value).trim()));
+
+    for (const key of inputs) {
+      const slider = document.getElementById(key);
+      const display = document.getElementById(`${key}-value`);
+      slider.addEventListener("input", () => {
+        display.value = slider.value;
+        const cell = shared[key];
+        if (cell && !cell.readonly) cell.set(slider.value);
+      });
+    }
+
+    shared.self.onsharelist = keys => {
+      for (const key of inputs) {
+        if (!keys.includes(key)) continue;
+        const cell = shared[key];
+        const slider = document.getElementById(key);
+        const display = document.getElementById(`${key}-value`);
+        cell.onchange = () => {
+          const value = showNumber(cell.value);
+          if (value !== "NaN") slider.value = value;
+          display.value = value;
+          initialValues.add(key);
+          enableWhenReady();
+        };
+      }
+      if (keys.includes("c")) {
+        shared.c.onchange = () => {
+          document.getElementById("c").value = showNumber(shared.c.value);
+          initialValues.add("c");
+          enableWhenReady();
+        };
+      }
+      enableWhenReady();
+    };
+
+    function enableWhenReady() {
+      if (["a", "b", "c"].every(key => initialValues.has(key))) {
+        for (const key of inputs) document.getElementById(key).disabled = false;
+        document.getElementById("status").textContent = "Connected";
+        window.shareReady = true;
+      }
+    }
+  </script>
+</body>
+</html>
