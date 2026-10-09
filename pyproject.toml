@@ -29,6 +29,7 @@ classifiers = [
 [project.optional-dependencies]
 dev = ["pytest"]
 jupyter = ["traitlets", "ipywidgets"]
+share = ["aiohttp>=3.9"]
 
 [project.urls]
 Homepage = "https://github.com/sjdv1982/seamless"
@@ -39,6 +40,9 @@ Issues = "https://github.com/sjdv1982/seamless/issues"
 where = ["."]
 include = ["seamless_workflow*"]
 exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+seamless_workflow = ["attachments/share/static/*.js"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

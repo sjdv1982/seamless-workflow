@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+from importlib.resources import files
 import inspect
 import os
 import threading
@@ -624,7 +625,18 @@ class ShareServer:
                 return self._response(status=405, headers={"Allow": "GET, OPTIONS"})
             return self._response(status=200, json_data=self.openapi())
         if raw_path == "seamless-client.js":
-            return self._response(status=404, text="Not found")
+            if request.method not in {"GET", "HEAD"}:
+                return self._response(status=405, headers={"Allow": "GET, HEAD, OPTIONS"})
+            asset = (files("seamless_workflow.attachments.share")
+                     .joinpath("static", "seamless-client.js").read_bytes())
+            return self._response(
+                status=200,
+                body=b"" if request.method == "HEAD" else asset,
+                headers={
+                    "Content-Type": "text/javascript; charset=utf-8",
+                    "Cache-Control": "no-cache",
+                },
+            )
         if not raw_path:
             return self._redirect_index(None)
         trailing_slash = raw_path.endswith("/")
