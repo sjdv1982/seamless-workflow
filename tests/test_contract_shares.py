@@ -4,6 +4,7 @@ Phase selectors: TestShareAPI (step 4), TestSharePersistence (step 5),
 TestShareOpenAPI (step 6), TestShareClientAsset (step 7). No skips or xfails:
 missing implementation is deliberately RED. One pytest process for this file.
 """
+import ast
 import asyncio
 import hashlib
 import json
@@ -1525,3 +1526,63 @@ class TestShareOpenAPIMetadata:
         mutable_global["paths"].clear()
         mutable_global["x-seamless-updates"].clear()
         assert server.openapi() == baseline
+
+
+class TestShareRuntimeOptionalDependency:
+    def test_workflow_and_share_inspection_work_without_aiohttp(self):
+        """Server; Errors: optional HTTP dependency is required only when serving starts."""
+        script = '''
+import importlib.abc
+import sys
+class BlockAiohttp(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "aiohttp" or fullname.startswith("aiohttp."):
+            raise ImportError("instrument: aiohttp is unavailable")
+sys.meta_path.insert(0, BlockAiohttp())
+from seamless import Cell
+from seamless_workflow import Context, shareserver
+import seamless
+shareserver.configure(host="127.0.0.1", port=0)
+assert shareserver.openapi()["paths"] == {}
+with Context() as ctx:
+    ctx.a = Cell(celltype="int")
+    ctx.a.set(7)
+    ctx.out = ctx.a
+    ctx.compute(timeout=10)
+    assert ctx.out.value == 7
+    assert ctx.a.share.spec is None
+    assert ctx.shares.openapi()["paths"] == {}
+    assert ctx.shares.url is None
+    before = ctx.get_graph()
+    try:
+        ctx.a.share(readonly=False)
+    except ImportError as exc:
+        assert "seamless-workflow[share]" in str(exc), str(exc)
+    else:
+        raise AssertionError("starting HTTP without aiohttp must fail")
+    assert ctx.a.share.spec is None
+    assert ctx.a.value == 7 and ctx.a.state == "complete"
+    assert ctx.get_graph() == before
+    assert shareserver.openapi()["paths"] == {}
+    assert ctx.shares.openapi()["paths"] == {}
+    assert ctx.shares.url is None
+    with Context() as other:
+        other.a = Cell(celltype="int")
+        other.a.set(9)
+        try:
+            other.a.share()
+        except ImportError as exc:
+            assert "seamless-workflow[share]" in str(exc), str(exc)
+        else:
+            raise AssertionError("starting HTTP without aiohttp must fail")
+        assert other.a.share.spec is None and other.a.value == 9
+    shareserver.configure(host="127.0.0.1", port=0)
+    ctx.a.set(8)
+    ctx.compute(timeout=10)
+    assert ctx.out.value == 8
+seamless.close()
+'''
+        ast.parse(script)
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                                text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr

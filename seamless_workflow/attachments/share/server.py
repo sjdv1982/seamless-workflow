@@ -16,8 +16,6 @@ import os
 import threading
 from urllib.parse import quote
 
-from aiohttp import WSMsgType, web
-
 from seamless import Buffer, Checksum
 from seamless.checksum.canonical import canon_T
 from seamless.checksum.null import NULL_CHECKSUM
@@ -29,6 +27,23 @@ from .spec import RESERVED_TOPLEVEL_KEYS
 
 _HANDSHAKE = ["Seamless share update server", "1.0"]
 _RESERVED_TOPLEVEL = RESERVED_TOPLEVEL_KEYS
+WSMsgType = None
+web = None
+
+
+def _load_aiohttp():
+    """Load the optional HTTP stack when a share server is actually needed."""
+    global WSMsgType, web
+    if WSMsgType is not None and web is not None:
+        return
+    try:
+        from aiohttp import WSMsgType as ws_msg_type, web as aiohttp_web
+    except ImportError as exc:
+        raise ImportError(
+            "HTTP shares require aiohttp; install seamless-workflow[share]."
+        ) from exc
+    WSMsgType = ws_msg_type
+    web = aiohttp_web
 
 
 def _checksum_hex(value):
@@ -245,6 +260,7 @@ class ShareServer:
         path = spec.path
         content_type = infer_content_type(celltype, path, getattr(spec, "mimetype", None))
         binary = is_binary(content_type)
+        _load_aiohttp()
         replaces = tuple(replaces)
         with self._lock:
             self._check_reservation_conflicts_locked(
@@ -336,6 +352,7 @@ class ShareServer:
 
     def start(self):
         """Bind the configured listener and return once it is accepting requests."""
+        _load_aiohttp()
         with self._start_lock:
             if self._closed:
                 raise RuntimeError("share server is closed")
@@ -384,6 +401,7 @@ class ShareServer:
                 loop.close()
 
     async def _async_start(self):
+        _load_aiohttp()
         app = web.Application(client_max_size=self.max_body_size)
         app.router.add_route("*", "/", self._handle)
         app.router.add_route("*", "/{path:.*}", self._handle)
