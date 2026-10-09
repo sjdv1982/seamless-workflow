@@ -96,6 +96,7 @@ class ShareRegistration:
     route: str
     content_type: str
     binary: bool
+    node_path: tuple = ()
     staged: bool = False
     replaces: tuple = ()
     active: bool = False
@@ -230,7 +231,7 @@ class ShareServer:
                 raise ValueError(f"share URL {route!r} conflicts with namespace {path!r}")
 
     def reserve(self, namespace, spec, celltype, session_id, sink, owner=None, *,
-                replaces=(), staged=False):
+                replaces=(), staged=False, node_path=()):
         """Atomically reserve a URL, without starting the server or claiming data."""
         if not _safe_segment(namespace):
             raise ValueError("namespace must be one safe URL segment")
@@ -264,6 +265,7 @@ class ShareServer:
                 route=route,
                 content_type=content_type,
                 binary=binary,
+                node_path=tuple(node_path or ()),
                 staged=bool(staged),
                 replaces=replaces,
                 marker=self._marker_floors.get(route, 0),
@@ -618,7 +620,9 @@ class ShareServer:
             return self._response(status=405, headers={"Allow": "GET, HEAD, PUT, OPTIONS"})
         raw_path = request.path.lstrip("/")
         if raw_path == "openapi.json":
-            return self._response(status=501, text="OpenAPI is not configured")
+            if request.method != "GET":
+                return self._response(status=405, headers={"Allow": "GET, OPTIONS"})
+            return self._response(status=200, json_data=self.openapi())
         if raw_path == "seamless-client.js":
             return self._response(status=404, text="Not found")
         if not raw_path:
@@ -970,6 +974,19 @@ class ShareServer:
             values = (list(self._top_records.values()) + list(self._records.values())
                       + list(self._staged_reservations.values()))
             return tuple({id(reg): reg for reg in values}.values())
+
+    def openapi(self, namespace=None, owner=None):
+        """Return an OpenAPI document from one locked snapshot of live shares."""
+        from .openapi import build_openapi
+
+        with self._lock:
+            registrations = tuple(
+                reg for reg in (*self._top_records.values(), *self._records.values())
+                if reg.active and not reg.closed and not reg.staged
+                and (namespace is None or reg.namespace == namespace)
+                and (owner is None or reg.owner is owner)
+            )
+            return build_openapi(registrations)
 
 
 _default_lock = threading.Lock()

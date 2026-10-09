@@ -12,8 +12,13 @@ def close():
 
 
 def openapi():
-    """Return the OpenAPI document (provided by the OpenAPI phase)."""
-    raise NotImplementedError("OpenAPI generation is not available yet")
+    """Return the live process-wide OpenAPI document without a request."""
+    from .attachments.share.openapi import build_openapi
+
+    server = _server.get_server_if_started()
+    if server is None or server._closed:
+        return build_openapi(())
+    return server.openapi()
 
 
 def __getattr__(name):

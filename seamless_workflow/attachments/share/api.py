@@ -59,6 +59,17 @@ class ContextShares:
         base = self._driver.url
         return None if base is None else base.rstrip("/") + "/" + self._namespace
 
+    def openapi(self):
+        """Return this Context's live OpenAPI document without starting a server."""
+        self._context()
+        from . import server as server_module
+        from .openapi import build_openapi
+
+        server = self._driver.server or server_module.get_server_if_started()
+        if server is None or server._closed:
+            return build_openapi(())
+        return server.openapi(namespace=self._namespace, owner=self._owner)
+
     def _close_namespace(self, timeout=60):
         future = self._driver.release_namespace()
         future.result(timeout)
@@ -98,7 +109,8 @@ class ShareHandle:
             )
             driver = shares._driver
             registration = driver.reserve(
-                spec, celltype, uuid4().hex, make_sink(context._controller)
+                spec, celltype, uuid4().hex, make_sink(context._controller),
+                node_path=node_path,
             )
             try:
                 driver.start()

@@ -674,7 +674,7 @@ class TestShareOpenAPI:
         assert operation["x-seamless-celltype"] == celltype
         assert operation["x-seamless-node"] == ["a"]
         content = operation["responses"]["200"]["content"]
-        assert next(iter(content.values()))["schema"] == schema
+        assert any(media.get("schema") == schema for media in content.values())
         del ctx.a.share
         assert "/ctx/a" not in server.openapi()["paths"]
 
@@ -1332,3 +1332,196 @@ class TestSharePersistenceRollback:
             ctx.close()
             other.a.share("bar", toplevel=True)
             assert get(other.a.share.url).json() == 5
+
+
+class TestShareOpenAPIAudit:
+    @pytest.mark.parametrize("celltype,value,content_type,schema", [
+        ("text", "hello", "text/plain", {"type": "string"}),
+        ("python", "pass\n", "text/x-python", {"type": "string"}),
+        ("ipython", "pass\n", "text/x-python", {"type": "string"}),
+        ("yaml", "a: 1\n", "application/yaml", {"type": "string"}),
+        ("plain", {}, "application/json", {}),
+        ("str", "hello", "application/json", {"type": "string"}),
+        ("int", 1, "application/json", {"type": "integer"}),
+        ("float", 1.5, "application/json", {"type": "number"}),
+        ("bool", True, "application/json", {"type": "boolean"}),
+        ("bytes", b"hello", "application/octet-stream", None),
+        ("binary", None, "application/octet-stream", None),
+        ("mixed", {"a": 1}, "application/octet-stream", None),
+    ])
+    def test_complete_celltype_content_and_schema_table(self, ctx, celltype, value, content_type, schema):
+        """openapi.json: all shareable celltypes have documented content and schemas."""
+        cell(ctx, value, celltype).share(readonly=False)
+        item = ctx.shares.openapi()["paths"]["/ctx/a"]
+        for verb in ("get", "put"):
+            operation = item[verb]
+            assert operation["x-seamless-celltype"] == celltype
+            assert operation["x-seamless-node"] == ["a"]
+            content = (operation["responses"]["200"]["content"] if verb == "get"
+                       else operation["requestBody"]["content"])
+            mimetype, media = next((mime, data) for mime, data in content.items() if mime.split(";")[0] == content_type)
+            assert mimetype.split(";")[0] == content_type
+            if schema is None:
+                assert "schema" not in media
+            elif verb == "get":
+                assert media["schema"] == schema
+            else:
+                value_schema = media["schema"]
+                branches = value_schema.get("anyOf", value_schema.get("oneOf", [value_schema]))
+                assert schema in branches or (
+                    isinstance(value_schema.get("type"), list)
+                    and schema.get("type") in value_schema["type"]
+                )
+                if celltype in ("str", "int", "float", "bool"):
+                    assert ({"type": "null"} in branches
+                            or "null" in value_schema.get("type", [])
+                            or value_schema.get("nullable") is True)
+
+    @pytest.mark.parametrize("mimetype,schema", [("text/plain", {"type": "string"}), ("image/png", None)])
+    def test_explicit_mime_replaces_cell_schema(self, ctx, mimetype, schema):
+        """openapi.json: explicit mimetype overrides numeric schema with text/binary."""
+        cell(ctx).share(mimetype=mimetype, readonly=False)
+        operation = ctx.shares.openapi()["paths"]["/ctx/a"]["get"]
+        content = operation["responses"]["200"]["content"]
+        mimetype_key, media = next((mime, data) for mime, data in content.items() if mime.split(";")[0] == mimetype)
+        assert mimetype_key.split(";")[0] == mimetype
+        if schema is None:
+            assert "schema" not in media
+        else:
+            assert media["schema"] == schema
+
+    def test_operation_status_codes_and_head_has_no_body_description(self, ctx):
+        """openapi.json; Reading/Writing: operation statuses and bodyless HEAD."""
+        cell(ctx).share(readonly=False)
+        item = ctx.shares.openapi()["paths"]["/ctx/a"]
+        assert set(item["get"]["responses"]) >= {"200", "204", "304", "404", "503"}
+        assert set(item["head"]["responses"]) >= {"200", "204", "304", "404"}
+        assert set(item["put"]["responses"]) >= {"200", "400", "404", "405", "409", "413", "422", "503"}
+        for response in item["head"]["responses"].values():
+            assert "content" not in response
+        assert "checksum" in item["put"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+        assert "marker" in item["put"]["responses"]["409"]["content"]["application/json"]["schema"]["properties"]
+
+    def test_live_alias_path_node_extensions_and_no_graph_leak(self, ctx, server):
+        """openapi.json: URLs follow alias keys; extensions identify actual nodes."""
+        cell(ctx, name="actual").share("alias")
+        cell(ctx, 2, name="hidden")
+        ctx.tf = identity
+        ctx.tf.pins.x = ctx.hidden
+        ctx.compute()
+        document = ctx.shares.openapi()
+        assert set(document["paths"]) == {"/ctx/alias"}
+        item = document["paths"]["/ctx/alias"]
+        for verb in ("get", "head"):
+            assert item[verb]["x-seamless-node"] == ["actual"]
+            assert item[verb]["x-seamless-celltype"] == "int"
+        assert "websocket" in document["info"]["description"].lower()
+        assert document["x-seamless-updates"] == {"ctx": "/ctx"}
+        cell(ctx, 3, name="new").share("top", toplevel=True)
+        assert set(server.openapi()["paths"]) == {"/ctx/alias", "/top"}
+        del ctx.actual.share
+        assert set(ctx.shares.openapi()["paths"]) == {"/top"}
+
+    def test_openapi_ignores_staged_registry_and_matches_http(self, ctx, server):
+        """openapi.json; Graph serialization: uncommitted reservations are invisible."""
+        from seamless_workflow.attachments.share.spec import ShareSpec
+        from concurrent.futures import Future
+        cell(ctx).share()
+        transport = ctx.shares._driver.server
+        def sink(operation, payload):
+            reply = Future()
+            reply.set_result(None)
+            if operation == "_mount_observed":
+                payload.release()
+            return reply
+        staged = transport.reserve("staged", ShareSpec("hidden"), "int", "staged-openapi", sink, owner=object(), staged=True)
+        try:
+            global_doc = server.openapi()
+            assert "/staged/hidden" not in global_doc["paths"]
+            assert set(global_doc["paths"]) == {"/ctx/a"}
+            assert get(server.url + "/openapi.json").json() == global_doc
+        finally:
+            transport.unregister(staged, close_namespace=True).result(10)
+
+    def test_openapi_public_context_guards(self, ctx, monkeypatch):
+        """Threads and blocking: Context OpenAPI reads refuse reentrance and close."""
+        from seamless_workflow.errors import ClosedContextError, ReentrantContextError
+        cell(ctx)
+        shares = ctx.shares
+        original = Context._after_turn
+        visited = []
+        def check(context):
+            if context is ctx and not visited:
+                visited.append(True)
+                with pytest.raises(ReentrantContextError):
+                    shares.openapi()
+            return original(context)
+        monkeypatch.setattr(Context, "_after_turn", check)
+        ctx.a.set(2)
+        assert visited
+        monkeypatch.setattr(Context, "_after_turn", original)
+        ctx.close()
+        with pytest.raises(ClosedContextError):
+            shares.openapi()
+
+    def test_empty_openapi_does_not_start_server(self):
+        """openapi.json; Server: inspection before first share opens no endpoint."""
+        script = '''
+import threading
+from seamless_workflow import Context, shareserver
+from seamless_workflow.attachments.share.server import ShareServer
+original = ShareServer.start
+def forbidden(self):
+    raise AssertionError("OpenAPI inspection started a server")
+ShareServer.start = forbidden
+before = {t.ident for t in threading.enumerate() if t.name == "seamless-shareserver"}
+assert shareserver.openapi()["paths"] == {}
+with Context() as ctx:
+    assert ctx.shares.openapi()["paths"] == {}
+    assert ctx.shares.url is None
+assert {t.ident for t in threading.enumerate() if t.name == "seamless-shareserver"} == before
+'''
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                                text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestShareOpenAPIMetadata:
+    def test_read_headers_checksum_media_and_null_put_description(self, ctx):
+        """openapi.json; Reading/Writing: headers, checksum mode and empty/null input."""
+        cell(ctx).share(readonly=False)
+        item = ctx.shares.openapi()["paths"]["/ctx/a"]
+        for verb in ("get", "head"):
+            headers = {name.lower() for name in item[verb]["responses"]["200"]["headers"]}
+            assert {"etag", "x-seamless-marker", "cache-control"} <= headers
+        media = item["get"]["responses"]["200"]["content"]
+        assert any(mime.split(";")[0] == "text/plain" for mime in media)
+        params = {p["name"]: p for p in item["get"].get("parameters", [])}
+        assert params["mode"]["in"] == "query"
+        assert "checksum" in json.dumps(params["mode"])
+        body = item["put"]["requestBody"]
+        assert body.get("required", False) is False
+        description = (body.get("description", "") + item["put"].get("description", "")).lower()
+        assert "empty" in description and "null" in description
+        schema = body["content"]["application/json"]["schema"]
+        branches = schema.get("anyOf", schema.get("oneOf", []))
+        assert ({"type": "null"} in branches
+                or "null" in schema.get("type", [])
+                or schema.get("nullable") is True)
+
+    def test_returned_schema_mutations_do_not_change_fresh_documents(self, ctx, server):
+        """openapi.json: each returned document is independent mutable caller data."""
+        cell(ctx).share(readonly=False)
+        baseline = server.openapi()
+        mutable = ctx.shares.openapi()
+        item = mutable["paths"]["/ctx/a"]
+        item["get"]["responses"]["200"]["content"]["application/json"]["schema"]["type"] = "poison"
+        item["put"]["responses"]["422"]["content"]["application/json"]["schema"].clear()
+        item["put"]["requestBody"]["content"]["application/json"]["schema"].clear()
+        assert server.openapi() == baseline
+        assert ctx.shares.openapi() == baseline
+        assert get(server.url + "/openapi.json").json() == baseline
+        mutable_global = server.openapi()
+        mutable_global["paths"].clear()
+        mutable_global["x-seamless-updates"].clear()
+        assert server.openapi() == baseline

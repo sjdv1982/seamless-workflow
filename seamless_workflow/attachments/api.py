@@ -170,7 +170,7 @@ def _load_graph(ctx, data, *, mounts=True, shares=True, context_shares):
                 celltype = node.cell_config.celltype
                 reg = share_driver.reserve(
                     share_spec, celltype, uuid4().hex, make_sink(ctx._controller),
-                    replaces=old_shares, staged=True,
+                    replaces=old_shares, staged=True, node_path=path,
                 )
                 reservations.append(reg)
                 reads.append(('share', path, share_spec, reg, share_driver.initial_read(reg)))
