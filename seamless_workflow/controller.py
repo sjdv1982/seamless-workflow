@@ -34,6 +34,7 @@ class Controller:
         self.failure = None
         self.trace = deque(maxlen=1024)
         self.turn_logs = set()
+        self.state_graph_dirty = True
         self.ready = Event()
         self.thread = Thread(target=self._run, name=f"Context-{self.context_id[:8]}", daemon=True)
         self.thread.start()
@@ -104,6 +105,10 @@ class Controller:
             result = (original(context, *message.args, **dict(message.kwargs))
                       if original is not None else method(*message.args, **dict(message.kwargs)))
             context._after_turn()
+            if message.operation == "_state_graph_refresh":
+                result = context._publish_state_graph()
+            else:
+                self.state_graph_dirty = True
             if self.turn_logs:
                 from .diagnostics import NodeSnapshot, TurnSnapshot
                 snapshot = TurnSnapshot(message.sequence, message.klass, tuple(
@@ -111,6 +116,7 @@ class Controller:
                     for path, node in sorted(context._graph.nodes.items())))
                 for log in self.turn_logs: log._append(snapshot)
         except BaseException as exc:
+            self.state_graph_dirty = True
             if message.klass == 5:
                 self.poison(context, message.operation, exc)
             try: context._after_turn()

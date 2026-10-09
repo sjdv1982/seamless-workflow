@@ -12,6 +12,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 
 import aiohttp
@@ -99,9 +100,10 @@ def updates(url):
     thread.start()
     assert ready.wait(10), "websocket failed to connect"
 
-    def receive(kind=None):
+    def receive(kind=None, timeout=10):
+        deadline = time.monotonic() + timeout
         while True:
-            value = inbox.get(timeout=10)
+            value = inbox.get(timeout=max(0, deadline - time.monotonic()))
             if isinstance(value, BaseException):
                 raise value
             if kind is None or value[0] == kind:
@@ -680,15 +682,15 @@ class TestShareOpenAPI:
         assert "/ctx/a" not in server.openapi()["paths"]
 
     def test_writable_statuses_scope_and_no_graph_leak(self, ctx, server):
-        """openapi.json: status codes, Context restriction, unshared nodes absent."""
+        """openapi.json: status codes, Context restriction, no unshared value routes."""
         cell(ctx).share(readonly=False)
         cell(ctx, 2, name="hidden")
         with Context() as other:
             other.shares.namespace = "other"
             cell(other).share()
             all_paths = server.openapi()["paths"]
-            assert set(all_paths) == {"/ctx/a", "/other/a"}
-            assert set(ctx.shares.openapi()["paths"]) == {"/ctx/a"}
+            assert set(all_paths) == {"/ctx/a", "/ctx/state-graph", "/other/a", "/other/state-graph"}
+            assert set(ctx.shares.openapi()["paths"]) == {"/ctx/a", "/ctx/state-graph"}
             path = all_paths["/ctx/a"]
             assert set(path["put"]["responses"]) >= {"200", "400", "404", "409", "413", "422", "503"}
             assert set(path["get"]["responses"]) >= {"200", "204", "304", "404", "503"}
@@ -1411,7 +1413,7 @@ class TestShareOpenAPIAudit:
         ctx.tf.pins.x = ctx.hidden
         ctx.compute()
         document = ctx.shares.openapi()
-        assert set(document["paths"]) == {"/ctx/alias"}
+        assert set(document["paths"]) == {"/ctx/alias", "/ctx/state-graph"}
         item = document["paths"]["/ctx/alias"]
         for verb in ("get", "head"):
             assert item[verb]["x-seamless-node"] == ["actual"]
@@ -1419,9 +1421,9 @@ class TestShareOpenAPIAudit:
         assert "websocket" in document["info"]["description"].lower()
         assert document["x-seamless-updates"] == {"ctx": "/ctx"}
         cell(ctx, 3, name="new").share("top", toplevel=True)
-        assert set(server.openapi()["paths"]) == {"/ctx/alias", "/top"}
+        assert set(server.openapi()["paths"]) == {"/ctx/alias", "/top", "/ctx/state-graph"}
         del ctx.actual.share
-        assert set(ctx.shares.openapi()["paths"]) == {"/top"}
+        assert set(ctx.shares.openapi()["paths"]) == {"/top", "/ctx/state-graph"}
 
     def test_openapi_ignores_staged_registry_and_matches_http(self, ctx, server):
         """openapi.json; Graph serialization: uncommitted reservations are invisible."""
@@ -1439,7 +1441,7 @@ class TestShareOpenAPIAudit:
         try:
             global_doc = server.openapi()
             assert "/staged/hidden" not in global_doc["paths"]
-            assert set(global_doc["paths"]) == {"/ctx/a"}
+            assert set(global_doc["paths"]) == {"/ctx/a", "/ctx/state-graph"}
             assert get(server.url + "/openapi.json").json() == global_doc
         finally:
             transport.unregister(staged, close_namespace=True).result(10)
@@ -1469,6 +1471,7 @@ class TestShareOpenAPIAudit:
         """openapi.json; Server: inspection before first share opens no endpoint."""
         script = '''
 import threading
+import time
 from seamless_workflow import Context, shareserver
 from seamless_workflow.attachments.share.server import ShareServer
 original = ShareServer.start

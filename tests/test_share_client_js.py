@@ -426,3 +426,66 @@ message(sockets[0],['update',[key,'8'.repeat(64),10]]);
 await new Promise(resolve=>realSetTimeout(resolve,25));
 assert.equal(requests.filter(r=>(r.options.method||'GET')==='GET').length,1);
 '''.replace('KEY',json.dumps(key)))
+
+
+@pytest.mark.skipif(NODE is None, reason="Node is unavailable")
+def test_onstategraph_notifications_stale_responses_and_reconnect():
+    """Opt-in graph fetch; stale replies drop and reconnect resets marker memory."""
+    run_js(r'''
+const pending=[];
+fetchImpl=async(url, options)=>await new Promise(resolve=>pending.push({url,resolve}));
+loadClient();
+const ctx=connect_seamless();
+await wait(()=>sockets.length===1);
+snapshot(sockets[0],{});
+message(sockets[0],['state-graph',['a'.repeat(64),10]]);
+await new Promise(resolve=>realSetTimeout(resolve,25));
+assert.equal(requests.length,0,'pages without a handler must not fetch');
+let calls=0;
+ctx.self.onstategraph=()=>calls++;
+message(sockets[0],['state-graph',['b'.repeat(64),11]]);
+await wait(()=>pending.length===1);
+assert.equal(new URL(pending[0].url).pathname,'/ctx/state-graph');
+message(sockets[0],['state-graph',['c'.repeat(64),12]]);
+await wait(()=>pending.length===2);
+const newest={nodes:[{path:['a'],state:'failed'}],anonymous_nodes:{},connections:[]};
+pending[1].resolve(response(JSON.stringify(newest),200,{'x-seamless-marker':'12'}));
+await wait(()=>calls===1);
+assert.deepEqual(ctx.self.stategraph,newest);
+pending[0].resolve(response(JSON.stringify({nodes:[]}),200,{'x-seamless-marker':'11'}));
+await new Promise(resolve=>realSetTimeout(resolve,25));
+assert.equal(calls,1);
+assert.deepEqual(ctx.self.stategraph,newest);
+sockets[0].close();
+await wait(()=>sockets.length===2);
+snapshot(sockets[1],{});
+message(sockets[1],['state-graph',['d'.repeat(64),1]]);
+await wait(()=>pending.length===3);
+const restarted={nodes:[{path:['a'],state:'complete'}],anonymous_nodes:{},connections:[]};
+pending[2].resolve(response(JSON.stringify(restarted),200,{'x-seamless-marker':'1'}));
+await wait(()=>calls===2);
+assert.deepEqual(ctx.self.stategraph,restarted);
+''')
+
+
+@pytest.mark.skipif(NODE is None, reason="Node is unavailable")
+def test_onstategraph_accepts_current_http_snapshot_from_older_notification():
+    """Response marker is authoritative even when its notification was older."""
+    run_js(r'''
+const pending=[];
+fetchImpl=async(url, options)=>await new Promise(resolve=>pending.push(resolve));
+loadClient();const ctx=connect_seamless();
+let calls=0;ctx.self.onstategraph=()=>calls++;
+await wait(()=>sockets.length===1);snapshot(sockets[0],{});
+message(sockets[0],['state-graph',['a'.repeat(64),10]]);
+await wait(()=>pending.length===1);
+message(sockets[0],['state-graph',['b'.repeat(64),11]]);
+await wait(()=>pending.length===2);
+// The newer notification's GET fails; the earlier GET sees the current graph.
+pending[1](response('unavailable',503));
+await new Promise(resolve=>realSetTimeout(resolve,25));
+const current={nodes:[{path:['a'],state:'computing'}],anonymous_nodes:{},connections:[]};
+pending[0](response(JSON.stringify(current),200,{'x-seamless-marker':'11'}));
+await wait(()=>calls===1);
+assert.deepEqual(ctx.self.stategraph,current);
+''')

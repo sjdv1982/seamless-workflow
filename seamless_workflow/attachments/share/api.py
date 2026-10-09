@@ -1,23 +1,71 @@
 """Public share handles bound to whole Context cells."""
 
 from concurrent.futures import Future
+import time
 import weakref
-from threading import RLock
+from threading import Lock, RLock
 from uuid import uuid4
 
 from .driver import ShareDriver
 from .spec import ShareSpec
+from .server import STATE_GRAPH_INTERVAL
 from ..api import make_sink
-from ...errors import NodeError, StaleWorkflowHandleError
+from ...errors import ClosedContextError, NodeError, StaleWorkflowHandleError
 
 
 class ContextShares:
     def __init__(self, context):
         self._context_ref = weakref.ref(context)
         self._lock = RLock()
+        self._state_graph_lock = Lock()
+        self._state_graph_inflight = None
         self._namespace = "ctx"
         self._owner = object()
-        self._driver = ShareDriver(self._namespace, self._owner)
+        self._driver = ShareDriver(
+            self._namespace, self._owner, self._state_graph_provider
+        )
+
+    def _state_graph_provider(self, timeout, _fresh):
+        context = self._context_ref()
+        if (context is None or context._closing
+                or context._closed_event.is_set()):
+            return None
+        with self._state_graph_lock:
+            if context._closing or context._closed_event.is_set():
+                return None
+            future = self._state_graph_inflight
+            if future is None:
+                publication = context._state_graph_published
+                age = time.monotonic() - context._state_graph_published_at
+                refresh = publication is None or (
+                    context._controller.state_graph_dirty
+                    and age >= STATE_GRAPH_INTERVAL
+                )
+                if not refresh:
+                    return publication
+                try:
+                    future = context._controller.submit(
+                        "_state_graph_refresh", klass=4
+                    )
+                except ClosedContextError:
+                    return None
+                self._state_graph_inflight = future
+            try:
+                publication = future.result(timeout)
+            except TimeoutError:
+                if future.done():
+                    self._state_graph_inflight = None
+                raise
+            except ClosedContextError:
+                self._state_graph_inflight = None
+                return None
+            except BaseException:
+                self._state_graph_inflight = None
+                raise
+            self._state_graph_inflight = None
+            if context._closing or context._closed_event.is_set():
+                return None
+            return publication
 
     def _context(self):
         context = self._context_ref()

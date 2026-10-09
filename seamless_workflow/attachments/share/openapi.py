@@ -224,19 +224,83 @@ def _path_item(registration):
     return item
 
 
-def build_openapi(registrations):
-    """Build a document from one immutable snapshot of active registrations."""
+def _state_graph_path_item():
+    """Describe the read-only Context snapshot endpoint."""
+    node_schema = {
+        "type": "object",
+        "required": ["type", "path", "state", "block_reason", "exception", "checksum"],
+        "properties": {
+            "type": {"type": "string", "enum": ["cell", "transformer"]},
+            "path": {"type": "array", "items": {"type": "string"}},
+            "celltype": {"type": "string"},
+            "language": {"type": "string"},
+            "state": {"type": "string", "enum": [
+                "unwired", "miswired", "blocked", "waiting",
+                "computing", "complete", "failed",
+            ]},
+            "block_reason": {},
+            "exception": {"type": ["string", "null"]},
+            "checksum": {"type": ["string", "null"]},
+        },
+    }
+    schema = {
+        "type": "object",
+        "required": ["nodes", "anonymous_nodes", "connections"],
+        "properties": {
+            "nodes": {"type": "array", "items": node_schema},
+            "anonymous_nodes": {"type": "object"},
+            "connections": {"type": "array", "items": {"type": "object"}},
+        },
+    }
+    headers = _record_headers()
+    headers["ETag"]["description"] = "Quoted SHA-256 digest of the canonical snapshot JSON."
+    headers["X-Seamless-Marker"]["description"] = "Context publication marker; increases only when the digest changes."
+    responses = {
+        "200": {
+            "description": "Context node state graph; may be up to half a second old.",
+            "headers": headers,
+            "content": {"application/json": {"schema": schema}},
+        },
+        "304": {"description": "The snapshot digest matches If-None-Match.", "headers": headers},
+        "404": _json_error_response("No live Context state graph."),
+        "503": _json_error_response("State graph refresh timed out."),
+    }
+    return {
+        "get": {
+            "summary": "Read the whole Context node state graph",
+            "parameters": [{"name": "If-None-Match", "in": "header",
+                            "schema": {"type": "string"}}],
+            "responses": responses,
+        },
+        "head": {
+            "summary": "Read state graph publication headers",
+            "parameters": [{"name": "If-None-Match", "in": "header",
+                            "schema": {"type": "string"}}],
+            "responses": {
+                status: {key: value for key, value in response.items() if key != "content"}
+                for status, response in responses.items()
+            },
+        },
+    }
+
+
+def build_openapi(registrations, *, namespaces=None):
+    """Build a document from active registrations and live Context namespaces."""
     active = tuple(
         registration for registration in registrations
         if registration.active and not registration.closed and not registration.staged
     )
     active = tuple(sorted(active, key=lambda registration: registration.route))
     paths = {registration.route: _path_item(registration) for registration in active}
-    namespaces = sorted({registration.namespace for registration in active})
+    namespace_names = {registration.namespace for registration in active}
+    if namespaces is not None:
+        namespace_names.update(namespaces)
     updates = {
         namespace: "/" + quote(namespace, safe="-._~")
-        for namespace in namespaces
+        for namespace in sorted(namespace_names)
     }
+    for namespace, route in updates.items():
+        paths[route + "/state-graph"] = _state_graph_path_item()
     return {
         "openapi": "3.1.0",
         "info": {
@@ -245,7 +309,9 @@ def build_openapi(registrations):
             "description": (
                 "The namespace update stream is a server-to-client WebSocket at "
                 "GET /<namespace>. It sends a handshake, a full share snapshot, "
-                "and updates as shared values change."
+                "updates as shared values change, and state-graph digest/marker "
+                "announcements at most once per half-second. GET the namespace's "
+                "state-graph endpoint for all named node states and connections."
             ),
         },
         "paths": paths,

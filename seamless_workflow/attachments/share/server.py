@@ -22,11 +22,16 @@ from seamless.checksum.null import NULL_CHECKSUM
 
 from ..session import DeliveryAck, MountLease, Observation
 from .mime import content_type as infer_content_type, is_binary
-from .spec import RESERVED_TOPLEVEL_KEYS
+from .spec import (
+    RESERVED_NAMESPACE_KEYS,
+    RESERVED_TOPLEVEL_KEYS,
+    STATE_GRAPH_KEY,
+)
 
 
 _HANDSHAKE = ["Seamless share update server", "1.0"]
 _RESERVED_TOPLEVEL = RESERVED_TOPLEVEL_KEYS
+STATE_GRAPH_INTERVAL = 0.5
 WSMsgType = None
 web = None
 
@@ -87,6 +92,7 @@ class _WsClient:
     ws: web.WebSocketResponse
     initializing: bool = True
     pending: list = field(default_factory=list)
+    state_graph_sent: str | None = None
 
 
 @dataclass
@@ -96,6 +102,7 @@ class _Namespace:
     records: dict = field(default_factory=dict)
     clients: set = field(default_factory=set)
     staged_claim: bool = False
+    state_graph: object = None
 
 
 @dataclass
@@ -168,6 +175,7 @@ class ShareServer:
         self._marker_floors = {}
         self._fingerprints = 0
         self._closed = False
+        self._state_graph_task = None
 
     @staticmethod
     def _default_resolver(checksum):
@@ -193,6 +201,8 @@ class ShareServer:
             if len(parts) == 1 and parts[0] in _RESERVED_TOPLEVEL:
                 raise ValueError("top-level route is reserved")
             return "/" + "/".join(quote(part, safe="-._~") for part in parts)
+        if len(parts) == 1 and parts[0] in RESERVED_NAMESPACE_KEYS:
+            raise ValueError("namespace route is reserved")
         return "/" + quote(namespace, safe="-._~") + "/" + "/".join(
             quote(part, safe="-._~") for part in parts
         )
@@ -247,7 +257,7 @@ class ShareServer:
                 raise ValueError(f"share URL {route!r} conflicts with namespace {path!r}")
 
     def reserve(self, namespace, spec, celltype, session_id, sink, owner=None, *,
-                replaces=(), staged=False, node_path=()):
+                replaces=(), staged=False, node_path=(), state_graph=None):
         """Atomically reserve a URL, without starting the server or claiming data."""
         if not _safe_segment(namespace):
             raise ValueError("namespace must be one safe URL segment")
@@ -271,6 +281,8 @@ class ShareServer:
                 ns = _Namespace(namespace, owner if owner is not None else object())
                 ns.staged_claim = bool(staged)
                 self._namespaces[namespace] = ns
+            if state_graph is not None:
+                ns.state_graph = state_graph
             reg = ShareRegistration(
                 server=self,
                 namespace=namespace,
@@ -416,6 +428,7 @@ class ShareServer:
         if ":" in display_host and not display_host.startswith("["):
             display_host = f"[{display_host}]"
         self.url = f"http://{display_host}:{bound_port}"
+        self._state_graph_task = asyncio.create_task(self._state_graph_loop())
 
     async def _async_cleanup(self):
         if self._runner is not None:
@@ -682,6 +695,10 @@ class ShareServer:
         with self._lock:
             ns = self._namespaces.get(namespace)
             reg = self._records.get((namespace, key))
+        if key == STATE_GRAPH_KEY:
+            if ns is None:
+                return self._json_error(404, "no such share")
+            return await self._serve_state_graph(request, ns)
         if reg is not None and reg.active and not reg.closed:
             return await self._serve(request, reg)
         return self._json_error(404, "no such share")
@@ -746,6 +763,51 @@ class ShareServer:
         except Exception as exc:
             return self._json_error(503, str(exc) or "value resolution failed", headers=headers)
         return self._response(status=200, body=body, headers=headers)
+
+    async def _serve_state_graph(self, request, ns):
+        if request.method == "PUT":
+            return self._response(
+                status=405, headers={"Allow": "GET, HEAD, OPTIONS"}
+            )
+        provider = ns.state_graph
+        if provider is None:
+            return self._json_error(404, "no such share")
+        try:
+            loop = asyncio.get_running_loop()
+            future = loop.run_in_executor(
+                self._executor, provider, self.get_timeout, False
+            )
+            publication = await asyncio.wait_for(
+                asyncio.shield(future), timeout=self.get_timeout
+            )
+        except asyncio.TimeoutError:
+            return self._json_error(503, "state graph request timed out")
+        except Exception as exc:
+            return self._json_error(
+                503, str(exc) or "state graph request failed"
+            )
+        if publication is None:
+            return self._json_error(404, "no such share")
+        marker, digest, body = publication
+        etag = f'"{digest}"'
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "ETag": etag,
+            "X-Seamless-Marker": str(marker),
+            "Cache-Control": "no-cache",
+            "Content-Length": str(len(body)),
+        }
+        inm = request.headers.get("If-None-Match")
+        if inm and (
+            inm.strip() == "*"
+            or etag in {part.strip() for part in inm.split(",")}
+        ):
+            return self._response(status=304, headers=headers)
+        return self._response(
+            status=200,
+            body=b"" if request.method == "HEAD" else body,
+            headers=headers,
+        )
 
     def _record_headers(self, reg, checksum, marker):
         return {
@@ -945,6 +1007,52 @@ class ShareServer:
             except Exception:
                 ns.clients.discard(client)
 
+    async def _state_graph_loop(self):
+        while True:
+            await asyncio.sleep(STATE_GRAPH_INTERVAL)
+            with self._lock:
+                namespaces = tuple(
+                    ns for ns in self._namespaces.values()
+                    if ns.state_graph is not None and ns.clients
+                )
+            for ns in namespaces:
+                await self._state_graph_tick(ns)
+
+    async def _state_graph_tick(self, ns):
+        with self._lock:
+            if (self._namespaces.get(ns.name) is not ns
+                    or ns.state_graph is None or not ns.clients):
+                return
+            provider = ns.state_graph
+        try:
+            loop = asyncio.get_running_loop()
+            future = loop.run_in_executor(
+                self._executor, provider, self.get_timeout, True
+            )
+            publication = await asyncio.wait_for(
+                asyncio.shield(future), timeout=self.get_timeout
+            )
+        except Exception:
+            return
+        if publication is None:
+            return
+        marker, digest, _ = publication
+        with self._lock:
+            if self._namespaces.get(ns.name) is not ns:
+                return
+            clients = tuple(ns.clients)
+        message = ["state-graph", [digest, marker]]
+        for client in clients:
+            if (client.initializing or client.ws.closed
+                    or client.state_graph_sent == digest):
+                continue
+            client.state_graph_sent = digest
+            try:
+                await self._queue_or_send(client, message)
+            except Exception:
+                with self._lock:
+                    ns.clients.discard(client)
+
     def _response(self, status=200, *, body=None, text=None, json_data=None, headers=None):
         response_headers = dict(headers or {})
         if json_data is not None:
@@ -987,6 +1095,10 @@ class ShareServer:
         self._loop = None
 
     async def _async_close(self):
+        if self._state_graph_task is not None:
+            self._state_graph_task.cancel()
+            await asyncio.gather(self._state_graph_task, return_exceptions=True)
+            self._state_graph_task = None
         for ns in tuple(self._namespaces.values()):
             for client in tuple(ns.clients):
                 try:
@@ -1016,7 +1128,13 @@ class ShareServer:
                 and (namespace is None or reg.namespace == namespace)
                 and (owner is None or reg.owner is owner)
             )
-            return build_openapi(registrations)
+            namespaces = tuple(
+                ns.name for ns in self._namespaces.values()
+                if ns.state_graph is not None
+                and (namespace is None or ns.name == namespace)
+                and (owner is None or ns.owner is owner)
+            )
+            return build_openapi(registrations, namespaces=namespaces)
 
 
 _default_lock = threading.Lock()

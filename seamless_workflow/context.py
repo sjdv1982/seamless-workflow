@@ -184,6 +184,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         object.__setattr__(self, "_edge_pin_refholds", {})
         object.__setattr__(self, "_edge_code_states", {})
         object.__setattr__(self, "_anonymous_current_updates", {})
+        object.__setattr__(self, "_state_graph_published", None)
+        object.__setattr__(self, "_state_graph_published_at", 0.0)
         object.__setattr__(self, "_prefix", ())
         from seamless.reference_lifecycle import register_refholder
 
@@ -2915,21 +2917,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         record = lambda item: {"identity": item.identity_checksum.hex() if item.identity_checksum else None, "result": item.result_checksum.hex() if item.result_checksum else None, "phase": item.phase, "generation": item.generation, "hold_kind": item.hold_kind, "hold_deadline": item.hold_deadline}
         return {"current": None if current is None else {**record(current), "exception": None if current.exception is None else {"type": current.exception.type, "message": current.exception.message}}, "superseded": [record(item) for item in superseded]}
 
-    def get_graph(self, runtime=False):
-        nodes = []
-        for path, node in sorted(self._graph.nodes.items()):
-            if node.kind == "cell":
-                entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "validator": node.cell_config.validator, "validator_language": node.cell_config.validator_language, "scratch": node.cell_config.scratch, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
-                share = node.attachments.get("share")
-                if share is not None:
-                    entry["share"] = share.to_graph()
-            else:
-                cfg = node.transformer_config
-                entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
-            if node.mount is not None and node.mount.driver == "file": entry["mount"] = node.mount.to_graph()
-            if runtime:
-                entry["runtime"] = {"state": node.state, "block_reason": node.block_reason, "checksum": node.current_checksum.hex() if node.current_checksum else None, "exception": type(node.exception).__name__ if node.exception else None, "run": self._runtime_graph_entry(path)}
-            nodes.append(entry)
+    def _graph_connections(self):
         connections = []
         anonymous_nodes = {}
 
@@ -2987,6 +2975,24 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             else:
                 connection["source"] = add_anonymous_chain(edge.source_chain)
             connections.append(connection)
+        return connections, {key: anonymous_nodes[key] for key in sorted(anonymous_nodes)}
+
+    def get_graph(self, runtime=False):
+        nodes = []
+        for path, node in sorted(self._graph.nodes.items()):
+            if node.kind == "cell":
+                entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "validator": node.cell_config.validator, "validator_language": node.cell_config.validator_language, "scratch": node.cell_config.scratch, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
+                share = node.attachments.get("share")
+                if share is not None:
+                    entry["share"] = share.to_graph()
+            else:
+                cfg = node.transformer_config
+                entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
+            if node.mount is not None and node.mount.driver == "file": entry["mount"] = node.mount.to_graph()
+            if runtime:
+                entry["runtime"] = {"state": node.state, "block_reason": node.block_reason, "checksum": node.current_checksum.hex() if node.current_checksum else None, "exception": type(node.exception).__name__ if node.exception else None, "run": self._runtime_graph_entry(path)}
+            nodes.append(entry)
+        connections, anonymous_nodes = self._graph_connections()
         return {
             "__seamless_workflow__": "0.6",
             "nodes": nodes,

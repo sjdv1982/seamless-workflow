@@ -57,6 +57,7 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
   let disposed = false;
   let adoptRestartSnapshot = false;
   let socketGeneration = 0;
+  let newestStateGraphMarker = -Infinity;
 
   const self = ctx.self;
   self.sharelist = [];
@@ -64,6 +65,8 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
   self.oninput = function () {};
   self.onchange = function () {};
   self.share_namespace = namespace;
+  self.stategraph = null;
+  self._stategraphDigest = null;
   self.server = restBase;
   self.rest_server = restBase;
   self.update_server = socketBase;
@@ -313,6 +316,55 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
       installSnapshot(message[1]);
       return;
     }
+    if (message[0] === "state-graph" && Array.isArray(message[1])) {
+      if (typeof self.onstategraph !== "function") return;
+      const requestedDigest = String(message[1][0] || "");
+      const marker = Number(message[1][1]);
+      if (!Number.isFinite(marker)) return;
+      newestStateGraphMarker = Math.max(newestStateGraphMarker, marker);
+      const generation = socketGeneration;
+      const encodedNamespace = namespace.split("/").map(encodeURIComponent).join("/");
+      const headers = self.stategraph !== null
+        && self._stategraphDigest === requestedDigest
+        ? { "If-None-Match": `"${requestedDigest}"` }
+        : {};
+      fetch(`${restBase}/${encodedNamespace}/state-graph`, {
+        method: "GET", cache: "no-store", headers
+      }).then(async response => {
+        if (!response.ok && response.status !== 304) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const markerHeader = response.headers.get("X-Seamless-Marker");
+        const responseMarker = markerHeader === null ? NaN : Number(markerHeader);
+        const responseDigest = (response.headers.get("ETag") || "")
+          .replace(/^"|"$/g, "");
+        const graph = response.status === 304 ? self.stategraph : await response.json();
+        return { graph, responseMarker, responseDigest };
+      }).then(({ graph, responseMarker, responseDigest }) => {
+        if (generation !== socketGeneration || graph === null) return;
+        if (Number.isFinite(responseMarker)) {
+          if (responseMarker < newestStateGraphMarker) return;
+          newestStateGraphMarker = Math.max(newestStateGraphMarker, responseMarker);
+        } else if (marker < newestStateGraphMarker) {
+          return;
+        }
+        self.stategraph = graph;
+        self._stategraphDigest = responseDigest || requestedDigest;
+        const handler = self.onstategraph;
+        if (typeof handler === "function") {
+          try {
+            handler(graph);
+          } catch (error) {
+            console.error("Seamless state graph handler error:", error);
+          }
+        }
+      }).catch(error => {
+        if (typeof console !== "undefined" && console.warn) {
+          console.warn("Seamless state graph fetch failed:", error);
+        }
+      });
+      return;
+    }
     if (message[0] === "update" && Array.isArray(message[1])) {
       const [key, checksum, marker] = message[1];
       const entry = entries.get(key);
@@ -326,6 +378,7 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
     if (disposed) return null;
     if (reconnectTimer !== null) clearTimeout(reconnectTimer);
     reconnectTimer = null;
+    newestStateGraphMarker = -Infinity;
     const previous = self.ws;
     const generation = ++socketGeneration;
     self.ws = null;

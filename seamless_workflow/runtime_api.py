@@ -1,12 +1,65 @@
 """Controller-side read and barrier predicates. Waiting is exclusively caller-side."""
+import hashlib
 import copy
+import json
+import time
 from concurrent.futures import Future
 from seamless import Checksum, Expression
+from .builder_state import (
+    _cell_block_reason,
+    _cell_exception,
+    _transformer_block_reason,
+    _transformer_exception,
+)
 from .sidework import Lease
 from .errors import ClosedContextError, StaleWorkflowHandleError, NodeError
 
 
 class RuntimeAPI:
+    def _state_graph_refresh(self):
+        """Controller operation whose turn publishes a state graph snapshot."""
+
+    def _state_graph(self):
+        nodes = []
+        for path, node in sorted(self._graph.nodes.items()):
+            entry = {"type": node.kind, "path": list(path)}
+            if node.kind == "cell":
+                entry["celltype"] = node.cell_config.celltype
+                entry["block_reason"] = _cell_block_reason(node)
+                entry["exception"] = _cell_exception(node)
+            else:
+                entry["language"] = node.transformer_config.language
+                entry["block_reason"] = _transformer_block_reason(node)
+                entry["exception"] = _transformer_exception(node)
+            entry["state"] = node.state
+            entry["checksum"] = (
+                node.current_checksum.hex()
+                if node.current_checksum is not None else None
+            )
+            nodes.append(entry)
+        connections, anonymous_nodes = self._graph_connections()
+        return {
+            "nodes": nodes,
+            "anonymous_nodes": anonymous_nodes,
+            "connections": connections,
+        }
+
+    def _publish_state_graph(self):
+        payload = self._state_graph()
+        body = json.dumps(
+            payload, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        digest = hashlib.sha256(body).hexdigest()
+        previous = getattr(self, "_state_graph_published", None)
+        marker = 1 if previous is None else previous[0]
+        if previous is None or previous[1] != digest:
+            marker += 1 if previous is not None else 0
+        publication = (marker, digest, body)
+        self._state_graph_published = publication
+        self._state_graph_published_at = time.monotonic()
+        self._controller.state_graph_dirty = False
+        return publication
+
     def _register_turn_log(self, log):
         self._controller.turn_logs.add(log)
 

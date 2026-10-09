@@ -8,9 +8,10 @@ from . import server as server_module
 
 
 class ShareDriver:
-    def __init__(self, namespace="ctx", owner=None):
+    def __init__(self, namespace="ctx", owner=None, state_graph=None):
         self.namespace = namespace
         self.owner = object() if owner is None else owner
+        self.state_graph = state_graph
         self._server = None
 
     @property
@@ -38,6 +39,7 @@ class ShareDriver:
         registration = server.reserve(
             self.namespace, spec, celltype, session_id, sink, owner=self.owner,
             replaces=replaces, staged=staged, node_path=node_path,
+            state_graph=self.state_graph,
         )
         registration.service = self
         return registration

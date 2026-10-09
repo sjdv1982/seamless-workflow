@@ -28,6 +28,31 @@ def _path_string(path: tuple[Any, ...]) -> str:
 _DEEP_CELLTYPES = frozenset({"deepcell", "deepfolder", "folder"})
 
 
+def _cell_block_reason(node):
+    return node.block_reason
+
+
+def _cell_exception(node):
+    return str(node.exception) if node.state == "failed" and node.exception is not None else None
+
+
+def _transformer_block_reason(node):
+    if node.state not in {"miswired", "unwired", "blocked", "waiting"}:
+        return None
+    return dict(node.pin_block_reasons) or None
+
+
+def _transformer_exception(node):
+    if node.state not in {"failed", "blocked"} or node.exception is None:
+        return None
+    error = node.exception
+    message = str(error)
+    error_type = type(error).__name__
+    if isinstance(error, BaseException) and error_type != "WorkflowExecutionError" and error_type not in message:
+        return f"{error_type}: {message}"
+    return message
+
+
 def _member_celltype(celltype: str, component) -> str:
     """The celltype one projection step below ``celltype``.
 
@@ -463,14 +488,14 @@ class BoundCellBackend:
 
     @property
     def block_reason(self):
-        return self._node().block_reason
+        return _cell_block_reason(self._node())
 
     @property
     def exception(self):
         node = self._node()
         if self._is_handle():
             return self._handle_exception()
-        return str(node.exception) if node.state == "failed" and node.exception is not None else None
+        return _cell_exception(node)
 
     def derive(self, **updates):
         self._node()
@@ -936,22 +961,11 @@ class BoundTransformerBackend:
 
     @property
     def block_reason(self):
-        node = self._node()
-        if node.state not in {'miswired', 'unwired', 'blocked', 'waiting'}:
-            return None
-        return dict(node.pin_block_reasons) or None
+        return _transformer_block_reason(self._node())
 
     @property
     def exception(self):
-        node = self._node()
-        if node.state not in {"failed", "blocked"} or node.exception is None:
-            return None
-        error = node.exception
-        message = str(error)
-        error_type = type(error).__name__
-        if isinstance(error, BaseException) and error_type != "WorkflowExecutionError" and error_type not in message:
-            return f"{error_type}: {message}"
-        return message
+        return _transformer_exception(self._node())
 
     @property
     def language(self): return self.cfg.language
