@@ -205,6 +205,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         from collections import deque
         object.__setattr__(self, "_mount_events", deque(maxlen=1024))
         object.__setattr__(self, "_mount_logs", set())
+        object.__setattr__(self, "_shares_api", None)
         object.__setattr__(self, "_revisions", {})
         register_refholder(self)
         from .lifecycle import register
@@ -264,6 +265,20 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         from .attachments.api import ContextMounts
         return ContextMounts(self)
 
+    @property
+    def shares(self):
+        self._check_public_caller()
+        if self._closing or self._closed_event.is_set():
+            from .errors import ClosedContextError
+            raise ClosedContextError("Context is closed")
+        with self._close_lock:
+            api = self._shares_api
+            if api is None:
+                from .attachments.share.api import ContextShares
+                api = ContextShares(self)
+                object.__setattr__(self, "_shares_api", api)
+            return api
+
     def close(self, timeout=None):
         controller = getattr(self, "_controller", None)
         if controller is None: return
@@ -272,25 +287,37 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             raise ReentrantContextError("Cannot close Context from a controller turn")
         with self._close_lock:
             if self._closed_event.is_set(): return
-            self._closing = True
-            controller.begin_close().result()
-            import time
-            bound = 60 if timeout is None else timeout
-            deadline = time.monotonic() + bound
-            flush = controller.enqueue('_mount_close_wait', klass=1, internal=True).result()
-            try: flush.result(max(0, deadline - time.monotonic()))
-            except TimeoutError:
-                import logging
-                logging.getLogger(__name__).warning('Context mount close flush timed out')
-            cleanups = controller.enqueue('_mount_close_finish', klass=1, internal=True).result()
-            for cleanup in cleanups:
-                if cleanup is not None:
-                    try: cleanup.result(max(0, deadline - time.monotonic()))
-                    except TimeoutError: pass
-            self._side.close()
-            controller.enqueue("_finish_close", klass=1, internal=True).result()
-            controller.stop()
-            self._closed_event.set()
+            shares = self._shares_api
+            if shares is not None:
+                shares._lock.acquire()
+            try:
+                self._closing = True
+                controller.begin_close().result()
+                import time
+                bound = 60 if timeout is None else timeout
+                deadline = time.monotonic() + bound
+                flush = controller.enqueue('_mount_close_wait', klass=1, internal=True).result()
+                try: flush.result(max(0, deadline - time.monotonic()))
+                except TimeoutError:
+                    import logging
+                    logging.getLogger(__name__).warning('Context mount close flush timed out')
+                cleanups = controller.enqueue('_mount_close_finish', klass=1, internal=True).result()
+                for cleanup in cleanups:
+                    if cleanup is not None:
+                        try: cleanup.result(max(0, deadline - time.monotonic()))
+                        except TimeoutError: pass
+                if shares is not None:
+                    try:
+                        shares._close_namespace(max(0, deadline - time.monotonic()))
+                    except TimeoutError:
+                        pass
+                self._side.close()
+                controller.enqueue("_finish_close", klass=1, internal=True).result()
+                controller.stop()
+                self._closed_event.set()
+            finally:
+                if shares is not None:
+                    shares._lock.release()
 
     def _begin_close(self):
         self._closing = True
@@ -400,6 +427,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             object.__setattr__(self, name, value)
         else:
             self._check_public_caller()
+            if name == "shares" and not self._prefix:
+                raise AttributeError("shares is reserved for the Context share API")
             self._assign(self._prefix + (name,), value)
 
     def __delattr__(self, name):
@@ -409,10 +438,11 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._check_public_caller()
             futures = self._delete(self._prefix + (name,))
             if futures:
-                from .attachments.fs.service import get_service
-
-                timeout = get_service().delivery_timeout
                 for future in futures:
+                    timeout = getattr(future, "delivery_timeout", None)
+                    if timeout is None:
+                        from .attachments.fs.service import get_service
+                        timeout = get_service().delivery_timeout
                     future.result(timeout)
 
     def __getitem__(self, key):
@@ -434,6 +464,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _lookup(self, path):
         path = tuple(path)
+        if path == ("shares",):
+            return self.shares
         if path in self._graph.nodes:
             node = self._graph.nodes[path]
             if node.kind == "cell":
@@ -507,6 +539,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         from seamless_transformer.transformer_class import TransformerCore
 
         path = tuple(path)
+        if path and path[0] == "shares":
+            raise PathError("shares is a reserved Context API name")
         if path == ("mounts",): raise AttributeError("mounts is reserved for the Context mount API")
         if path in self._graph.nodes:
             node = self._graph.nodes[path]
@@ -579,6 +613,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _delete(self, path):
         path = tuple(path)
+        if path and path[0] == "shares":
+            raise PathError("shares is a reserved Context API name")
         if path in self._graph.nodes:
             return self._delete_subtree(path)
         if path in self._graph.namespaces or self._graph.has_prefix(path):

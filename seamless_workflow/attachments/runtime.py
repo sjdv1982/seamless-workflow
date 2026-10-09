@@ -83,18 +83,33 @@ class AttachmentRuntime:
     def _mount_validate(self, path, spec):
         path = tuple(path)
         node = self._graph.nodes.get(path)
-        if node is None or node.kind != 'cell': raise NodeError('Mounts require an existing whole cell node')
+        is_share = spec.driver == 'share'
+        if node is None or node.kind != 'cell':
+            message = 'Shares require an existing whole cell node' if is_share else 'Mounts require an existing whole cell node'
+            raise NodeError(message)
         if spec.driver == 'file':
             occupied = node.mount is not None
         else:
             occupied = spec.driver in node.attachments
         if occupied or (path, spec.driver) in self._mount_sessions:
+            if is_share:
+                raise ValueError('Cell is already shared; unshare first')
             raise ValueError('Cell is already mounted; unmount first')
         incoming = self._incoming_for(path)
+        if is_share:
+            if not spec.readonly and incoming:
+                raise AuthorityError('A writable share cannot have incoming edges; share it read-only')
+            celltype = node.cell_config.celltype
+            from .share.spec import validate_celltype as validate_share_celltype
+            validate_share_celltype(celltype)
+            return celltype
         if 'r' in spec.mode and incoming: raise AuthorityError('Sensing mount cannot have incoming edges; unmount first')
         celltype = node.cell_config.celltype
         validate_celltype(celltype, spec.mode)
         return celltype
+
+    def _share_has_sessions(self):
+        return any(driver == 'share' for _, driver in self._mount_sessions)
 
     def _mount_event(self, session, kind, **detail):
         detail.setdefault('driver', session.spec.driver)
@@ -127,12 +142,19 @@ class AttachmentRuntime:
                 import logging
                 logging.getLogger(__name__).warning('Mount %s: initial %s authority replaces differing content', spec.path, spec.authority)
             if action == 'sense': self._mount_sense(session, observation)
-            elif action == 'sense-null': self._mount_sense_null(session)
+            elif action == 'sense-null':
+                self._mount_sense_null(session)
+                if spec.driver == 'share' and spec.mode == 'rw':
+                    from seamless.checksum.null import NULL_CHECKSUM
+                    self._mount_request(session, Checksum(NULL_CHECKSUM).hex(), force=True)
             elif action == 'sense-null-error':
                 self._mount_sense_null(session)
                 self._mount_sense_error(session, 'Required file is missing')
             elif action == 'error': self._mount_sense_error(session, observation.reason or 'Required file is missing')
             elif action == 'write': self._mount_request(session, checksum)
+            if (spec.driver == 'share' and observation.checksum == ABSENT
+                    and checksum == null_checksum):
+                self._mount_request(session, null_checksum, force=True)
             if checksum == observation.checksum: self._mount_hold_leaves(session, observation)
             if spec.mode == 'rw' and observation.needs_canonical_write and action in {'sense', 'nothing'}:
                 self._mount_request(session, observation.checksum if action == 'sense' else checksum, force=True)
@@ -239,7 +261,8 @@ class AttachmentRuntime:
         from seamless.checksum.null import NULL_CHECKSUM
         null_checksum = Checksum(NULL_CHECKSUM).hex()
         equivalent = delivery.checksum == session.disk or (
-            delivery.checksum == null_checksum and session.disk == ABSENT)
+            delivery.checksum == null_checksum and session.disk == ABSENT
+            and session.spec.driver != 'share')
         if getattr(session.registration, 'directory', False) and delivery.checksum == null_checksum:
             equivalent = True
         if equivalent and not delivery.force:
@@ -456,6 +479,9 @@ class AttachmentRuntime:
                 node.attachments.pop(driver, None)
         future = session.registration.service.unregister(session.registration,
                     delete=delete and not session.spec.persistent, expected=session.fingerprint)
+        delivery_timeout = getattr(session.registration.service, 'delivery_timeout', None)
+        if future is not None and delivery_timeout is not None:
+            future.delivery_timeout = delivery_timeout
         if derive: self._derive_all()
         return future
 

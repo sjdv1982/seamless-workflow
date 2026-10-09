@@ -5,6 +5,7 @@ from .context import Context
 from seamless import Cell
 from seamless_transformer import Transformer
 from .endpoints import BoundEndpoint
+from . import shareserver
 from .errors import (
     AuthorityError,
     DependencyError,
@@ -35,4 +36,5 @@ __all__ = [
     "ControllerFailedError",
     "ReentrantContextError",
     "WorkflowExecutionError",
+    "shareserver",
 ]

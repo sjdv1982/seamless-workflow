@@ -1,6 +1,7 @@
 """Caller-side mount preparation and public handles."""
 import asyncio
 import weakref
+from concurrent.futures import Future
 from uuid import uuid4
 from .spec import AttachmentSpec
 from .fs.service import get_service
@@ -10,19 +11,27 @@ from ..errors import ClosedContextError, ControllerFailedError
 def make_sink(controller):
     reference = weakref.ref(controller)
     def sink(operation, payload):
+        def fail(error):
+            if hasattr(payload, 'release'):
+                payload.release()
+            reply = Future()
+            reply.set_exception(error)
+            return reply
         owner = reference()
         if owner is None:
-            if hasattr(payload, 'release'): payload.release()
-            return
+            return fail(ClosedContextError("Context is closed"))
         try:
             reply = owner.enqueue(operation, (payload,), klass=3 if operation == '_mount_observed' else 5,
                                   internal=operation != '_mount_observed')
-        except (ClosedContextError, ControllerFailedError):
-            if hasattr(payload, 'release'): payload.release()
+        except (ClosedContextError, ControllerFailedError) as exc:
+            return fail(exc)
+        except BaseException as exc:
+            return fail(exc)
         else:
             if hasattr(payload, 'release'):
                 # Also covers accepted messages discarded by stop or poison.
                 reply.add_done_callback(lambda future: payload.release())
+            return reply
     return sink
 
 

@@ -19,6 +19,8 @@ def close_contexts():
         context.close()
     from .attachments.fs.service import close_service
     close_service()
+    from .attachments.share.server import close as close_share_server
+    close_share_server()
 
 
 register_close_hook(close_contexts)

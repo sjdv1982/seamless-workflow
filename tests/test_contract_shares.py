@@ -136,6 +136,9 @@ with socket.socket() as occupied:
             assert ctx.a.share.spec is None
         else:
             raise AssertionError("busy port must raise OSError")
+        shareserver.configure(host="127.0.0.1", port=0)
+        ctx.a.share()
+        assert ctx.a.share.spec is not None
 '''
         import os
         env = dict(os.environ)
@@ -279,8 +282,14 @@ with socket.socket() as occupied:
         assert get(ctx.code.share.url).content == ctx.code.buffer.content
         assert ctx.code.state == "complete" and ctx.code.exception is None
         assert ctx.code.share.error is None
-        with pytest.raises(SyntaxError):
+        # The share follows ordinary assignment validation. The parser's
+        # exception class belongs to core; pin parity without changing it here.
+        cell(ctx, "not valid python @@@\n", "python", "assigned_code")
+        with pytest.raises(Exception) as assigned_error:
+            ctx.assigned_code.value
+        with pytest.raises(type(assigned_error.value)):
             ctx.code.value
+        assert ctx.code.state == "complete" and ctx.code.exception is None
 
     def test_namespaces_paths_toplevel_and_redirects(self, ctx, server):
         """Namespaces; URL space: runtime namespace, nested key, redirect."""
@@ -350,7 +359,7 @@ with socket.socket() as occupied:
         ctx.out.share()
         assert get(ctx.out.share.url).status_code == 200
         cell(ctx, 3, name="target").share(readonly=False)
-        with pytest.raises(AuthorityError):
+        with pytest.raises(AuthorityError, match="^Sensing mount is the producer; unmount first$"):
             ctx.target = ctx.source
         with pytest.raises(AuthorityError):
             ctx.target.checksum = None
@@ -361,7 +370,7 @@ with socket.socket() as occupied:
         """Errors: read-only transformer result refused; connect an output cell."""
         cell(ctx)
         ctx.tf = identity
-        ctx.tf.x = ctx.a
+        ctx.tf.pins.x = ctx.a
         ctx.compute()
         with pytest.raises(AttributeError, match="whole Context cell"):
             ctx.tf.result.share()
@@ -401,7 +410,7 @@ with socket.socket() as occupied:
         """Reading; Record: failed/blocked cells keep the last complete value."""
         cell(ctx)
         ctx.tf = fail_negative
-        ctx.tf.x = ctx.a
+        ctx.tf.pins.x = ctx.a
         ctx.out = ctx.tf.result
         ctx.compute()
         ctx.out.share()
@@ -454,7 +463,14 @@ with socket.socket() as occupied:
             ctx.a.set(8)
             ctx.a.share(readonly=False)
             snapshot = receive("shares")[1]["a"]
-            assert snapshot["marker"] > old
+            assert snapshot["marker"] >= old
+            served = get(ctx.a.share.url)
+            assert served.json() == 8 and marker(served) > old
+            if snapshot["checksum"] != ctx.a.checksum.hex():
+                event = receive("update")[1]
+                assert event == ["a", ctx.a.checksum.hex(), marker(served)]
+            else:
+                assert snapshot["marker"] == marker(served)
 
     def test_context_close_removes_urls_and_closes_websocket(self, ctx, server):
         """Lifecycle; Websocket: close removes URLs and sends close code 1001."""
@@ -687,3 +703,345 @@ class TestShareClientAsset:
         assert "javascript" in response.headers["Content-Type"]
         assert "connect_seamless" in response.text
         assert "import " not in response.text and "require(" not in response.text
+
+
+class TestShareRuntime:
+    def test_sensed_put_never_dispatches_echo_delivery(self, ctx):
+        """Cell to share: a sensed PUT is installed without outbound delivery echo."""
+        from seamless_workflow.diagnostics import record_attachments
+        cell(ctx).share(readonly=False)
+        ctx.mounts.sync(timeout=10)
+        with record_attachments(ctx) as log:
+            assert put(ctx.a.share.url, b"19").status_code == 200
+            ctx.mounts.sync(timeout=10)
+            assert ctx.a.value == 19
+            entries = [e for e in log.entries() if dict(e[3]).get("driver") == "share"]
+            assert any(e[2] == "observation" for e in entries)
+            assert not any(e[2] == "dispatch" for e in entries)
+
+    def test_delivery_pacing_coalesces_and_is_per_session(self, ctx, monkeypatch):
+        """Cell to share: latest-only deliveries start at least 2/3 second apart."""
+        import time
+        from seamless_workflow.attachments.share.driver import ShareDriver
+        calls = []
+        original = ShareDriver.deliver
+        def record(driver, registration, delivery):
+            calls.append((registration.session_id, time.monotonic(), delivery.checksum))
+            return original(driver, registration, delivery)
+        monkeypatch.setattr(ShareDriver, "deliver", record)
+        cell(ctx, 0).share()
+        cell(ctx, 0, name="b").share()
+        for value in range(1, 11):
+            ctx.a.set(value)
+        ctx.b.set(10)
+        ctx.mounts.sync(timeout=10)
+        grouped = {}
+        for session, when, checksum in calls:
+            grouped.setdefault(session, []).append((when, checksum))
+        assert len(grouped) == 2
+        for session, entries in grouped.items():
+            assert len(entries) == 2
+            assert entries[-1][1] == Buffer(10, "int").get_checksum().hex()
+            assert entries[1][0] - entries[0][0] >= 2 / 3 - 0.005
+        assert get(ctx.a.share.url).json() == get(ctx.b.share.url).json() == 10
+
+    def test_public_calls_are_reentrant_refusals(self, ctx, monkeypatch):
+        """Threads and blocking: public share calls refuse the controller thread."""
+        from seamless_workflow.errors import ReentrantContextError
+        cell(ctx)
+        cell(ctx, 2, name="b").share()
+        a, b, shares = ctx.a, ctx.b, ctx.shares
+        observed = []
+        original = Context._after_turn
+        def check(context):
+            if context is ctx and not observed:
+                observed.append(True)
+                for operation in (lambda: a.share(),
+                                  lambda: b.share.unshare(),
+                                  lambda: b.share.clear_error(),
+                                  lambda: setattr(shares, "namespace", "other")):
+                    with pytest.raises(ReentrantContextError):
+                        operation()
+            return original(context)
+        monkeypatch.setattr(Context, "_after_turn", check)
+        ctx.a.set(3)
+        assert observed
+        monkeypatch.setattr(Context, "_after_turn", original)
+
+    def test_public_calls_after_close_refuse_closed_context(self, ctx):
+        """Threads and blocking: public operations on held handles refuse close."""
+        from seamless_workflow.errors import ClosedContextError
+        cell(ctx).share()
+        a, handle, shares = ctx.a, ctx.a.share, ctx.shares
+        ctx.close()
+        for operation in (lambda: a.share(), lambda: handle.unshare(),
+                          lambda: handle.clear_error(),
+                          lambda: setattr(shares, "namespace", "other")):
+            with pytest.raises(ClosedContextError):
+                operation()
+
+    def test_missing_and_stale_handles_raise_node_error(self, ctx):
+        """Errors: a missing or stale whole-node handle raises the share NodeError."""
+        from seamless_workflow.errors import NodeError
+        with pytest.raises(NodeError, match="Shares require an existing whole cell node"):
+            ctx.missing.share()
+        stale = cell(ctx)
+        del ctx.a
+        with pytest.raises(NodeError, match="Shares require an existing whole cell node"):
+            stale.share()
+        assert not ctx.mounts.sync(timeout=10)
+
+    def test_unsharing_keeps_namespace_claim_until_context_close(self, ctx):
+        """Namespaces; Lifecycle: live owner retains namespace through final unshare."""
+        cell(ctx).share()
+        del ctx.a.share
+        with Context() as other:
+            cell(other)
+            with pytest.raises(ValueError, match="namespace.*in use"):
+                other.a.share()
+            ctx.close()
+            other.a.share()
+            assert get(other.a.share.url).json() == 1
+
+    def test_namespace_can_change_after_final_unshare_without_leaking_old_claim(self, ctx):
+        """Namespaces: namespace may change with no shares, releasing the old name."""
+        cell(ctx).share()
+        del ctx.a.share
+        ctx.shares.namespace = "renamed"
+        ctx.a.share()
+        assert "/renamed/a" in ctx.a.share.url
+        with Context() as other:
+            cell(other).share()
+            assert get(other.a.share.url).json() == 1
+
+    def test_process_close_stops_listener(self):
+        """Server; Lifecycle: seamless.close shuts down the process server."""
+        script = '''
+import requests
+import seamless
+from seamless import Cell
+from seamless_workflow import Context, shareserver
+shareserver.configure(host="127.0.0.1", port=0)
+ctx = Context()
+ctx.a = Cell(celltype="int")
+ctx.a.set(1)
+ctx.a.share()
+url = ctx.a.share.url
+assert requests.get(url, timeout=5).status_code == 200
+seamless.close()
+try:
+    requests.get(url, timeout=1)
+except requests.ConnectionError:
+    pass
+else:
+    raise AssertionError("server still listens after seamless.close()")
+'''
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                                text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestShareRuntimeAudit:
+    def test_same_namespace_assignment_after_close_checks_lifecycle(self, ctx):
+        """Threads and blocking: same-value namespace setter still refuses close."""
+        from seamless_workflow.errors import ClosedContextError
+        shares = ctx.shares
+        namespace = shares.namespace
+        ctx.close()
+        with pytest.raises(ClosedContextError):
+            shares.namespace = namespace
+
+    def test_shares_getter_reentrant_guard_precedes_close_lock(self, ctx, monkeypatch):
+        """Threads and blocking: controller refuses shares before waiting on close."""
+        from seamless_workflow.errors import ReentrantContextError
+        cell(ctx)
+        original = Context._after_turn
+        visited = []
+        def check(context):
+            if context is ctx and not visited:
+                visited.append(True)
+                with pytest.raises(ReentrantContextError):
+                    context.shares
+            return original(context)
+        monkeypatch.setattr(Context, "_after_turn", check)
+        # Test instrument: mimic close holding its lock while awaiting a turn.
+        # The bounded Future wait prevents a broken guard from hanging the test.
+        with ctx._close_lock:
+            future = ctx._controller.enqueue("_mount_status", (("a",),), {"driver": "share"}, klass=1)
+            future.result(timeout=2)
+        assert visited
+        monkeypatch.setattr(Context, "_after_turn", original)
+
+    def test_configuration_after_rejected_unstarted_reservation(self):
+        """Server; Errors: a never-started failed reservation does not freeze config."""
+        script = '''
+from seamless import Cell
+from seamless_workflow import Context, shareserver
+shareserver.configure(host="127.0.0.1", port=0)
+with Context() as ctx:
+    ctx.a = Cell(celltype="int")
+    ctx.a.set(1)
+    try:
+        ctx.a.share("openapi.json", toplevel=True)
+    except ValueError:
+        assert ctx.a.share.spec is None
+    else:
+        raise AssertionError("reserved route must be refused")
+    shareserver.configure(host="127.0.0.1", port=0)
+    ctx.a.share()
+    assert shareserver.port > 0
+'''
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                                text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    @pytest.mark.parametrize("readonly", [True, False])
+    def test_complete_null_first_delivery(self, ctx, readonly):
+        """Initial decision; Reading: complete null is served before share returns."""
+        cell(ctx, None).share(readonly=readonly)
+        response = get(ctx.a.share.url)
+        assert response.status_code == 204 and not response.content
+        assert ctx.a.checksum == Checksum(NULL_CHECKSUM)
+        assert response.headers["ETag"] == '"' + ctx.a.checksum.hex() + '"'
+
+    def test_readonly_empty_then_null(self, ctx):
+        """Initial decision; Cell to share: no value followed by null becomes 204."""
+        ctx.a = Cell(celltype="int")
+        ctx.a.share()
+        assert get(ctx.a.share.url).status_code == 404
+        ctx.a.set(None)
+        ctx.mounts.sync(timeout=10)
+        assert get(ctx.a.share.url).status_code == 204
+
+    def test_missing_handle_lifecycle_guards(self, ctx, monkeypatch):
+        """Threads and blocking; Errors: MissingView shares obey public guards."""
+        from seamless_workflow.errors import ClosedContextError, ReentrantContextError
+        missing = ctx.missing
+        cell(ctx)
+        original = Context._after_turn
+        visited = []
+        def check(context):
+            if context is ctx and not visited:
+                visited.append(True)
+                with pytest.raises(ReentrantContextError):
+                    missing.share()
+            return original(context)
+        monkeypatch.setattr(Context, "_after_turn", check)
+        ctx.a.set(2)
+        assert visited
+        monkeypatch.setattr(Context, "_after_turn", original)
+        ctx.close()
+        with pytest.raises(ClosedContextError):
+            missing.share()
+
+    def test_reserved_graph_node_is_phase_four_admission(self, ctx):
+        """The API: shares is reserved in graph input before persistence is added."""
+        cell(ctx)
+        graph = ctx.get_graph()
+        graph["nodes"][0]["path"] = ["shares"]
+        with pytest.raises(PathError, match="^shares is a reserved Context API name$"):
+            ctx.set_graph(graph)
+        assert ctx.a.value == 1
+
+    def test_failed_initial_delivery_rolls_back_only_failed_share(self, ctx, monkeypatch):
+        """Lifecycle; Initial decision: failed attachment leaves sibling URLs intact."""
+        from concurrent.futures import Future
+        from seamless_workflow.attachments.share.driver import ShareDriver
+        cell(ctx).share()
+        sibling_url = ctx.a.share.url
+        cell(ctx, 2, name="b")
+        driver_server = ctx.shares._driver.server
+        monkeypatch.setattr(driver_server, "put_timeout", 0.05)
+        monkeypatch.setattr(driver_server, "delivery_timeout", 0.05)
+        original = ShareDriver.deliver
+        def hold(driver, registration, delivery):
+            if registration.spec.path == "b":
+                future = Future()
+                future.set_result(None)
+                return future  # Instrument an unacknowledged initial delivery.
+            return original(driver, registration, delivery)
+        with monkeypatch.context() as patch:
+            patch.setattr(ShareDriver, "deliver", hold)
+            with pytest.raises(TimeoutError):
+                ctx.b.share()
+        assert ctx.b.share.spec is None
+        assert get(sibling_url).json() == 1
+        assert get(sibling_url.rsplit("/", 1)[0] + "/b").status_code == 404
+        assert set(ctx.mounts.sync(timeout=10)) == {(("a",), "share")}
+        ctx.b.share()
+        assert get(ctx.b.share.url).json() == 2
+
+    @pytest.mark.parametrize("action", ["unshare", "delete"])
+    def test_detach_uses_share_delivery_timeout_without_file_service(self, ctx, monkeypatch, action):
+        """Lifecycle; Threads: share detach waits its transport delivery timeout."""
+        from seamless_workflow.attachments.share.driver import ShareDriver
+        from seamless_workflow.attachments.fs import service as file_service
+        cell(ctx).share()
+        share_server = ctx.shares._driver.server
+        monkeypatch.setattr(share_server, "delivery_timeout", 1.75)
+        monkeypatch.setattr(share_server, "put_timeout", 0.125)
+        waits = []
+        original = ShareDriver.unregister
+        def track(driver, registration, **kwargs):
+            future = original(driver, registration, **kwargs)
+            original_result = future.result
+            def result(timeout=None):
+                waits.append(timeout)
+                return original_result(timeout)
+            future.result = result
+            return future
+        def no_file_service(*args, **kwargs):
+            raise AssertionError("share detach initialized the file service")
+        monkeypatch.setattr(ShareDriver, "unregister", track)
+        monkeypatch.setattr(file_service, "get_service", no_file_service)
+        url = ctx.a.share.url
+        if action == "unshare":
+            del ctx.a.share
+        else:
+            del ctx.a
+        assert waits and waits[-1] == 1.75
+        assert get(url).status_code == 404
+
+    def test_namespace_change_races_share_as_one_public_operation(self, ctx):
+        """Namespaces; Threads: namespace changes and share reservations serialize."""
+        from concurrent.futures import ThreadPoolExecutor
+        cell(ctx)
+        handle = ctx.a
+        barrier = threading.Barrier(2)
+        def share():
+            barrier.wait(timeout=10)
+            handle.share()
+        def rename():
+            barrier.wait(timeout=10)
+            try:
+                ctx.shares.namespace = "renamed"
+                return "renamed"
+            except ValueError:
+                return "ctx"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            sharing = pool.submit(share)
+            renaming = pool.submit(rename)
+            sharing.result(timeout=15)
+            namespace = renaming.result(timeout=15)
+        assert ctx.shares.namespace == namespace
+        assert handle.share.url.endswith("/" + namespace + "/a")
+        assert get(handle.share.url).json() == 1
+
+    def test_environment_host_and_port_overrides(self):
+        """Server: environment config overrides bind defaults before first share."""
+        import os
+        env = dict(os.environ, SEAMLESS_SHARE_HOST="127.0.0.1", SEAMLESS_SHARE_PORT="0")
+        script = '''
+from seamless import Cell
+from seamless_workflow import Context, shareserver
+assert shareserver.host == "127.0.0.1" and shareserver.port == 0
+with Context() as ctx:
+    ctx.a = Cell(celltype="int")
+    ctx.a.set(1)
+    ctx.a.share()
+    assert shareserver.port > 0
+    assert ctx.a.share.url == "http://127.0.0.1:" + str(shareserver.port) + "/ctx/a"
+'''
+        result = subprocess.run([sys.executable, "-c", script], env=env,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr

@@ -13,6 +13,15 @@ class MissingView:
 
         raise NodeError("Mounts require an existing whole cell node")
 
+    def share(self, *args, **kwargs):
+        self._context._check_public_caller()
+        if self._context._closed_event.is_set():
+            from .errors import ClosedContextError
+            raise ClosedContextError("Context is closed")
+        from .errors import NodeError
+
+        raise NodeError("Shares require an existing whole cell node")
+
     def __dir__(self):
         self._context._check_public_caller()
         return sorted(set(super().__dir__()) | set(self._context._child_names(self._path)))

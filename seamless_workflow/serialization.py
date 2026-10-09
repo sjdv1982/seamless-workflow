@@ -100,6 +100,7 @@ def prepare_graph(data):
         else:
             raise PathError(f'Unknown node type: {entry["type"]!r}')
         if path == ('mounts',): raise PathError('mounts is a reserved Context API name')
+        if path and path[0] == 'shares': raise PathError('shares is a reserved Context API name')
         if 'mount' in entry:
             if node.kind != 'cell': raise PathError('Only cells may have mount specs')
             try:

@@ -11,6 +11,7 @@ import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 import inspect
+import os
 import threading
 from urllib.parse import quote
 
@@ -119,6 +120,7 @@ class ShareServer:
         max_body_size=1024 * 1024 * 1024,
         put_timeout=60,
         get_timeout=60,
+        delivery_timeout=60,
         resolver=None,
     ):
         self.host = host
@@ -126,6 +128,7 @@ class ShareServer:
         self.max_body_size = int(max_body_size)
         self.put_timeout = float(put_timeout)
         self.get_timeout = float(get_timeout)
+        self.delivery_timeout = float(delivery_timeout)
         self.resolver = resolver if resolver is not None else self._default_resolver
         self.url = None
         self._lock = threading.RLock()
@@ -416,6 +419,31 @@ class ShareServer:
                 self._release_namespace(registration.namespace, registration.owner)
             return _completed_future(None)
         return self._submit(self._unregister(registration, close_namespace))
+
+    def release_namespace(self, namespace, owner):
+        if self._closed:
+            return _completed_future(None)
+        if self._loop is None or not self._started.is_set() or self._startup_error is not None:
+            self._release_namespace(namespace, owner)
+            return _completed_future(None)
+        return self._submit(self._close_namespace(namespace, owner))
+
+    async def _close_namespace(self, namespace, owner):
+        with self._lock:
+            ns = self._namespaces.get(namespace)
+            if ns is None or ns.owner is not owner or ns.records:
+                return
+            clients = tuple(ns.clients)
+        for client in clients:
+            try:
+                await client.ws.close(code=1001, message=b"namespace released")
+            except Exception:
+                pass
+        with self._lock:
+            ns = self._namespaces.get(namespace)
+            if ns is not None and ns.owner is owner and not ns.records:
+                ns.clients.clear()
+                self._namespaces.pop(namespace, None)
 
     async def _unregister(self, reg, close_namespace=False):
         ns = self._namespaces.get(reg.namespace)
@@ -832,27 +860,50 @@ class ShareServer:
 
 _default_lock = threading.Lock()
 _default_server = None
-_default_config = {"host": "0.0.0.0", "port": 5813}
+_default_config = {
+    "host": os.environ.get("SEAMLESS_SHARE_HOST", "0.0.0.0"),
+    "port": int(os.environ.get("SEAMLESS_SHARE_PORT", "5813")),
+}
 
 
 def configure(host="0.0.0.0", port=5813, **kwargs):
     """Configure the lazy process-wide server used by the public facade."""
-    global _default_config
+    global _default_config, _default_server
+    stale = None
     with _default_lock:
         if _default_server is not None:
-            raise RuntimeError("share server is already initialized")
+            server = _default_server
+            with server._lock:
+                unused = (
+                    server._thread is None
+                    and not server._namespaces
+                    and not server._records
+                    and not server._top_records
+                )
+            if not server._closed and server._startup_error is None and not unused:
+                raise RuntimeError("share server is already initialized")
+            stale, _default_server = server, None
         _default_config = {"host": host, "port": port, **kwargs}
+    if stale is not None:
+        stale.close()
 
 
-def get_server():
+def get_server(*, start=True):
     """Return and lazily bind the process-wide share server."""
     global _default_server
     with _default_lock:
         if _default_server is None:
             _default_server = ShareServer(**_default_config)
         server = _default_server
-    server.start()
+    if start:
+        server.start()
     return server
+
+
+def get_server_if_started():
+    """Return the process server if one was created, without creating it."""
+    with _default_lock:
+        return _default_server
 
 
 def close():
