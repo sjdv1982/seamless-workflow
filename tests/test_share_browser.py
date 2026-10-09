@@ -172,3 +172,116 @@ def test_chrome_cleanup_runs_even_when_disconnect_raises():
     with pytest.raises(RuntimeError, match="instrumented disconnect failure"):
         chrome.close()
     assert events == ["stop", "join", "loop.close", "terminate", "wait", "log.close", "profile.cleanup"]
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is unavailable")
+def test_mixlangstatus_state_graph_browser(tmp_path, monkeypatch):
+    """Live states, error controls, in-place recolouring and endpoint identity."""
+    monkeypatch.setenv("SEAMLESS_SHARE_HOST", "127.0.0.1")
+    monkeypatch.setenv("SEAMLESS_SHARE_PORT", "0")
+    from seamless_workflow import shareserver
+    example_dir = EXAMPLE.parent / "mixlangstatus"
+    spec = importlib.util.spec_from_file_location("mixlangstatus_status_example", example_dir / "workflow-status.py")
+    example = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = example
+    spec.loader.exec_module(example)
+    html = tmp_path / "status.html"
+    html.write_bytes((example_dir / "status.html").read_bytes())
+    context = None
+    try:
+        with Chrome() as chrome:
+            context = example.build(page_path=html)
+            # A unique input prevents an earlier test's cached result from
+            # hiding the five-second computing/waiting states.
+            context.seed.set(time.time_ns() % 2_000_000_000)
+            wait_python(lambda: context.random_text.state == "computing")
+            tab = chrome.tab(context.page.share.url)
+            tab.wait("document.querySelector('#status-graph g.node[data-path=\"random_text\"]')?.dataset.state === 'computing' && document.querySelector('#status-graph g.node[data-path=\"modify_text\"]')?.dataset.state === 'waiting'", timeout=4)
+            tab.wait("document.querySelector('g.node[data-path=\"random_text\"]')?.dataset.state === 'complete' && document.querySelector('g.node[data-path=\"modify_text\"]')?.dataset.state === 'complete'", timeout=20)
+            assert tab.evaluate("(() => {const edges=[...document.querySelectorAll('#status-graph g.edge')];return edges.length>0 && edges.every(edge => edge.dataset.state === [...document.querySelectorAll('#status-graph g.node')].find(node => node.dataset.path === edge.dataset.source)?.dataset.state);})()")
+            tab.evaluate("window.savedStatusNode=document.querySelector('g.node[data-path=\"modify_text\"]'); window.savedStatusEdge=document.querySelector('g.edge[data-source=\"modify_text\"]');")
+            # Exercise the actual writable text control, including its blur
+            # submission, so the browser exposes a failure despite stale output.
+            tab.evaluate("(() => {const code=document.querySelector('#modify_text_code');code.value='echo browser-status-failure >&2\\nexit 1\\n';code.dispatchEvent(new Event('input',{bubbles:true}));code.dispatchEvent(new Event('blur'));})()")
+            wait_python(lambda: context.modify_text.state == "failed")
+            tab.wait("document.querySelector('g.node[data-path=\"modify_text\"]')?.dataset.state === 'failed' && document.querySelector('g.node[data-path=\"text2\"]')?.dataset.state === 'blocked'")
+            assert tab.evaluate("savedStatusNode === document.querySelector('g.node[data-path=\"modify_text\"]') && savedStatusEdge === document.querySelector('g.edge[data-source=\"modify_text\"]')")
+            assert tab.evaluate("savedStatusEdge.dataset.state === savedStatusNode.dataset.state")
+            tab.evaluate("savedStatusNode.dispatchEvent(new MouseEvent('click',{bubbles:true}))")
+            tab.wait("document.querySelector('#status-detail')?.textContent.includes('failed') && document.querySelector('#status-detail')?.textContent.includes('browser-status-failure')")
+
+            # Drive the same renderer through its client handler with graph-format
+            # endpoints: nested paths, a direct node, and an anonymous chain.
+            assert tab.evaluate(r'''(() => {
+              const render=window.ctx.self.onstategraph;
+              window.ctx.self.onstategraph=null;
+              const graph={nodes:[
+                {type:'cell',path:['group','input'],celltype:'plain',state:'complete',block_reason:null,exception:null,checksum:null},
+                {type:'transformer',path:['group','run'],language:'python',state:'waiting',block_reason:null,exception:null,checksum:null},
+                {type:'cell',path:['result'],celltype:'plain',state:'waiting',block_reason:null,exception:null,checksum:null}],
+                anonymous_nodes:{one:{source:{node:['group','input']},path:'[0]',celltype:'plain'},two:{source:{symbol:'one'},path:'[1]',celltype:'plain'}},
+                connections:[{type:'connection',source:{symbol:'two'},target:['group','run','x']},{type:'connection',source:{node:['group','run']},target:['result']}]};
+              render(graph);
+              const nodes=[...document.querySelectorAll('#status-graph g.node')];
+              const edges=[...document.querySelectorAll('#status-graph g.edge')];
+              if(nodes.length!==3 || edges.length!==2) return false;
+              if(!edges.some(e=>e.dataset.source==='group.input' && e.dataset.target==='group.run') || !edges.some(e=>e.dataset.source==='group.run' && e.dataset.target==='result')) return false;
+              const input=nodes.find(n=>n.dataset.path==='group.input'),run=nodes.find(n=>n.dataset.path==='group.run'),result=nodes.find(n=>n.dataset.path==='result');
+              if(!(input.getBoundingClientRect().left < run.getBoundingClientRect().left && run.getBoundingClientRect().left < result.getBoundingClientRect().left)) return false;
+              graph.nodes[0].state='failed';render(graph);
+              if(document.querySelector('g.node[data-path="group.input"]')!==input || input.dataset.state!=='failed') return false;
+              if(!edges.every(e=>e.isConnected && e.dataset.state===nodes.find(n=>n.dataset.path===e.dataset.source).dataset.state)) return false;
+              graph.nodes.push({type:'cell',path:['extra'],celltype:'plain',state:'unwired',block_reason:null,exception:null,checksum:null});
+              render(graph);
+              if(document.querySelectorAll('#status-graph g.node').length!==4) return false;
+              // Dotted labels are ambiguous; graph identity remains the path array.
+              const collision={nodes:[
+                {type:'cell',path:['a.b'],celltype:'plain',state:'complete',block_reason:null,exception:null,checksum:null},
+                {type:'cell',path:['a','b'],celltype:'plain',state:'failed',block_reason:null,exception:'nested failure',checksum:null},
+                {type:'transformer',path:['target'],language:'python',state:'blocked',block_reason:null,exception:null,checksum:null}],
+                anonymous_nodes:{},connections:[
+                  {type:'connection',source:['a.b','item'],target:['target','first']},
+                  {type:'connection',source:['a','b','item'],target:['target','second']}]};
+              render(collision);
+              const exactNodes=[...document.querySelectorAll('#status-graph g.node')];
+              const exactEdges=[...document.querySelectorAll('#status-graph g.edge')];
+              const flat=exactNodes.find(n=>n.dataset.pathJson===JSON.stringify(['a.b']));
+              const nested=exactNodes.find(n=>n.dataset.pathJson===JSON.stringify(['a','b']));
+              if(exactNodes.length!==3 || !flat || !nested || flat===nested || flat.dataset.path!=='a.b' || nested.dataset.path!=='a.b') return false;
+              if(flat.dataset.state!=='complete' || nested.dataset.state!=='failed') return false;
+              if(exactEdges.length!==2 || !exactEdges.some(e=>e.dataset.sourceJson===JSON.stringify(['a.b']) && e.dataset.targetJson===JSON.stringify(['target']) && e.dataset.state==='complete') || !exactEdges.some(e=>e.dataset.sourceJson===JSON.stringify(['a','b']) && e.dataset.targetJson===JSON.stringify(['target']) && e.dataset.state==='failed')) return false;
+              collision.nodes[0].state='computing';render(collision);
+              return flat.isConnected && nested.isConnected && flat.dataset.state==='computing' && nested.dataset.state==='failed' && exactEdges.every(e=>e.isConnected && e.dataset.state===exactNodes.find(n=>n.dataset.pathJson===e.dataset.sourceJson).dataset.state);
+            })()''')
+    finally:
+        if context is not None:
+            context.close()
+        shareserver.close()
+
+
+@pytest.mark.parametrize("failures,error_number,expected_calls", [(2, "ENOTEMPTY", 3), (25, "ENOTEMPTY", 21), (1, "EACCES", 1)])
+def test_chrome_profile_cleanup_retries_only_transient_nonempty(monkeypatch, failures, error_number, expected_calls):
+    """A child write race is retried, while persistent and other errors surface."""
+    import errno
+    from helpers import chrome_cdp
+    # Use symbolic errno values so the fake behaves across operating systems.
+    error_number = getattr(errno, error_number)
+    calls = []
+    sleeps = []
+    failure = OSError(error_number, "instrumented profile cleanup failure")
+    class Profile:
+        def cleanup(self):
+            calls.append(None)
+            if len(calls) <= failures:
+                raise failure
+    chrome = Chrome.__new__(Chrome)
+    chrome.profile = Profile()
+    monkeypatch.setattr(chrome_cdp.time, "sleep", sleeps.append)
+    if failures == 2:
+        chrome._cleanup_profile()
+    else:
+        with pytest.raises(OSError) as caught:
+            chrome._cleanup_profile()
+        assert caught.value is failure
+    assert len(calls) == expected_calls
+    assert sleeps == [0.1] * (expected_calls - 1)

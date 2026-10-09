@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seamless mixed-language workflow</title>
+  <style>
+    body { font: 1rem system-ui, sans-serif; margin: 2rem auto; max-width: 44rem; padding: 0 1rem; }
+    label { align-items: center; display: grid; gap: 1rem; grid-template-columns: 6rem 1fr 3rem; margin: 1.25rem 0; }
+    output { font-variant-numeric: tabular-nums; }
+    .field { display: block; margin: 1.25rem 0; }
+    .field small { color: #555; font-weight: normal; }
+    textarea { box-sizing: border-box; display: block; font: 0.9rem ui-monospace, monospace; margin-top: 0.25rem; width: 100%; }
+    textarea:read-only { background: #f4f4f4; }
+    #status { color: #555; min-height: 1.5em; }
+    /* A status-graph panel can go into the empty aside later. */
+    #status-panel[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Seamless mixed-language workflow</h1>
+  <p>Change an input here or in the Python Context. Sliders send on release and
+     text fields on leaving the field or Ctrl+Enter. Each change takes about
+     5 s for <code>text1</code> and 10 s for <code>text2</code>.</p>
+
+  <main>
+    <label for="length">length
+      <input id="length" type="range" min="1" max="40" value="12" disabled>
+      <output id="length-value">12</output>
+    </label>
+    <label for="seed">seed
+      <input id="seed" type="range" min="0" max="1000" value="128" disabled>
+      <output id="seed-value">128</output>
+    </label>
+    <label class="field" for="random_text_code">random_text_code <small>(python)</small>
+      <textarea id="random_text_code" rows="10" spellcheck="false" disabled></textarea>
+    </label>
+    <label class="field" for="text1">text1 <small>(text, read-only)</small>
+      <textarea id="text1" rows="2" spellcheck="false" placeholder="waiting for a result…" readonly></textarea>
+    </label>
+    <label class="field" for="modify_text_code">modify_text_code <small>(bash)</small>
+      <textarea id="modify_text_code" rows="5" spellcheck="false" disabled></textarea>
+    </label>
+    <label class="field" for="text2">text2 <small>(text, read-only)</small>
+      <textarea id="text2" rows="2" spellcheck="false" placeholder="waiting for a result…" readonly></textarea>
+    </label>
+  </main>
+  <p id="status" role="status">Connecting…</p>
+  <aside id="status-panel" hidden></aside>
+
+  <script src="/seamless-client.js"></script>
+  <script>
+    const shared = connect_seamless();
+    const sliders = ["length", "seed"];
+    const editors = ["random_text_code", "modify_text_code"];
+    const outputs = ["text1", "text2"];
+    const initialValues = new Set();
+    const dirty = new Set();   // inputs the user has changed but not yet sent
+    const el = key => document.getElementById(key);
+    const showNumber = value => value == null ? "" : String(Number(String(value).trim()));
+    // The server keeps exactly one trailing newline; the fields do not show it.
+    const showText = value => value == null ? "" : value.replace(/\n$/, "");
+    const sameText = (a, b) => a.replace(/\n+$/, "") === b.replace(/\n+$/, "");
+    const setStatus = text => { el("status").textContent = text; };
+
+    // A change is sent once, when the user is done: this starts a run of 5 s or more.
+    // Several events may end an interaction (change, blur, pointerup, keyup);
+    // the first one sends and clears `dirty`, the others find nothing to do.
+    // `change` alone is not enough: it does not fire when the user types a
+    // character and deletes it again, or drags a slider back to where it was.
+    function send(key, value) {
+      const cell = shared[key];
+      if (!dirty.has(key) || !cell || cell.readonly) return;
+      dirty.delete(key);
+      const current = cell.value;
+      const unchanged = current != null && (sliders.includes(key)
+        ? Number(value) === Number(String(current).trim())
+        : sameText(value, current));
+      if (unchanged) {
+        // Nothing to send. Show the served value again, which may have arrived meanwhile.
+        if (cell.onchange) cell.onchange();
+        return;
+      }
+      cell.set(value);
+      setStatus(`Sent ${key}. The results follow in about 5 s and 10 s.`);
+    }
+
+    for (const key of sliders) {
+      const slider = el(key);
+      const finish = () => send(key, slider.value);
+      slider.addEventListener("input", () => {
+        el(`${key}-value`).value = slider.value;
+        dirty.add(key);
+      });
+      for (const name of ["change", "pointerup", "pointercancel", "keyup", "blur"]) {
+        slider.addEventListener(name, finish);
+      }
+    }
+    for (const key of editors) {
+      const field = el(key);
+      field.addEventListener("input", () => dirty.add(key));
+      field.addEventListener("change", () => send(key, field.value));
+      field.addEventListener("blur", () => send(key, field.value));
+      field.addEventListener("keydown", event => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          send(key, field.value);
+        }
+      });
+    }
+
+    shared.self.onsharelist = keys => {
+      for (const key of sliders.filter(key => keys.includes(key))) {
+        const cell = shared[key];
+        cell.onchange = () => {
+          // Never move a slider the user is holding, or overwrite an unsent edit.
+          if (dirty.has(key)) return;
+          const value = showNumber(cell.value);
+          if (value !== "NaN") el(key).value = value;
+          el(`${key}-value`).value = value;
+          initialValues.add(key);
+          enableWhenReady();
+        };
+      }
+      for (const key of editors.filter(key => keys.includes(key))) {
+        const cell = shared[key];
+        cell.onchange = () => {
+          const field = el(key);
+          const value = cell.value == null ? "" : cell.value;
+          if (dirty.has(key)) return;
+          // Leave the field alone, and keep the caret, when only the newline differs.
+          if (!sameText(field.value, value)) field.value = showText(value);
+          initialValues.add(key);
+          enableWhenReady();
+        };
+      }
+      // The outputs arrive after 5 s and 10 s, or not at all when a run fails,
+      // and a failed run keeps the last value: they never gate the page.
+      for (const key of outputs.filter(key => keys.includes(key))) {
+        const cell = shared[key];
+        cell.onchange = () => { el(key).value = showText(cell.value); };
+      }
+      enableWhenReady();
+    };
+
+    function enableWhenReady() {
+      if (!window.shareReady && [...sliders, ...editors].every(key => initialValues.has(key))) {
+        for (const key of [...sliders, ...editors]) el(key).disabled = false;
+        setStatus("Connected. text1 and text2 appear after about 5 s and 10 s.");
+        window.shareReady = true;
+      }
+    }
+  </script>
+</body>
+</html>

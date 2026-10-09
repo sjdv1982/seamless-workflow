@@ -1,5 +1,6 @@
 """Small synchronous Chrome DevTools client backed by aiohttp on a private loop."""
 import asyncio
+import errno
 import json
 import shutil
 import socket
@@ -116,7 +117,19 @@ class Chrome:
                         self.process.wait(timeout=5)
             finally:
                 self.log.close()
+                self._cleanup_profile()
+
+    def _cleanup_profile(self):
+        # Chrome children can briefly recreate files after the parent exits.
+        # Retry only that race; permission errors and persistent failures surface.
+        for attempt in range(21):
+            try:
                 self.profile.cleanup()
+                return
+            except OSError as exc:
+                if exc.errno != errno.ENOTEMPTY or attempt == 20:
+                    raise
+                time.sleep(0.1)
 
     def __enter__(self):
         return self

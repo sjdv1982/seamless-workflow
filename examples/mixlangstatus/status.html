@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seamless mixed-language workflow status graph</title>
+  <style>
+    body { font: 1rem system-ui, sans-serif; margin: 2rem auto; max-width: 78rem; padding: 0 1rem; }
+    label { align-items: center; display: grid; gap: 1rem; grid-template-columns: 6rem 1fr 3rem; margin: 1.25rem 0; }
+    output { font-variant-numeric: tabular-nums; }
+    .field { display: block; margin: 1.25rem 0; }
+    .field small { color: #555; font-weight: normal; }
+    textarea { box-sizing: border-box; display: block; font: 0.9rem ui-monospace, monospace; margin-top: 0.25rem; width: 100%; }
+    textarea:read-only { background: #f4f4f4; }
+    #status { color: #555; min-height: 1.5em; }
+    #status-panel[hidden] { display: none; }
+    #status-panel { border-top: 1px solid #bbb; margin-top: 2rem; padding-top: 1rem; }
+    #graph-scroll { overflow-x: auto; }
+    #status-graph { background: #fafafa; display: block; min-width: 52rem; width: 100%; }
+    #status-detail { background: #f4f4f4; border-radius: 0.35rem; min-height: 5rem; padding: 0.8rem; white-space: pre-wrap; }
+    .node { cursor: pointer; outline: none; }
+    .node rect { stroke: #222; stroke-width: 1.5; }
+    .node:focus rect, .node:hover rect { stroke: #111; stroke-width: 3; }
+    .node-label { font-size: 12px; font-weight: 600; }
+    .node-state { font-size: 11px; }
+    .edge path { fill: none; opacity: 0.72; stroke-width: 2.5; }
+  </style>
+</head>
+<body>
+  <h1>Seamless mixed-language workflow</h1>
+  <p>Change an input here or in the Python Context. Sliders send on release and
+     text fields on leaving the field or Ctrl+Enter. Each change takes about
+     5 s for <code>text1</code> and 10 s for <code>text2</code>. The graph below
+     shows each node state and the state of its outgoing connections.</p>
+
+  <main>
+    <label for="length">length
+      <input id="length" type="range" min="1" max="40" value="12" disabled>
+      <output id="length-value">12</output>
+    </label>
+    <label for="seed">seed
+      <input id="seed" type="range" min="0" max="1000" value="128" disabled>
+      <output id="seed-value">128</output>
+    </label>
+    <label class="field" for="random_text_code">random_text_code <small>(python)</small>
+      <textarea id="random_text_code" rows="10" spellcheck="false" disabled></textarea>
+    </label>
+    <label class="field" for="text1">text1 <small>(text, read-only)</small>
+      <textarea id="text1" rows="2" spellcheck="false" placeholder="waiting for a result…" readonly></textarea>
+    </label>
+    <label class="field" for="modify_text_code">modify_text_code <small>(bash)</small>
+      <textarea id="modify_text_code" rows="5" spellcheck="false" disabled></textarea>
+    </label>
+    <label class="field" for="text2">text2 <small>(text, read-only)</small>
+      <textarea id="text2" rows="2" spellcheck="false" placeholder="waiting for a result…" readonly></textarea>
+    </label>
+  </main>
+  <p id="status" role="status">Connecting…</p>
+  <aside id="status-panel" aria-labelledby="graph-heading">
+    <h2 id="graph-heading">Workflow state graph</h2>
+    <p id="status-empty" role="status">Waiting for the first state graph…</p>
+    <div id="graph-scroll">
+      <svg id="status-graph" role="img" aria-label="Workflow node state graph"></svg>
+    </div>
+    <h3>Node details</h3>
+    <pre id="status-detail" aria-live="polite">Hover over, focus, or click a node to see its state, block reason, and exception.</pre>
+  </aside>
+
+  <script src="/seamless-client.js"></script>
+  <script>
+    const shared = connect_seamless();
+    window.ctx = shared;
+    const sliders = ["length", "seed"];
+    const editors = ["random_text_code", "modify_text_code"];
+    const outputs = ["text1", "text2"];
+    const initialValues = new Set();
+    const dirty = new Set();   // inputs the user has changed but not yet sent
+    const el = key => document.getElementById(key);
+    const showNumber = value => value == null ? "" : String(Number(String(value).trim()));
+    // The server keeps exactly one trailing newline; the fields do not show it.
+    const showText = value => value == null ? "" : value.replace(/\n$/, "");
+    const sameText = (a, b) => a.replace(/\n+$/, "") === b.replace(/\n+$/, "");
+    const setStatus = text => { el("status").textContent = text; };
+
+    // A change is sent once, when the user is done: this starts a run of 5 s or more.
+    // Several events may end an interaction (change, blur, pointerup, keyup);
+    // the first one sends and clears `dirty`, the others find nothing to do.
+    // `change` alone is not enough: it does not fire when the user types a
+    // character and deletes it again, or drags a slider back to where it was.
+    function send(key, value) {
+      const cell = shared[key];
+      if (!dirty.has(key) || !cell || cell.readonly) return;
+      dirty.delete(key);
+      const current = cell.value;
+      const unchanged = current != null && (sliders.includes(key)
+        ? Number(value) === Number(String(current).trim())
+        : sameText(value, current));
+      if (unchanged) {
+        // Nothing to send. Show the served value again, which may have arrived meanwhile.
+        if (cell.onchange) cell.onchange();
+        return;
+      }
+      cell.set(value);
+      setStatus(`Sent ${key}. The results follow in about 5 s and 10 s.`);
+    }
+
+    for (const key of sliders) {
+      const slider = el(key);
+      const finish = () => send(key, slider.value);
+      slider.addEventListener("input", () => {
+        el(`${key}-value`).value = slider.value;
+        dirty.add(key);
+      });
+      for (const name of ["change", "pointerup", "pointercancel", "keyup", "blur"]) {
+        slider.addEventListener(name, finish);
+      }
+    }
+    for (const key of editors) {
+      const field = el(key);
+      field.addEventListener("input", () => dirty.add(key));
+      field.addEventListener("change", () => send(key, field.value));
+      field.addEventListener("blur", () => send(key, field.value));
+      field.addEventListener("keydown", event => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          send(key, field.value);
+        }
+      });
+    }
+
+    shared.self.onsharelist = keys => {
+      for (const key of sliders.filter(key => keys.includes(key))) {
+        const cell = shared[key];
+        cell.onchange = () => {
+          // Never move a slider the user is holding, or overwrite an unsent edit.
+          if (dirty.has(key)) return;
+          const value = showNumber(cell.value);
+          if (value !== "NaN") el(key).value = value;
+          el(`${key}-value`).value = value;
+          initialValues.add(key);
+          enableWhenReady();
+        };
+      }
+      for (const key of editors.filter(key => keys.includes(key))) {
+        const cell = shared[key];
+        cell.onchange = () => {
+          const field = el(key);
+          const value = cell.value == null ? "" : cell.value;
+          if (dirty.has(key)) return;
+          // Leave the field alone, and keep the caret, when only the newline differs.
+          if (!sameText(field.value, value)) field.value = showText(value);
+          initialValues.add(key);
+          enableWhenReady();
+        };
+      }
+      // The outputs arrive after 5 s and 10 s, or not at all when a run fails,
+      // and a failed run keeps the last value: they never gate the page.
+      for (const key of outputs.filter(key => keys.includes(key))) {
+        const cell = shared[key];
+        cell.onchange = () => { el(key).value = showText(cell.value); };
+      }
+      enableWhenReady();
+    };
+
+    function enableWhenReady() {
+      if (!window.shareReady && [...sliders, ...editors].every(key => initialValues.has(key))) {
+        for (const key of [...sliders, ...editors]) el(key).disabled = false;
+        setStatus("Connected. text1 and text2 appear after about 5 s and 10 s.");
+        window.shareReady = true;
+      }
+    }
+
+    const graphSvg = el("status-graph");
+    const graphEmpty = el("status-empty");
+    const graphDetail = el("status-detail");
+    const svgNamespace = "http://www.w3.org/2000/svg";
+    const nodeColors = {
+      complete: "royalblue",
+      computing: "forestgreen",
+      waiting: "yellow",
+      blocked: "orange",
+      failed: "red",
+      unwired: "grey",
+      miswired: "purple"
+    };
+    const nodeWidth = 190;
+    const nodeHeight = 64;
+    const marginX = 32;
+    const marginY = 32;
+    const columnGap = 96;
+    const rowGap = 34;
+    let graphTopology = null;
+    let graphLayout = null;
+    let activeNodePath = null;
+    const nodeElements = new Map();
+    const edgeElements = new Map();
+
+    function pathIdentity(path) {
+      return Array.isArray(path) ? JSON.stringify(path) : JSON.stringify(path ?? null);
+    }
+
+    function pathLabel(path) {
+      return Array.isArray(path) ? path.map(String).join(".") : String(path || "");
+    }
+
+    function stableString(value) {
+      if (Array.isArray(value)) {
+        return `[${value.map(stableString).join(",")}]`;
+      }
+      if (value && typeof value === "object") {
+        return `{${Object.keys(value).sort().map(key =>
+          `${JSON.stringify(key)}:${stableString(value[key])}`
+        ).join(",")}}`;
+      }
+      return JSON.stringify(value);
+    }
+
+    function topologyKey(graph) {
+      const nodes = (graph.nodes || []).map(node => [node.type, node.path]);
+      const connections = (graph.connections || []).map(connection => ({
+        source: connection.source === undefined ? null : connection.source,
+        target: connection.target === undefined ? null : connection.target,
+        deep_member: Boolean(connection.deep_member)
+      }));
+      nodes.sort((left, right) => stableString(left).localeCompare(stableString(right)));
+      connections.sort((left, right) => stableString(left).localeCompare(stableString(right)));
+      return stableString({
+        nodes,
+        connections,
+        anonymous_nodes: graph.anonymous_nodes || {}
+      });
+    }
+
+    function resolvePath(path, nodesByPath) {
+      if (!Array.isArray(path)) return null;
+      for (let length = path.length; length > 0; --length) {
+        const candidate = pathIdentity(path.slice(0, length));
+        if (nodesByPath.has(candidate)) return candidate;
+      }
+      return null;
+    }
+
+    function resolveSource(source, nodesByPath, anonymousNodes, seen = new Set()) {
+      if (Array.isArray(source)) return resolvePath(source, nodesByPath);
+      if (!source || typeof source !== "object") return null;
+      if (Array.isArray(source.node)) return resolvePath(source.node, nodesByPath);
+      if (typeof source.symbol === "string" && !seen.has(source.symbol)) {
+        const entry = (anonymousNodes || {})[source.symbol];
+        if (!entry) return null;
+        const nextSeen = new Set(seen);
+        nextSeen.add(source.symbol);
+        return resolveSource(entry.source, nodesByPath, anonymousNodes, nextSeen);
+      }
+      return null;
+    }
+
+    function edgeRecords(graph, nodesByPath) {
+      const connections = (graph.connections || []).slice().sort((left, right) =>
+        stableString(left).localeCompare(stableString(right))
+      );
+      const duplicates = new Map();
+      return connections.map(connection => {
+        const identity = stableString(connection);
+        const occurrence = duplicates.get(identity) || 0;
+        duplicates.set(identity, occurrence + 1);
+        return {
+          id: `${identity}#${occurrence}`,
+          connection,
+          sourceKey: resolveSource(
+            connection.source, nodesByPath, graph.anonymous_nodes
+          ),
+          targetKey: resolveSource(
+            connection.target, nodesByPath, graph.anonymous_nodes
+          )
+        };
+      });
+    }
+
+    function computeLayout(graph) {
+      const nodes = (graph.nodes || []).filter(node => Array.isArray(node.path)).slice();
+      nodes.sort((left, right) =>
+        pathLabel(left.path).localeCompare(pathLabel(right.path))
+        || pathIdentity(left.path).localeCompare(pathIdentity(right.path))
+      );
+      const nodesByPath = new Map(nodes.map(node => [pathIdentity(node.path), node]));
+      const edges = edgeRecords(graph, nodesByPath);
+      const indegree = new Map(nodes.map(node => [pathIdentity(node.path), 0]));
+      const outgoing = new Map(nodes.map(node => [pathIdentity(node.path), []]));
+      const layer = new Map(nodes.map(node => [pathIdentity(node.path), 0]));
+
+      for (const edge of edges) {
+        if (!indegree.has(edge.sourceKey) || !indegree.has(edge.targetKey)) continue;
+        if (edge.sourceKey === edge.targetKey) continue;
+        outgoing.get(edge.sourceKey).push(edge.targetKey);
+        indegree.set(edge.targetKey, indegree.get(edge.targetKey) + 1);
+      }
+
+      const ready = [...indegree.entries()]
+        .filter(([, degree]) => degree === 0)
+        .map(([key]) => key)
+        .sort();
+      while (ready.length) {
+        const source = ready.shift();
+        for (const target of outgoing.get(source)) {
+          layer.set(target, Math.max(layer.get(target), layer.get(source) + 1));
+          indegree.set(target, indegree.get(target) - 1);
+          if (indegree.get(target) === 0) {
+            ready.push(target);
+            ready.sort();
+          }
+        }
+      }
+
+      const columns = new Map();
+      for (const node of nodes) {
+        const key = pathIdentity(node.path);
+        const column = layer.get(key) || 0;
+        if (!columns.has(column)) columns.set(column, []);
+        columns.get(column).push(key);
+      }
+      const positions = new Map();
+      let maxRows = 1;
+      let maxLayer = 0;
+      for (const [column, keys] of columns.entries()) {
+        keys.sort();
+        maxRows = Math.max(maxRows, keys.length);
+        maxLayer = Math.max(maxLayer, column);
+        keys.forEach((key, row) => positions.set(key, {
+          x: marginX + column * (nodeWidth + columnGap),
+          y: marginY + row * (nodeHeight + rowGap)
+        }));
+      }
+      const width = marginX * 2 + (maxLayer + 1) * nodeWidth + maxLayer * columnGap;
+      const height = marginY * 2 + maxRows * nodeHeight + (maxRows - 1) * rowGap;
+      return { nodes, nodesByPath, edges, positions, width, height };
+    }
+
+    function svgElement(name, attributes = {}) {
+      const element = document.createElementNS(svgNamespace, name);
+      for (const [key, value] of Object.entries(attributes)) {
+        element.setAttribute(key, String(value));
+      }
+      return element;
+    }
+
+    function stateColor(state) {
+      return nodeColors[state] || "grey";
+    }
+
+    function showNodeDetails(node) {
+      if (!node) return;
+      activeNodePath = pathIdentity(node.path);
+      const blockReason = node.block_reason == null
+        ? "none"
+        : typeof node.block_reason === "string"
+          ? node.block_reason
+          : JSON.stringify(node.block_reason, null, 2);
+      graphDetail.textContent = [
+        `Node: ${pathLabel(node.path)}`,
+        `State: ${node.state || "unknown"}`,
+        `Block reason: ${blockReason}`,
+        `Exception: ${node.exception == null ? "none" : node.exception}`
+      ].join("\n");
+    }
+
+    function buildGraphSvg(layout) {
+      graphSvg.replaceChildren();
+      nodeElements.clear();
+      edgeElements.clear();
+      graphSvg.setAttribute("viewBox", `0 0 ${layout.width} ${layout.height}`);
+      graphSvg.setAttribute("width", layout.width);
+      graphSvg.setAttribute("height", layout.height);
+
+      const pairCounts = new Map();
+      for (const edge of layout.edges) {
+        if (!edge.sourceKey || !edge.targetKey) continue;
+        const pair = `${edge.sourceKey}\u0000${edge.targetKey}`;
+        pairCounts.set(pair, (pairCounts.get(pair) || 0) + 1);
+      }
+      const pairSeen = new Map();
+      for (const edge of layout.edges) {
+        if (!edge.sourceKey || !edge.targetKey) continue;
+        const pair = `${edge.sourceKey}\u0000${edge.targetKey}`;
+        const count = pairCounts.get(pair);
+        const occurrence = pairSeen.get(pair) || 0;
+        pairSeen.set(pair, occurrence + 1);
+        const offset = (occurrence - (count - 1) / 2) * 5;
+        const source = layout.positions.get(edge.sourceKey);
+        const target = layout.positions.get(edge.targetKey);
+        if (!source || !target) continue;
+        const sourceNode = layout.nodesByPath.get(edge.sourceKey);
+        const targetNode = layout.nodesByPath.get(edge.targetKey);
+        const startX = source.x + nodeWidth;
+        const startY = source.y + nodeHeight / 2 + offset;
+        const endX = target.x;
+        const endY = target.y + nodeHeight / 2 + offset;
+        const middleX = startX + (endX - startX) / 2;
+        const group = svgElement("g", {
+          class: "edge",
+          "data-edge-id": edge.id,
+          "data-source": pathLabel(sourceNode.path),
+          "data-target": pathLabel(targetNode.path),
+          "data-source-json": pathIdentity(sourceNode.path),
+          "data-target-json": pathIdentity(targetNode.path),
+          "aria-hidden": "true"
+        });
+        const path = svgElement("path", {
+          d: `M ${startX} ${startY} C ${middleX} ${startY}, ${middleX} ${endY}, ${endX} ${endY}`
+        });
+        const title = svgElement("title");
+        group.append(path, title);
+        graphSvg.append(group);
+        edgeElements.set(edge.id, { group, path, title, edge });
+      }
+
+      for (const node of layout.nodes) {
+        const key = pathIdentity(node.path);
+        const labelPath = pathLabel(node.path);
+        const position = layout.positions.get(key);
+        const group = svgElement("g", {
+          class: "node",
+          "data-path": labelPath,
+          "data-path-json": key,
+          "data-type": node.type,
+          transform: `translate(${position.x} ${position.y})`,
+          role: "button",
+          tabindex: "0"
+        });
+        const rect = svgElement("rect", {
+          x: 0,
+          y: 0,
+          width: nodeWidth,
+          height: nodeHeight,
+          rx: node.type === "cell" ? 12 : 2
+        });
+        const label = svgElement("text", { class: "node-label", x: 10, y: 25 });
+        label.textContent = labelPath;
+        if (labelPath.length > 23) {
+          label.setAttribute("textLength", nodeWidth - 20);
+          label.setAttribute("lengthAdjust", "spacingAndGlyphs");
+        }
+        const state = svgElement("text", { class: "node-state", x: 10, y: 47 });
+        const title = svgElement("title");
+        group.append(rect, label, state, title);
+        group.__stateNode = node;
+        group.addEventListener("pointerenter", () => showNodeDetails(group.__stateNode));
+        group.addEventListener("focus", () => showNodeDetails(group.__stateNode));
+        group.addEventListener("click", () => showNodeDetails(group.__stateNode));
+        group.addEventListener("keydown", event => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            showNodeDetails(group.__stateNode);
+          }
+        });
+        graphSvg.append(group);
+        nodeElements.set(key, { group, rect, label, state, title });
+      }
+    }
+
+    function updateGraphStyles(graph, layout) {
+      const nodesByPath = new Map(
+        (graph.nodes || []).filter(node => Array.isArray(node.path))
+          .map(node => [pathIdentity(node.path), node])
+      );
+      for (const [key, elements] of nodeElements.entries()) {
+        const node = nodesByPath.get(key);
+        if (!node) continue;
+        const state = node.state || "unknown";
+        elements.group.setAttribute("data-state", state);
+        elements.group.setAttribute("aria-label", `${pathLabel(node.path)}, ${state}`);
+        elements.group.setAttribute("data-path", pathLabel(node.path));
+        elements.group.setAttribute("data-path-json", pathIdentity(node.path));
+        elements.group.__stateNode = node;
+        elements.rect.setAttribute("fill", stateColor(state));
+        const textColor = ["waiting", "unwired", "unknown"].includes(state)
+          ? "#222"
+          : "#fff";
+        elements.label.setAttribute("fill", textColor);
+        elements.state.setAttribute("fill", textColor);
+        elements.state.textContent = state;
+        elements.title.textContent = `${pathLabel(node.path)}: ${state}`;
+      }
+
+      const edges = edgeRecords(graph, nodesByPath);
+      for (const edge of edges) {
+        const elements = edgeElements.get(edge.id);
+        if (!elements) continue;
+        const sourceNode = nodesByPath.get(edge.sourceKey);
+        const targetNode = nodesByPath.get(edge.targetKey);
+        const state = sourceNode ? sourceNode.state || "unknown" : "unwired";
+        elements.group.setAttribute("data-state", state);
+        elements.group.setAttribute("data-source", sourceNode ? pathLabel(sourceNode.path) : "");
+        elements.group.setAttribute("data-target", targetNode ? pathLabel(targetNode.path) : "");
+        elements.group.setAttribute("data-source-json", sourceNode ? pathIdentity(sourceNode.path) : "");
+        elements.group.setAttribute("data-target-json", targetNode ? pathIdentity(targetNode.path) : "");
+        elements.path.setAttribute("stroke", stateColor(state));
+        elements.title.textContent = `${sourceNode ? pathLabel(sourceNode.path) : "?"} → ${targetNode ? pathLabel(targetNode.path) : "?"} (${state})`;
+      }
+
+      if (activeNodePath && nodesByPath.has(activeNodePath)) {
+        showNodeDetails(nodesByPath.get(activeNodePath));
+      }
+    }
+
+    function renderStateGraph(graph) {
+      if (!graph || !Array.isArray(graph.nodes)) return;
+      const nextTopology = topologyKey(graph);
+      if (nextTopology !== graphTopology) {
+        graphLayout = computeLayout(graph);
+        buildGraphSvg(graphLayout);
+        graphTopology = nextTopology;
+      }
+      graphEmpty.hidden = graph.nodes.length > 0;
+      updateGraphStyles(graph, graphLayout);
+    }
+
+    shared.self.onstategraph = renderStateGraph;
+  </script>
+</body>
+</html>
