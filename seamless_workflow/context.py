@@ -2920,6 +2920,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         for path, node in sorted(self._graph.nodes.items()):
             if node.kind == "cell":
                 entry = {"type": "cell", "path": list(path), "celltype": node.cell_config.celltype, "validator": node.cell_config.validator, "validator_language": node.cell_config.validator_language, "scratch": node.cell_config.scratch, "value": None if node.cell_root_producer is None else {"checksum": node.cell_root_producer.checksum.hex(), "celltype": node.cell_root_producer.celltype}}
+                share = node.attachments.get("share")
+                if share is not None:
+                    entry["share"] = share.to_graph()
             else:
                 cfg = node.transformer_config
                 entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "direct_print": cfg.direct_print, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
@@ -2985,14 +2988,14 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 connection["source"] = add_anonymous_chain(edge.source_chain)
             connections.append(connection)
         return {
-            "__seamless_workflow__": "0.5",
+            "__seamless_workflow__": "0.6",
             "nodes": nodes,
             "anonymous_nodes": {key: anonymous_nodes[key] for key in sorted(anonymous_nodes)},
             "connections": connections,
             "params": {},
         }
 
-    def set_graph(self, graph, *, mount_prepared=()):
+    def set_graph(self, graph, *, mount_prepared=(), share_prepared=()):
         # Acquire the staged durable graph before releasing any live roles.
         claims = []
         for path, node in graph.nodes.items():
@@ -3019,6 +3022,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         except Exception:
             for cs in acquired: cs.decref_refholder()
             raise
+        share_registrations = tuple(prepared[2] for prepared in share_prepared)
+        if share_registrations:
+            try:
+                share_registrations[0].server.commit_reservations(share_registrations)
+            except BaseException:
+                for cs in acquired: cs.decref_refholder()
+                raise
         for record in list(self._runtime.current_runs.values()) + [r for q in self._runtime.superseded_runs.values() for r in q]:
             if record.et is not None: self._effects.append(record.et.cancel)
         for path, driver in tuple(self._mount_sessions):
@@ -3047,7 +3057,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._superseded_refholds = {}
         self._revisions = {p:self._revisions.get(p,0)+1 for p in graph.nodes}
         self._derive_all()
-        return [self._mount_attach(*prepared) for prepared in mount_prepared]
+        return [self._mount_attach(*prepared) for prepared in (*mount_prepared, *share_prepared)]
 
     def _copy_subcontext(self, source_prefix, target_prefix):
         self._graph.namespaces.add(target_prefix)

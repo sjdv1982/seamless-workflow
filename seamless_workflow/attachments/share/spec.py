@@ -7,6 +7,7 @@ from .mime import content_type
 
 
 _SAFE_SEGMENT = re.compile(r"^[^/\\?#\x00-\x1f\x7f]+$")
+RESERVED_TOPLEVEL_KEYS = frozenset({"openapi.json", "seamless-client.js"})
 SHAREABLE_CELLTYPES = frozenset({
     "text", "python", "ipython", "yaml", "plain", "str", "int", "float",
     "bool", "bytes", "binary", "mixed",
@@ -41,6 +42,8 @@ class ShareSpec:
             raise TypeError("toplevel must be bool")
         if self.toplevel and len(parts) != 1:
             raise ValueError("a top-level share path must be one URL segment")
+        if self.toplevel and self.path in RESERVED_TOPLEVEL_KEYS:
+            raise ValueError("top-level route is reserved")
         if self.mimetype is not None:
             # Validate the explicit value before a namespace or listener exists.
             content_type("bytes", self.path, self.mimetype)

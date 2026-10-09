@@ -29,13 +29,14 @@ class ShareDriver:
         server = self.server or server_module.get_server_if_started()
         return None if server is None else server.url
 
-    def reserve(self, spec, celltype, session_id, sink):
+    def reserve(self, spec, celltype, session_id, sink, *, replaces=(), staged=False):
         server = self.server
         if server is None:
             server = server_module.get_server(start=False)
             self._server = server
         registration = server.reserve(
-            self.namespace, spec, celltype, session_id, sink, owner=self.owner
+            self.namespace, spec, celltype, session_id, sink, owner=self.owner,
+            replaces=replaces, staged=staged,
         )
         registration.service = self
         return registration

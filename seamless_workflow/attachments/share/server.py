@@ -23,10 +23,11 @@ from seamless.checksum.null import NULL_CHECKSUM
 
 from ..session import DeliveryAck, MountLease, Observation
 from .mime import content_type as infer_content_type, is_binary
+from .spec import RESERVED_TOPLEVEL_KEYS
 
 
 _HANDSHAKE = ["Seamless share update server", "1.0"]
-_RESERVED_TOPLEVEL = {"openapi.json", "seamless-client.js"}
+_RESERVED_TOPLEVEL = RESERVED_TOPLEVEL_KEYS
 
 
 def _checksum_hex(value):
@@ -78,6 +79,7 @@ class _Namespace:
     owner: object
     records: dict = field(default_factory=dict)
     clients: set = field(default_factory=set)
+    staged_claim: bool = False
 
 
 @dataclass
@@ -94,6 +96,8 @@ class ShareRegistration:
     route: str
     content_type: str
     binary: bool
+    staged: bool = False
+    replaces: tuple = ()
     active: bool = False
     closed: bool = False
     checksum: str | None = None
@@ -143,6 +147,7 @@ class ShareServer:
         self._namespaces = {}
         self._top_records = {}
         self._records = {}
+        self._staged_reservations = {}
         self._marker_floors = {}
         self._fingerprints = 0
         self._closed = False
@@ -175,7 +180,57 @@ class ShareServer:
             quote(part, safe="-._~") for part in parts
         )
 
-    def reserve(self, namespace, spec, celltype, session_id, sink, owner=None):
+    def _check_reservation_conflicts_locked(self, namespace, spec, route, owner,
+                                            replaces=(), *, ignore_staged=()):
+        replaced_ids = {id(reg) for reg in replaces}
+        ignored_ids = {id(reg) for reg in ignore_staged}
+        path = spec.path
+        is_top = bool(getattr(spec, "toplevel", False))
+        ns = self._namespaces.get(namespace)
+        if ns is not None and (owner is None or ns.owner is not owner):
+            raise ValueError(f"namespace {namespace!r} is in use")
+        namespace_top = self._top_records.get(namespace)
+        if namespace_top is not None and id(namespace_top) not in replaced_ids:
+            raise ValueError(f"namespace {namespace!r} conflicts with a top-level share")
+        if ns is not None:
+            same_key = ns.records.get(path)
+            if same_key is not None and id(same_key) not in replaced_ids:
+                raise ValueError(f"share key {path!r} is already in use in namespace {namespace!r}")
+        staged_top = next((other for other in self._staged_reservations.values()
+                           if id(other) not in ignored_ids
+                           and id(other) not in replaced_ids
+                           and other.spec.toplevel and other.spec.path == namespace), None)
+        if staged_top is not None:
+            raise ValueError(f"namespace {namespace!r} conflicts with a top-level share")
+        if is_top:
+            top_record = self._top_records.get(path)
+            if top_record is not None and id(top_record) not in replaced_ids:
+                raise ValueError(f"share URL {route!r} is in use")
+            first, _, rest = path.partition("/")
+            if first == namespace or first in self._namespaces:
+                raise ValueError(f"share URL {route!r} conflicts with namespace {first!r}")
+            nested_record = self._records.get((first, rest)) if rest else None
+            if nested_record is not None and id(nested_record) not in replaced_ids:
+                raise ValueError(f"share URL {route!r} is in use")
+        else:
+            record = self._records.get((namespace, path))
+            if record is not None and id(record) not in replaced_ids:
+                raise ValueError(f"share URL {route!r} is in use")
+            full_key = f"{namespace}/{path}"
+            top_record = self._top_records.get(full_key)
+            if top_record is not None and id(top_record) not in replaced_ids:
+                raise ValueError(f"share URL {route!r} is in use")
+        for other in self._staged_reservations.values():
+            if id(other) in ignored_ids or id(other) in replaced_ids:
+                continue
+            same_key = other.namespace == namespace and other.spec.path == path
+            if other.route == route or same_key:
+                raise ValueError(f"share URL {route!r} is in use")
+            if is_top and other.namespace == path:
+                raise ValueError(f"share URL {route!r} conflicts with namespace {path!r}")
+
+    def reserve(self, namespace, spec, celltype, session_id, sink, owner=None, *,
+                replaces=(), staged=False):
         """Atomically reserve a URL, without starting the server or claiming data."""
         if not _safe_segment(namespace):
             raise ValueError("namespace must be one safe URL segment")
@@ -188,30 +243,15 @@ class ShareServer:
         path = spec.path
         content_type = infer_content_type(celltype, path, getattr(spec, "mimetype", None))
         binary = is_binary(content_type)
+        replaces = tuple(replaces)
         with self._lock:
+            self._check_reservation_conflicts_locked(
+                namespace, spec, route, owner, replaces
+            )
             ns = self._namespaces.get(namespace)
-            if ns is not None and (owner is None or ns.owner is not owner):
-                raise ValueError(f"namespace {namespace!r} is in use")
-            if namespace in self._top_records:
-                raise ValueError(f"namespace {namespace!r} conflicts with a top-level share")
-            if ns is not None and path in ns.records:
-                raise ValueError(f"share key {path!r} is already in use in namespace {namespace!r}")
-            if is_top:
-                if path in self._top_records:
-                    raise ValueError(f"share URL {route!r} is in use")
-                first, _, rest = path.partition("/")
-                if first == namespace or first in self._namespaces:
-                    raise ValueError(f"share URL {route!r} conflicts with namespace {first!r}")
-                if rest and (first, rest) in self._records:
-                    raise ValueError(f"share URL {route!r} is in use")
-            else:
-                if (namespace, path) in self._records:
-                    raise ValueError(f"share URL {route!r} is in use")
-                full_key = f"{namespace}/{path}"
-                if full_key in self._top_records:
-                    raise ValueError(f"share URL {route!r} is in use")
             if ns is None:
                 ns = _Namespace(namespace, owner if owner is not None else object())
+                ns.staged_claim = bool(staged)
                 self._namespaces[namespace] = ns
             reg = ShareRegistration(
                 server=self,
@@ -224,15 +264,72 @@ class ShareServer:
                 route=route,
                 content_type=content_type,
                 binary=binary,
+                staged=bool(staged),
+                replaces=replaces,
                 marker=self._marker_floors.get(route, 0),
             )
-            if is_top:
-                self._top_records[path] = reg
-                ns.records[path] = reg
+            if staged:
+                self._staged_reservations[id(reg)] = reg
             else:
-                self._records[(namespace, path)] = reg
-                ns.records[path] = reg
+                if is_top:
+                    self._top_records[path] = reg
+                    ns.records[path] = reg
+                else:
+                    self._records[(namespace, path)] = reg
+                    ns.records[path] = reg
             return reg
+
+    def commit_reservations(self, registrations):
+        """Publish a prepared batch, swapping any same-owner live URLs atomically."""
+        registrations = tuple(registrations)
+        if not registrations:
+            return registrations
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("share server is closed")
+            for reg in registrations:
+                if reg.server is not self or reg.closed or not reg.staged:
+                    raise RuntimeError("share reservation is not staged")
+                if self._staged_reservations.get(id(reg)) is not reg:
+                    raise RuntimeError("share reservation is no longer available")
+                self._check_reservation_conflicts_locked(
+                    reg.namespace, reg.spec, reg.route, reg.owner, reg.replaces,
+                    ignore_staged=registrations,
+                )
+            for index, reg in enumerate(registrations):
+                for other in registrations[index + 1:]:
+                    same_key = reg.namespace == other.namespace and reg.spec.path == other.spec.path
+                    namespace_collision = (
+                        (reg.spec.toplevel and reg.spec.path == other.namespace)
+                        or (other.spec.toplevel and other.spec.path == reg.namespace)
+                    )
+                    if reg.route == other.route or same_key or namespace_collision:
+                        raise ValueError(f"share URL {reg.route!r} conflicts with another graph share")
+            replaced = {}
+            for reg in registrations:
+                ns = self._namespaces[reg.namespace]
+                same_key = ns.records.get(reg.spec.path)
+                current = (self._top_records.get(reg.spec.path) if reg.spec.toplevel
+                           else self._records.get((reg.namespace, reg.spec.path)))
+                for old in (same_key, current):
+                    if old is not None:
+                        replaced[id(old)] = old
+                        reg.marker = max(reg.marker, old.marker)
+                reg.marker = max(reg.marker, self._marker_floors.get(reg.route, 0))
+                if reg.spec.toplevel:
+                    self._top_records[reg.spec.path] = reg
+                else:
+                    self._records[(reg.namespace, reg.spec.path)] = reg
+                ns.records[reg.spec.path] = reg
+                ns.staged_claim = False
+                reg.staged = False
+                self._staged_reservations.pop(id(reg), None)
+            # The new routes are visible before the old registrations release
+            # their checksum leases. Their identity checks keep cleanup from
+            # removing the just-published records.
+            for reg in replaced.values():
+                self._remove_registration(reg)
+            return registrations
 
     def start(self):
         """Bind the configured listener and return once it is accepting requests."""
@@ -446,27 +543,36 @@ class ShareServer:
                 self._namespaces.pop(namespace, None)
 
     async def _unregister(self, reg, close_namespace=False):
-        ns = self._namespaces.get(reg.namespace)
-        if close_namespace:
+        with self._lock:
+            ns = self._namespaces.get(reg.namespace)
+            owns_namespace = ns is not None and ns.owner is reg.owner
+            if close_namespace:
+                regs = list(ns.records.values()) if owns_namespace else []
+                regs.extend(
+                    item for item in self._staged_reservations.values()
+                    if item.namespace == reg.namespace and item.owner is reg.owner
+                )
+                if not any(item is reg for item in regs):
+                    regs.append(reg)
+            else:
+                regs = [reg]
+        for item in regs:
+            was_active = item.active
+            self._remove_registration(item)
+            if (not close_namespace and was_active and ns is not None
+                    and ns.owner is item.owner):
+                await self._broadcast_shares(ns)
+        if close_namespace and owns_namespace:
+            for client in tuple(ns.clients):
+                try:
+                    await client.ws.close(code=1001, message=b"namespace closed")
+                except Exception:
+                    pass
+            ns.clients.clear()
             with self._lock:
-                regs = tuple(ns.records.values()) if ns is not None else ()
-            for item in regs:
-                self._remove_registration(item)
-            if ns is not None:
-                for client in tuple(ns.clients):
-                    try:
-                        await client.ws.close(code=1001, message=b"namespace closed")
-                    except Exception:
-                        pass
-                ns.clients.clear()
-                with self._lock:
-                    if self._namespaces.get(reg.namespace) is ns:
-                        self._namespaces.pop(reg.namespace, None)
-            return None
-        was_active = reg.active
-        self._remove_registration(reg)
-        if was_active and ns is not None:
-            await self._broadcast_shares(ns)
+                if (self._namespaces.get(reg.namespace) is ns
+                        and ns.owner is reg.owner):
+                    self._namespaces.pop(reg.namespace, None)
         return None
 
     def _remove_registration(self, reg):
@@ -475,6 +581,8 @@ class ShareServer:
                 return
             reg.closed = True
             reg.active = False
+            was_staged = reg.staged
+            self._staged_reservations.pop(id(reg), None)
             if getattr(reg.spec, "toplevel", False):
                 if self._top_records.get(reg.spec.path) is reg:
                     self._top_records.pop(reg.spec.path, None)
@@ -491,6 +599,11 @@ class ShareServer:
             lease, reg.lease = reg.lease, None
             if lease is not None:
                 lease._release_refholds()
+            ns = self._namespaces.get(reg.namespace)
+            if (was_staged and ns is not None and ns.staged_claim and not ns.records
+                    and not any(item.namespace == reg.namespace
+                                for item in self._staged_reservations.values())):
+                self._namespaces.pop(reg.namespace, None)
 
     def _release_namespace(self, namespace, owner):
         with self._lock:
@@ -854,7 +967,8 @@ class ShareServer:
 
     def _all_registrations(self):
         with self._lock:
-            values = list(self._top_records.values()) + list(self._records.values())
+            values = (list(self._top_records.values()) + list(self._records.values())
+                      + list(self._staged_reservations.values()))
             return tuple({id(reg): reg for reg in values}.values())
 
 

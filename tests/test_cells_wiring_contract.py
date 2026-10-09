@@ -101,7 +101,7 @@ def test_graph_version_and_named_nodes(make_context):
     ctx.named = Cell("plain")
     ctx.named.set(7)
     graph = ctx.get_graph()
-    assert graph["__seamless_workflow__"] == "0.5"
+    assert graph["__seamless_workflow__"] == "0.6"
     assert graph["anonymous_nodes"] == {}
     assert len(graph["nodes"]) == 1
 
@@ -114,7 +114,7 @@ def test_anonymous_nodes_roundtrip_with_stable_symbols(make_context):
     ctx.compute(timeout=10)
     assert ctx.result.value == 40
     graph = ctx.get_graph()
-    assert graph["__seamless_workflow__"] == "0.5"
+    assert graph["__seamless_workflow__"] == "0.6"
     symbols = set(graph["anonymous_nodes"])
     assert symbols
     assert all(re.fullmatch(r"[0-9a-f]{5}(?:-[1-9][0-9]*)?", symbol) for symbol in symbols)

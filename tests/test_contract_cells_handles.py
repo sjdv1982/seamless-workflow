@@ -385,7 +385,7 @@ def test_held_as_celltype_handle_creates_no_entry(make_context):
     ctx.b.set("[1]")
     held = ctx.b.as_celltype("plain")
     graph = ctx.get_graph()
-    assert graph["__seamless_workflow__"] == "0.5"
+    assert graph["__seamless_workflow__"] == "0.6"
     assert graph["anonymous_nodes"] == {}
     assert held.celltype == "plain"
     assert held.value == [1]

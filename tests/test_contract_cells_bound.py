@@ -100,7 +100,7 @@ def _anonymous_graph(make_context):
     ctx.result = ctx.b[3].as_celltype("plain")
     ctx.compute(timeout=10)
     graph = ctx.get_graph()
-    assert graph["__seamless_workflow__"] == "0.5"
+    assert graph["__seamless_workflow__"] == "0.6"
     entries = graph["anonymous_nodes"]
     assert len(entries) == 2
     (path_symbol,), = [

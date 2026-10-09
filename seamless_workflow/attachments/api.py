@@ -127,32 +127,71 @@ class ContextMounts:
         return {p: s['error'] or s['sense_error'] for p, s in report.items() if s['error'] or s['sense_error']}
 
 
-def load_graph(ctx, data, *, mounts=True):
-    """Loading w/rw mount specs can write files; use mounts=False for untrusted graphs."""
+def load_graph(ctx, data, *, mounts=True, shares=True):
+    context_shares = ctx.shares
+    with context_shares._lock:
+        return _load_graph(
+            ctx, data, mounts=mounts, shares=shares,
+            context_shares=context_shares,
+        )
+
+
+def _load_graph(ctx, data, *, mounts=True, shares=True, context_shares):
+    """Load a graph, optionally restoring its file mounts and HTTP shares."""
     import copy
     from .spec import validate_celltype
     from ..serialization import prepare_graph
     graph = prepare_graph(copy.deepcopy(data))
     old = ctx._controller.call('_mount_registrations', klass=4)
+    old_shares = tuple(
+        registration for registration in old
+        if getattr(getattr(registration, 'spec', None), 'driver', None) == 'share'
+    )
     prepared, reservations = [], []
     service = get_service() if mounts and any(n.mount for n in graph.nodes.values()) else None
+    share_prepared = []
+    share_driver = (
+        context_shares._driver
+        if shares and any('share' in n.attachments for n in graph.nodes.values())
+        else None
+    )
     try:
         reads = []
         for path, node in graph.nodes.items():
             spec, node.mount = node.mount, None
-            if spec is None or not mounts: continue
-            incoming = any(graph.resolve_existing(e.target)[0] == path and not graph.resolve_existing(e.target)[1] for e in graph.edges)
-            celltype = node.cell_config.celltype
-            validate_celltype(celltype, spec.mode)
-            reg = service.reserve(spec, celltype, uuid4().hex, make_sink(ctx._controller), replaces=old)
-            reservations.append(reg)
-            reads.append((path, spec, reg, service.initial_read(reg)))
-        for path, spec, reg, future in reads:
-            prepared.append((path, spec, reg, future.result()))
-        initial = ctx._controller.call('set_graph', graph, mount_prepared=tuple(prepared), klass=2)
+            share_spec = node.attachments.pop('share', None)
+            if spec is not None and mounts:
+                celltype = node.cell_config.celltype
+                validate_celltype(celltype, spec.mode)
+                reg = service.reserve(spec, celltype, uuid4().hex, make_sink(ctx._controller), replaces=old)
+                reservations.append(reg)
+                reads.append(('mount', path, spec, reg, service.initial_read(reg)))
+            if share_spec is not None and shares:
+                celltype = node.cell_config.celltype
+                reg = share_driver.reserve(
+                    share_spec, celltype, uuid4().hex, make_sink(ctx._controller),
+                    replaces=old_shares, staged=True,
+                )
+                reservations.append(reg)
+                reads.append(('share', path, share_spec, reg, share_driver.initial_read(reg)))
+        if share_driver is not None:
+            share_driver.start()
+        for kind, path, spec, reg, future in reads:
+            prepared_item = (path, spec, reg, future.result())
+            (prepared if kind == 'mount' else share_prepared).append(prepared_item)
+        initial = ctx._controller.call(
+            'set_graph', graph, mount_prepared=tuple(prepared),
+            share_prepared=tuple(share_prepared), klass=2,
+        )
         for future in initial: future.result()
-    except Exception:
-        for reg in reservations: service.unregister(reg)
+    except BaseException:
+        for reg in reversed(reservations):
+            try:
+                future = reg.service.unregister(reg)
+                if future is not None:
+                    future.result(getattr(reg.service, 'delivery_timeout', 60))
+            except BaseException:
+                pass
         raise
     finally:
-        for _, _, _, observation in prepared: observation.release()
+        for _, _, _, observation in (*prepared, *share_prepared): observation.release()

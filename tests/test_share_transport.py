@@ -633,3 +633,60 @@ def test_wildcard_url_uses_localhost_and_actual_ephemeral_port():
         assert get(service.url + "/missing").status_code == 404
     finally:
         service.close()
+
+
+@pytest.mark.parametrize("top_first", [True, False])
+def test_staged_toplevel_and_new_namespace_conflict_in_both_orders(server, top_first):
+    """URL space; Graph serialization: staged top-level claims reserve namespace names."""
+    top_owner, namespace_owner = object(), object()
+    if top_first:
+        top = server.reserve("alpha", Spec("foo", toplevel=True), "int", "top-staged", Sink(), owner=top_owner, staged=True)
+        with pytest.raises(ValueError):
+            server.reserve("foo", Spec("value"), "int", "namespace-staged", Sink(), owner=namespace_owner, staged=True)
+        server.commit_reservations((top,))
+        server.unregister(top, close_namespace=True).result(10)
+    else:
+        ordinary = server.reserve("foo", Spec("value"), "int", "namespace-staged", Sink(), owner=namespace_owner, staged=True)
+        with pytest.raises(ValueError):
+            server.reserve("alpha", Spec("foo", toplevel=True), "int", "top-staged", Sink(), owner=top_owner, staged=True)
+        server.commit_reservations((ordinary,))
+        server.unregister(ordinary, close_namespace=True).result(10)
+
+
+def test_staged_toplevel_name_blocks_new_namespace_even_for_toplevel_reservation(server):
+    """URL space; Graph serialization: staged top-level key excludes any namespace claim."""
+    owner = object()
+    top = server.reserve("ctx", Spec("foo", toplevel=True), "int", "top-staged", Sink(), owner=owner, staged=True)
+    with pytest.raises(ValueError):
+        server.reserve("foo", Spec("bar", toplevel=True), "int", "other-top", Sink(), owner=object(), staged=True)
+    assert get(server.url + "/bar").status_code == 404
+    server.unregister(top, close_namespace=True).result(10)
+    # Failed namespace reservation cannot retain a claim after the blocking
+    # staged route is removed.
+    reg, sink, url = attach(server, Spec("bar", toplevel=True), namespace="foo", owner=object())
+    deliver(server, reg, sink, 5)
+    assert get(url).json() == 5
+
+
+def test_stale_namespace_cleanup_preserves_reclaimed_owner(server):
+    """Lifecycle; Namespaces; Record: stale owner cleanup cannot detach a new owner."""
+    old_owner, new_owner = object(), object()
+    old, old_sink, url = attach(server, owner=old_owner)
+    deliver(server, old, old_sink, 1)
+    old_marker = marker(get(url))
+    server.unregister(old).result(10)
+    server.release_namespace("ctx", old_owner).result(10)
+    new, new_sink, new_url = attach(server, session_id="new-owner", owner=new_owner)
+    deliver(server, new, new_sink, 2)
+    before = get(new_url)
+    assert new_url == url and marker(before) > old_marker
+    with updates(server.url + "/ctx") as receive:
+        receive("shares")
+        server.unregister(old, close_namespace=True).result(10)
+        after = get(new_url)
+        assert after.status_code == 200 and after.content == before.content
+        assert marker(after) == marker(before)
+        accepted = put(new_url, b"3")
+        assert accepted.status_code == 200
+        assert receive("update")[1] == ["a", accepted.json()["checksum"], accepted.json()["marker"]]
+        assert accepted.json()["marker"] == marker(before) + 1

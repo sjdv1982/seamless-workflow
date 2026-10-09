@@ -1045,3 +1045,290 @@ with Context() as ctx:
         result = subprocess.run([sys.executable, "-c", script], env=env,
                                 capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestSharePersistenceAudit:
+    def test_current_writer_format_even_without_shares(self, ctx):
+        """Graph serialization: format 0.6 is emitted for every saved graph."""
+        assert ctx.get_graph()["__seamless_workflow__"] == "0.6"
+        cell(ctx)
+        assert ctx.get_graph()["__seamless_workflow__"] == "0.6"
+
+    def test_same_context_same_url_reload_and_changed_key(self, ctx):
+        """Graph serialization; Lifecycle: replacement can reserve its own live URLs."""
+        cell(ctx, 4).share(readonly=False)
+        url = ctx.a.share.url
+        before = get(url)
+        graph = ctx.get_graph()
+        ctx.set_graph(graph)
+        assert ctx.a.share.url == url and get(url).json() == 4
+        assert marker(get(url)) >= marker(before)
+        graph["nodes"][0]["share"]["path"] = "renamed"
+        ctx.set_graph(graph)
+        assert get(url).status_code == 404
+        assert ctx.a.share.url.endswith("/ctx/renamed")
+        assert get(ctx.a.share.url).json() == 4
+
+    def test_file_and_share_roundtrip_widget_is_not_serialized(self, ctx, tmp_path):
+        """Graph serialization; Share slot: file/share specs survive; widget hub does not."""
+        from seamless_workflow.jupyter import traitlet
+        path = tmp_path / "roundtrip"
+        cell(ctx, 6).mount(path, mode="rw", authority="cell", persistent=True)
+        hub = traitlet(ctx.a)
+        ctx.a.share(readonly=False)
+        ctx.mounts.sync(timeout=10)
+        graph = ctx.get_graph()
+        node = graph["nodes"][0]
+        assert "mount" in node and "share" in node
+        assert "widget" not in node and "attachments" not in node
+        ctx.close()
+        with Context() as other:
+            other.set_graph(graph)
+            assert other.a.mount.spec is not None and other.a.share.spec is not None
+            report = other.mounts.sync(timeout=10)
+            assert set(report) == {(("a",), "file"), (("a",), "share")}
+            assert get(other.a.share.url).json() == 6
+            assert put(other.a.share.url, b"8").status_code == 200
+            other.mounts.sync(timeout=10)
+            assert path.read_text().strip() == "8"
+
+    def test_connected_readonly_and_empty_writable_graph_initial_decisions(self, ctx):
+        """Graph serialization; Initial decision: loading attaches like share()."""
+        cell(ctx, 7)
+        ctx.out = ctx.a
+        ctx.compute()
+        ctx.out.share()
+        ctx.empty = Cell(celltype="int")
+        # Persist the writable spec without pre-initializing the saved cell.
+        graph = ctx.get_graph()
+        empty = next(n for n in graph["nodes"] if n["path"] == ["empty"])
+        empty["share"] = {"path": "empty", "readonly": False, "mimetype": None, "toplevel": False}
+        ctx.close()
+        with Context() as other:
+            other.set_graph(graph)
+            assert get(other.out.share.url).json() == 7
+            assert get(other.empty.share.url).status_code == 204
+            assert other.empty.checksum == Checksum(NULL_CHECKSUM)
+
+    @pytest.mark.parametrize("patch", [
+        {"unknown": 0}, {"path": 12}, {"path": ""}, {"readonly": 1},
+        {"readonly": None}, {"mimetype": True}, {"mimetype": "broken"},
+        {"toplevel": "yes"}, {"toplevel": 1},
+    ])
+    def test_share_metadata_types_validated_before_opt_out(self, ctx, patch):
+        """Graph serialization: every invalid metadata field is refused before stripping."""
+        cell(ctx)
+        graph = ctx.get_graph()
+        graph["nodes"][0]["share"] = {"path": "a", "readonly": True, "mimetype": None, "toplevel": False, **patch}
+        before = ctx.get_graph()
+        for enabled in (True, False):
+            with pytest.raises(PathError, match="^Invalid share spec:"):
+                ctx.set_graph(graph, shares=enabled)
+            assert ctx.get_graph() == before
+
+    def test_graph_replacement_releases_old_claim_and_holds_new_record(self, ctx):
+        """Record; Graph serialization: graph swap transfers served checksum claims."""
+        from seamless.caching.buffer_cache import get_buffer_cache
+        cache = get_buffer_cache()
+        cell(ctx, "before-persistence-swap", "text").share()
+        old = ctx.a.checksum
+        url = ctx.a.share.url
+        before_marker = marker(get(url))
+        with Context() as source:
+            cell(source, "after-persistence-swap", "text")
+            graph = source.get_graph()
+        graph["nodes"][0]["share"] = {"path": "a", "readonly": True, "mimetype": None, "toplevel": False}
+        ctx.set_graph(graph)
+        new = ctx.a.checksum
+        response = get(url)
+        assert response.content == ctx.a.buffer.content
+        assert response.content == Buffer("after-persistence-swap", "text").content
+        assert marker(response) > before_marker
+        assert cache.reference_snapshot().get(old, (0, 0, False))[0] == 0
+        assert cache.reference_snapshot().get(new, (0, 0, False))[0] > 0
+        ctx.close()
+        assert cache.reference_snapshot().get(new, (0, 0, False))[0] == 0
+
+    def test_failed_bind_graph_load_preserves_old_graph_and_allows_retry(self):
+        """Graph serialization; Server: bind failure cannot replace the current graph."""
+        script = '''
+import socket
+from seamless import Cell
+from seamless_workflow import Context, shareserver
+with Context() as source:
+    source.a = Cell(celltype="int")
+    source.a.set(8)
+    graph = source.get_graph()
+graph["nodes"][0]["share"] = {"path": "a", "readonly": True, "mimetype": None, "toplevel": False}
+with socket.socket() as occupied:
+    occupied.bind(("127.0.0.1", 0))
+    occupied.listen()
+    shareserver.configure(host="127.0.0.1", port=occupied.getsockname()[1])
+    with Context() as target:
+        target.keep = Cell(celltype="int")
+        target.keep.set(99)
+        before = target.get_graph()
+        try:
+            target.set_graph(graph)
+        except OSError:
+            assert target.get_graph() == before
+            assert target.keep.value == 99
+        else:
+            raise AssertionError("busy server bind must fail graph load")
+        shareserver.configure(host="127.0.0.1", port=0)
+        target.set_graph(graph)
+        assert target.a.value == 8 and target.a.share.spec is not None
+'''
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                                text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestSharePersistenceRollback:
+    @pytest.mark.parametrize("key", ["openapi.json", "seamless-client.js"])
+    def test_reserved_toplevel_key_validates_even_when_stripped(self, ctx, key):
+        """Graph serialization; URL space: built-in routes are invalid saved share keys."""
+        cell(ctx)
+        graph = ctx.get_graph()
+        graph["nodes"][0]["share"] = {"path": key, "readonly": True, "mimetype": None, "toplevel": True}
+        for enabled in (True, False):
+            with pytest.raises(PathError, match="^Invalid share spec:"):
+                ctx.set_graph(graph, shares=enabled)
+        assert ctx.a.value == 1
+
+    def test_failed_staged_batch_waits_cleanup_and_preserves_live_urls(self, ctx, monkeypatch):
+        """Graph serialization: reservation failure awaits rollback before returning."""
+        from concurrent.futures import Future, ThreadPoolExecutor
+        from seamless_workflow.attachments.share.driver import ShareDriver
+        cell(ctx, 11).share()
+        old_graph, old_url = ctx.get_graph(), ctx.a.share.url
+        with Context() as source:
+            cell(source, 21, name="first")
+            cell(source, 22, name="second")
+            graph = source.get_graph()
+        for node in graph["nodes"]:
+            node["share"] = {"path": node["path"][0], "readonly": True, "mimetype": None, "toplevel": False}
+        original_reserve, original_unregister = ShareDriver.reserve, ShareDriver.unregister
+        cleanup_started, release = threading.Event(), threading.Event()
+        workers = []
+        def reserve(driver, spec, *args, **kwargs):
+            if spec.path == "second":
+                raise ValueError("test instrument: second staged reservation refused")
+            return original_reserve(driver, spec, *args, **kwargs)
+        def unregister(driver, registration, **kwargs):
+            if registration.spec.path != "first":
+                return original_unregister(driver, registration, **kwargs)
+            future = Future()
+            def finish():
+                cleanup_started.set()
+                release.wait(10)
+                try:
+                    future.set_result(original_unregister(driver, registration, **kwargs).result(10))
+                except BaseException as exc:
+                    future.set_exception(exc)
+            worker = threading.Thread(target=finish, daemon=True)
+            workers.append(worker)
+            worker.start()
+            return future
+        with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=1) as pool:
+            patch.setattr(ShareDriver, "reserve", reserve)
+            patch.setattr(ShareDriver, "unregister", unregister)
+            pending = pool.submit(ctx.set_graph, graph)
+            try:
+                assert cleanup_started.wait(10)
+                assert not pending.done(), "load returned before staged URL cleanup"
+                assert get(old_url).json() == 11
+            finally:
+                release.set()
+            with pytest.raises(ValueError, match="second staged reservation refused"):
+                pending.result(timeout=10)
+        for worker in workers:
+            worker.join(10)
+        assert ctx.get_graph() == old_graph and get(old_url).json() == 11
+        ctx.set_graph(graph)
+        assert get(ctx.first.share.url).json() == 21
+        assert get(ctx.second.share.url).json() == 22
+
+    def test_graph_load_and_close_do_not_invert_share_and_close_locks(self, ctx, monkeypatch):
+        """Threads and blocking; Graph serialization: load/close lock order cannot deadlock."""
+        from concurrent.futures import ThreadPoolExecutor
+        from seamless_workflow.errors import ClosedContextError
+        from seamless_workflow import serialization
+        cell(ctx).share()
+        graph = ctx.get_graph()
+        api = ctx.shares
+        original_property = Context.shares
+        original_prepare = serialization.prepare_graph
+        entered, release, closing = threading.Event(), threading.Event(), threading.Event()
+        close_lock = ctx._close_lock
+        class Lock:
+            def __enter__(self):
+                close_lock.acquire()
+                if threading.current_thread().name.startswith("closer"):
+                    closing.set()
+                return self
+            def __exit__(self, *args):
+                close_lock.release()
+        object.__setattr__(ctx, "_close_lock", Lock())
+        def getter(context):
+            if context is ctx and api._lock._is_owned():
+                raise AssertionError("load re-entered ctx.shares while holding shares lock")
+            return original_property.fget(context)
+        def prepare(*args, **kwargs):
+            if threading.current_thread().name.startswith("loader"):
+                entered.set()
+                assert release.wait(10)
+            return original_prepare(*args, **kwargs)
+        monkeypatch.setattr(Context, "shares", property(getter))
+        monkeypatch.setattr(serialization, "prepare_graph", prepare)
+        try:
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="loader") as loaders, ThreadPoolExecutor(max_workers=1, thread_name_prefix="closer") as closers:
+                loading = loaders.submit(ctx.set_graph, graph)
+                assert entered.wait(10)
+                shutdown = closers.submit(ctx.close)
+                try:
+                    assert closing.wait(10)
+                finally:
+                    release.set()
+                try:
+                    loading.result(timeout=10)
+                except ClosedContextError:
+                    pass
+                shutdown.result(timeout=10)
+        finally:
+            release.set()
+            object.__setattr__(ctx, "_close_lock", close_lock)
+
+    def test_staged_toplevel_load_blocks_foreign_toplevel_namespace_claim(self, ctx, monkeypatch):
+        """Graph serialization; URL space: staged top-level names reserve namespace space."""
+        from concurrent.futures import ThreadPoolExecutor
+        from seamless_workflow.attachments.share.driver import ShareDriver
+        cell(ctx)
+        graph = ctx.get_graph()
+        graph["nodes"][0]["share"] = {"path": "foo", "readonly": True, "mimetype": None, "toplevel": True}
+        staged, release = threading.Event(), threading.Event()
+        original = ShareDriver.reserve
+        def hold(driver, spec, *args, **kwargs):
+            registration = original(driver, spec, *args, **kwargs)
+            if spec.path == "foo" and kwargs.get("staged"):
+                staged.set()
+                assert release.wait(10)
+            return registration
+        with Context() as other:
+            other.shares.namespace = "foo"
+            cell(other, 5)
+            with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=1) as pool:
+                patch.setattr(ShareDriver, "reserve", hold)
+                loading = pool.submit(ctx.set_graph, graph)
+                try:
+                    assert staged.wait(10)
+                    with pytest.raises(ValueError):
+                        other.a.share("bar", toplevel=True)
+                    assert other.a.share.spec is None
+                finally:
+                    release.set()
+                loading.result(timeout=10)
+            assert get(ctx.a.share.url).json() == 1
+            ctx.close()
+            other.a.share("bar", toplevel=True)
+            assert get(other.a.share.url).json() == 5

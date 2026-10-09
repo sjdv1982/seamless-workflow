@@ -1134,11 +1134,11 @@ def _mounted_graph(tmp_path):
         return c.get_graph()
 
 
-def test_get_graph_writes_format_0_5_with_anonymous_nodes(tmp_path):
-    # *Graph serialization*: "The contract format is 0.5, which adds the top-level
-    # anonymous_nodes table"; the mount entry rides on the cell entry.
+def test_get_graph_writes_format_0_6_with_anonymous_nodes(tmp_path):
+    # *Graph serialization*: the writer emits 0.6 and retains the
+    # anonymous_nodes table; the mount entry rides on the cell entry.
     graph = _mounted_graph(tmp_path)
-    assert graph['__seamless_workflow__'] == '0.5'
+    assert graph['__seamless_workflow__'] == '0.6'
     assert graph['anonymous_nodes'] == {}
     assert graph['nodes'][0]['mount']['mode'] == 'rw'
 

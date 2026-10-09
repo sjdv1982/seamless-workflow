@@ -39,9 +39,10 @@ def _parse_path_string(path):
 
 def prepare_graph(data):
     version = data.get('__seamless_workflow__', '0.2')
-    if version not in {'0.2', '0.3', '0.4', '0.5'}:
+    if version not in {'0.2', '0.3', '0.4', '0.5', '0.6'}:
         raise PathError(f'Unsupported workflow graph version: {version!r}')
     graph = ContextGraph()
+    share_urls = set()
     for entry in data.get('nodes', []):
         path = tuple(entry['path'])
         if not path or path in graph.nodes:
@@ -110,11 +111,32 @@ def prepare_graph(data):
                 node.mount = AttachmentSpec(**entry['mount'])
                 validate_celltype(cfg.celltype, node.mount.mode)
             except (TypeError, ValueError) as exc: raise PathError(f'Invalid mount spec: {exc}') from exc
+        if 'share' in entry:
+            if version not in {'0.6'}:
+                raise PathError('share entries require workflow graph version 0.6')
+            try:
+                if node.kind != 'cell':
+                    raise ValueError('share specs may only be attached to cell nodes')
+                from .attachments.share.spec import ShareSpec, validate_celltype
+                raw_share = entry['share']
+                if not isinstance(raw_share, dict):
+                    raise TypeError('share spec must be a mapping')
+                if set(raw_share) - {'path', 'readonly', 'mimetype', 'toplevel'}:
+                    raise ValueError('unknown share spec fields')
+                spec = ShareSpec(**raw_share)
+                validate_celltype(node.cell_config.celltype)
+                url_key = spec.path
+                if url_key in share_urls:
+                    raise ValueError(f'share URL {spec.path!r} is used more than once')
+                share_urls.add(url_key)
+                node.attachments['share'] = spec
+            except (TypeError, ValueError) as exc:
+                raise PathError(f'Invalid share spec: {exc}') from exc
         graph.nodes[path] = node
     anonymous_nodes = data.get("anonymous_nodes", {})
     if not isinstance(anonymous_nodes, dict):
         raise PathError("anonymous_nodes must be a mapping")
-    if version != "0.5" and anonymous_nodes:
+    if version not in {"0.5", "0.6"} and anonymous_nodes:
         raise PathError("anonymous_nodes require workflow graph version 0.5")
     import re
     parsed_anonymous_nodes = {}
@@ -230,6 +252,9 @@ def prepare_graph(data):
             raise PathError(f'Connection endpoint does not exist: {exc}') from exc
         if graph.nodes[tn].mount and 'r' in graph.nodes[tn].mount.mode:
             raise PathError('Sensing mounts cannot have incoming connections')
+        share = graph.nodes[tn].attachments.get('share')
+        if share is not None and not share.readonly:
+            raise PathError('Invalid share spec: a writable share cannot have incoming connections')
         if graph.nodes[tn].kind == 'cell':
             if len(tl)>1 or any(isinstance(p,slice) for p in tl):
                 raise PathError('Cell graph targets are limited to root or one point component')
