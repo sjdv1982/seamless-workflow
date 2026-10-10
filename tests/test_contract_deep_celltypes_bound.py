@@ -126,7 +126,9 @@ def test_pin_celltypes_is_the_set_of_sub_path_edge_targets():
 @pytest.mark.parametrize("celltype", ["plain", "mixed", "deepcell", "deepfolder", "folder"])
 def test_sub_path_edge_into_a_container_capable_cell_is_accepted(make_context, celltype):
     ctx = make_context()
-    ctx.x = Cell("mixed")
+    member_celltype = "bytes" if celltype in ("deepfolder", "folder") else "mixed"
+    ctx.x = Cell(member_celltype)
+    ctx.x.set(b"member" if member_celltype == "bytes" else {"value": 1})
     ctx.c = Cell(celltype)
     ctx.c["k"] = ctx.x  # edge construction must not raise
 

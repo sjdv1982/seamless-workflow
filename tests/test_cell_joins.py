@@ -84,18 +84,18 @@ def test_join_is_blocked_by_unwired_when_an_upstream_is_unwired(make_context):
 def test_join_waits_for_local_sidework_without_entering_computing(
     make_context, monkeypatch
 ):
-    import seamless_workflow.context as context_module
+    from seamless.checksum import celljoin as celljoin_module
 
     entered = Event()
     release = Event()
-    original_evaluate_cell = context_module.evaluate_cell
+    original_evaluate_cell = celljoin_module.evaluate_celljoin
 
     def delayed_evaluate_cell(*args, **kwargs):
         entered.set()
         assert release.wait(timeout=10)
         return original_evaluate_cell(*args, **kwargs)
 
-    monkeypatch.setattr(context_module, "evaluate_cell", delayed_evaluate_cell)
+    monkeypatch.setattr(celljoin_module, "evaluate_celljoin", delayed_evaluate_cell)
     ctx = make_context()
     ctx.source = 42
     ctx.join = Cell("plain")

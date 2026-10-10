@@ -12,6 +12,10 @@ from typing import Any
 from uuid import uuid4
 
 from seamless import Buffer, CacheMissError, Cell, Checksum, Expression
+from seamless.checksum.expression import (
+    evaluate_expression_placed,
+    softcancel_expression,
+)
 from seamless_transformer.frozen_transformer import FrozenTransformer
 
 from .adapters import buffer_for_checksum, checksum_for_value, normalize_checksum, value_for_checksum
@@ -44,7 +48,14 @@ from .graph import (
 from .scheduler import ContextRuntime, ExceptionInfo, RunRecord
 from .views import MissingView, SubContextView
 
-from .sidework import Lease, PreparedCell, PreparedTransformer, SideLoop, evaluate_cell, evaluate_projection
+from .sidework import (
+    Lease,
+    PreparedCell,
+    PreparedTransformer,
+    SideLoop,
+    evaluate_celljoin,
+    evaluate_projection,
+)
 
 PIN_CELLTYPES = {"plain", "mixed", "deepcell", "deepfolder", "folder"}
 _DEEP_CELLTYPES = {"deepcell", "deepfolder", "folder"}
@@ -194,6 +205,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         object.__setattr__(self, "_side", SideLoop(f"Context-side-{self.top_id[:8]}"))
         object.__setattr__(self, "_jobs", {})
         object.__setattr__(self, "_facts", {})
+        object.__setattr__(self, "_celljoins", {})
+        object.__setattr__(self, "_used_celljoins", set())
         object.__setattr__(self, "_barriers", {})
         object.__setattr__(self, "_effects", [])
         object.__setattr__(self, "_edge_errors", {})
@@ -344,6 +357,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if lease is not None: lease._release_refholds()
         self._facts.clear()
         self._jobs.clear()
+        self._celljoins.clear()
+        self._used_celljoins.clear()
         self._runtime.current_runs.clear()
         self._runtime.superseded_runs.clear()
         self._runtime.evicted.clear()
@@ -1295,10 +1310,17 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if self._graph.nodes[target.node_path].cell_config.celltype not in PIN_CELLTYPES:
                 raise PathError("Cell subvalue connections require a container-capable Cell")
             target_type = self._graph.nodes[target.node_path].cell_config.celltype
+            target_key = target.local_path[0]
+            if isinstance(target_key, bool) or not isinstance(target_key, (str, int)):
+                raise TypeError("Cell connection targets require a string or non-negative integer key")
+            if isinstance(target_key, int) and target_key < 0:
+                raise ValueError("Cell connection targets cannot use negative integer keys")
+            if target_key in {"<root>", "<numeric>"}:
+                raise ValueError(f"Cell connection target {target_key!r} is reserved")
             if target_type in _DEEP_CELLTYPES:
                 member_type = "mixed" if target_type == "deepcell" else "bytes"
                 source_type = source_ep.celltype or self._node_celltype(source_ep.node_path)
-                if not isinstance(target.local_path[0], str):
+                if not isinstance(target_key, str):
                     raise ValueError("Deep Cell connection targets require a string key")
                 if source_type != member_type:
                     raise TypeError("Deep Cell connections require the member celltype")
@@ -1580,6 +1602,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._anonymous_current_updates = {}
         self._edge_code_states = {}
         self._used_facts = set()
+        self._used_celljoins = set()
         visited, order = set(), []
         def visit(path):
             if path in visited: return
@@ -1598,6 +1621,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         for key in set(self._facts) - self._used_facts:
             lease, _ = self._facts.pop(key)
             if lease is not None: lease._release_refholds()
+        for path in set(self._celljoins) - self._used_celljoins:
+            self._celljoins.pop(path, None)
         for path in sorted(self._graph.nodes):
             self._update_runtime(path)
         self._sync_superseded_refholds()
@@ -1727,6 +1752,19 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         else:
             self._derive_transformer(path, node)
 
+    def _celljoin_for(self, path, celltype, root, members):
+        from seamless.celljoin_class import CellJoin
+
+        fingerprint = (celltype, root, tuple(members.items()))
+        previous = self._celljoins.get(path)
+        if previous is not None and previous[0] == fingerprint:
+            self._used_celljoins.add(path)
+            return previous[1]
+        celljoin = CellJoin.from_inputs(celltype, root, members)
+        self._celljoins[path] = (fingerprint, celljoin)
+        self._used_celljoins.add(path)
+        return celljoin
+
     def _derive_cell(self, path, node):
         sense_errors = [
             session.sense_error
@@ -1841,7 +1879,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             self._replace_current_checksum(path, checksum)
             node.state, node.block_reason, node.exception = state, None, error
             return
-        inputs = []
+        self._used_celljoins.add(path)
+        members = {}
         pending = []
         for local, edge in incoming.items():
             state, checksum = self._source_state(edge)
@@ -1850,30 +1889,71 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 continue
             source, _ = self._graph.resolve_existing(edge.source)
             source_type = edge.source_celltype or self._node_celltype(source)
-            _, source_local = self._graph.resolve_existing(edge.source)
-            if (cfg.celltype not in _DEEP_CELLTYPES and not source_local
-                    and not edge.source_conversion and source_type != cfg.celltype):
+            if cfg.celltype not in _DEEP_CELLTYPES and source_type != cfg.celltype:
                 state, checksum, error = self._projection(
-                    checksum, (), source_type, cfg.celltype, scratch=cfg.scratch
+                    checksum,
+                    (),
+                    source_type,
+                    cfg.celltype,
+                    scratch=True,
+                    materialize=True,
                 )
                 if state != "complete":
-                    if state == "failed" and error is not None:
+                    if state == "failed":
                         self._replace_current_checksum(path, None)
                         node.state, node.block_reason, node.exception = "failed", None, error
                         return
                     pending.append(edge)
                     continue
                 source_type = cfg.celltype
-            inputs.append((local, checksum, source_type))
+            members[local[0]] = checksum
         if pending:
             self._apply_pending(node, pending, join=True)
             return
         root = producer.checksum if producer else None
         root_type = producer.celltype if producer else cfg.celltype
-        key = ("merge", root.hex() if root is not None else None, root_type,
-               tuple((local, cs.hex(), ct) for local, cs, ct in inputs), cfg.celltype)
-        state, checksum, error = self._demand(key, evaluate_cell, (root, root_type, tuple(inputs), cfg.celltype),
-                                            [cs for _, cs, _ in inputs] + ([root] if root is not None else []))
+        if root is not None and root_type != cfg.celltype:
+            state, root, error = self._projection(
+                root,
+                (),
+                root_type,
+                cfg.celltype,
+                scratch=True,
+                materialize=True,
+            )
+            if state == "failed":
+                self._replace_current_checksum(path, None)
+                node.state, node.block_reason, node.exception = "failed", None, error
+                return
+            if state != "complete":
+                self._replace_current_checksum(path, None)
+                node.state, node.block_reason, node.exception = "waiting", None, None
+                return
+        celljoin_celltype = "deepfolder" if cfg.celltype == "folder" else cfg.celltype
+        try:
+            celljoin = self._celljoin_for(path, celljoin_celltype, root, members)
+        except TypeError as exc:
+            from .errors import execution_error
+
+            self._replace_current_checksum(path, None)
+            node.state, node.block_reason, node.exception = "failed", None, execution_error(exc)
+            return
+        key = (
+            "celljoin",
+            celljoin.celljoin_checksum.hex(),
+            celljoin_celltype,
+            bool(cfg.scratch),
+        )
+        from seamless.checksum.celljoin import required_buffers
+
+        leases = list(required_buffers(celljoin._spec))
+        leases.append(celljoin.celljoin_checksum)
+        state, checksum, error = self._demand(
+            key,
+            evaluate_celljoin,
+            (celljoin, bool(cfg.scratch)),
+            leases,
+        )
         self._replace_current_checksum(path, checksum)
         node.state, node.block_reason, node.exception = state, None, error
 
@@ -2116,11 +2196,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             async def work(leases=leases):
                 try:
                     if function is evaluate_projection:
-                        from seamless.checksum.expression import (
-                            evaluate_expression_placed,
-                            softcancel_expression,
-                        )
-
                         cs, local, ct, target, validator, validator_language, scratch, materialize, input_expression, input_materializer = args
                         materialize_input = input_materializer
                         if input_expression is not None:
@@ -2148,6 +2223,20 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                             softcancel_expression(
                                 (cs.hex(), _path_string(local), ct, target), key
                             )
+                            raise
+                    elif function is evaluate_celljoin:
+                        from seamless.checksum.celljoin import evaluate_celljoin_placed
+
+                        celljoin, scratch = args
+                        try:
+                            checksum = await evaluate_celljoin_placed(
+                                celljoin._spec,
+                                execution=execution,
+                                member_id=key,
+                                scratch=scratch,
+                            )
+                        except asyncio.CancelledError:
+                            softcancel_expression(celljoin.identity_key, key)
                             raise
                     else:
                         worker_leases = tuple(Lease(lease.checksum) for lease in leases)
@@ -2259,6 +2348,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         target_node = self._graph.nodes[target_path]
         edge_scratch = self._edge_target_scratch(target_node, target_local)
         materialize = target_node.kind == "transformer" and not edge_scratch
+        if (target_node.kind == "cell" and target_local
+                and target_node.cell_config.celltype not in _DEEP_CELLTYPES):
+            if source_local:
+                edge_scratch, materialize = False, True
+            elif edge.source_conversion:
+                edge_scratch, materialize = True, True
         root_type = self._node_celltype(source_node)
         if source_local:
             source_type = edge.source_celltype or self._celltype_for_path(
@@ -2277,12 +2372,18 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if edge.deep_member and target_type not in _DEEP_CELLTYPES:
                 return "miswired", None
             if target_local:
-                if target_type not in PIN_CELLTYPES:
+                if len(target_local) != 1 or target_type not in PIN_CELLTYPES:
+                    return "miswired", None
+                target_key = target_local[0]
+                if isinstance(target_key, bool) or not isinstance(target_key, (str, int)):
+                    return "miswired", None
+                if isinstance(target_key, int) and target_key < 0:
+                    return "miswired", None
+                if target_key in {"<root>", "<numeric>"}:
                     return "miswired", None
                 if target_type in _DEEP_CELLTYPES:
                     member_type = "mixed" if target_type == "deepcell" else "bytes"
-                    if (len(target_local) != 1 or not isinstance(target_local[0], str)
-                            or source_type != member_type):
+                    if not isinstance(target_key, str) or source_type != member_type:
                         return "miswired", None
         elif target_node.kind == "transformer" and target_local != ("code",):
             target_type = target_node.transformer_config.celltypes.get(target_local[0], "mixed")

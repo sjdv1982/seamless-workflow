@@ -87,19 +87,6 @@ class SideLoop:
         self.thread.join()
 
 
-def evaluate_cell(root, root_type, inputs, target_type):
-    from .context import _assign_path
-    from .adapters import checksum_for_value
-    value = root.resolve(root_type) if root is not None else {}
-    for local, checksum, source_type in inputs:
-        if isinstance(local[0], int) and not isinstance(value, (list, tuple)):
-            raise TypeError("Integer Cell connection targets require an existing sequence")
-        member = (checksum if target_type in {"deepcell", "deepfolder", "folder"}
-                  else checksum.resolve(source_type))
-        _assign_path(value, local, member)
-    return checksum_for_value(value, target_type, checksum_is_value=True)
-
-
 def evaluate_projection(checksum, path, input_celltype, celltype, validator=None, validator_language=None):
     from seamless.checksum.expression import evaluate_expression_local
     from .builder_state import _path_string
@@ -108,3 +95,8 @@ def evaluate_projection(checksum, path, input_celltype, celltype, validator=None
     if result is None:
         raise KeyError(f'Expression path {path!r} does not exist')
     return result
+
+
+def evaluate_celljoin(celljoin, scratch):
+    """Dispatch tag; Context._demand runs celljoins through core evaluation."""
+    return None
