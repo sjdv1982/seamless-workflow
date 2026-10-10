@@ -75,7 +75,7 @@ def prepare_graph(data):
                 optional_pins=set(entry.get('optional_pins',())),
                 modules=copy.deepcopy(entry.get('modules',{})), globals=copy.deepcopy(entry.get('globals',{})),
                 meta=copy.deepcopy(entry.get('meta',{})), environment=copy.deepcopy(entry.get('environment')),
-                scratch=entry.get('scratch',False), local=entry.get('local'), direct_print=entry.get('direct_print',False),
+                scratch=entry.get('scratch',False), local=entry.get('local'),
                 call_mode=entry['call_mode'], schema=entry.get('schema'),
                 compilation=copy.deepcopy(entry.get('compilation')), objects=copy.deepcopy(entry.get('objects')), header=entry.get('header'))
             if cfg.compilation is not None:

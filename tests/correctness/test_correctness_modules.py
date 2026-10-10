@@ -1,7 +1,7 @@
 """[MOD-15] — ``modules`` must stop being inert graph decoration.
 
-    ``language``, ``modules``, ``globals``, ``environment``, ``scratch``,
-    ``local`` and ``direct_print`` are serialized into ``get_graph()`` today and
+    ``language``, ``modules``, ``globals``, ``environment``, ``scratch`` and
+    ``local`` are serialized into ``get_graph()`` today and
     then dropped, so a Context transformer is Python-only and module-less
     whatever its configuration says.
 

@@ -1000,10 +1000,6 @@ class BoundTransformerBackend:
     @scratch.setter
     def scratch(self, value): self.context._set_node_config(self.node_path, "scratch", value)
     @property
-    def direct_print(self): return self.cfg.direct_print
-    @direct_print.setter
-    def direct_print(self, value): self.context._set_node_config(self.node_path, "direct_print", value)
-    @property
     def streaming(self): return self.cfg.streaming
     @streaming.setter
     def streaming(self, value): self.context._set_node_config(self.node_path, "streaming", value)
