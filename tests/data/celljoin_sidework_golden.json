@@ -1,0 +1,656 @@
+[
+  {
+    "name": "rootless_string_plain",
+    "target": "plain",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "result_hex": "7b0a20202261223a20370a7d0a"
+  },
+  {
+    "name": "mapping_plain",
+    "target": "plain",
+    "root": {
+      "kept": true,
+      "a": 0
+    },
+    "root_present": true,
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "result_hex": "7b0a20202261223a20372c0a2020226b657074223a20747275650a7d0a"
+  },
+  {
+    "name": "string_sequence_plain",
+    "target": "plain",
+    "root": [
+      1,
+      2
+    ],
+    "root_present": true,
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "list indices must be integers or slices, not str"
+  },
+  {
+    "name": "scalar_plain",
+    "target": "plain",
+    "root": 12,
+    "root_present": true,
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "'int' object does not support item assignment"
+  },
+  {
+    "name": "null_plain",
+    "target": "plain",
+    "root": null,
+    "root_present": true,
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "'NoneType' object does not support item assignment"
+  },
+  {
+    "name": "integer_rootless_plain",
+    "target": "plain",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        3,
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "Integer Cell connection targets require an existing sequence"
+  },
+  {
+    "name": "integer_mapping_plain",
+    "target": "plain",
+    "root": {},
+    "root_present": true,
+    "members": [
+      [
+        3,
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "Integer Cell connection targets require an existing sequence"
+  },
+  {
+    "name": "integer_list_plain",
+    "target": "plain",
+    "root": [
+      1,
+      2,
+      3
+    ],
+    "root_present": true,
+    "members": [
+      [
+        1,
+        7
+      ]
+    ],
+    "result_hex": "5b0a2020312c0a2020372c0a2020330a5d0a"
+  },
+  {
+    "name": "negative_list_plain",
+    "target": "plain",
+    "root": [
+      1,
+      2,
+      3
+    ],
+    "root_present": true,
+    "members": [
+      [
+        -1,
+        7
+      ]
+    ],
+    "result_hex": "5b0a2020312c0a2020322c0a2020370a5d0a"
+  },
+  {
+    "name": "bool_list_plain",
+    "target": "plain",
+    "root": [
+      1,
+      2,
+      3
+    ],
+    "root_present": true,
+    "members": [
+      [
+        true,
+        7
+      ]
+    ],
+    "result_hex": "5b0a2020312c0a2020372c0a2020330a5d0a"
+  },
+  {
+    "name": "out_of_range_plain",
+    "target": "plain",
+    "root": [
+      1,
+      2
+    ],
+    "root_present": true,
+    "members": [
+      [
+        3,
+        7
+      ]
+    ],
+    "error_type": "IndexError",
+    "error_message": "list assignment index out of range"
+  },
+  {
+    "name": "mixed_keys_plain",
+    "target": "plain",
+    "root": [
+      1,
+      2
+    ],
+    "root_present": true,
+    "members": [
+      [
+        0,
+        7
+      ],
+      [
+        "a",
+        8
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "list indices must be integers or slices, not str"
+  },
+  {
+    "name": "alias_later_wins_plain",
+    "target": "plain",
+    "root": [
+      1,
+      2,
+      3
+    ],
+    "root_present": true,
+    "members": [
+      [
+        -1,
+        7
+      ],
+      [
+        2,
+        8
+      ]
+    ],
+    "result_hex": "5b0a2020312c0a2020322c0a2020380a5d0a"
+  },
+  {
+    "name": "reserved_plain",
+    "target": "plain",
+    "root": {},
+    "root_present": true,
+    "members": [
+      [
+        "<root>",
+        7
+      ],
+      [
+        "<numeric>",
+        8
+      ]
+    ],
+    "result_hex": "7b0a2020223c6e756d657269633e223a20382c0a2020223c726f6f743e223a20370a7d0a"
+  },
+  {
+    "name": "float_plain",
+    "target": "plain",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        1.5,
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "Dict key must be str"
+  },
+  {
+    "name": "none_plain",
+    "target": "plain",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        null,
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "Dict key must be str"
+  },
+  {
+    "name": "non_ascii_plain",
+    "target": "plain",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        "é",
+        1e-07
+      ]
+    ],
+    "result_hex": "7b0a202022c3a9223a2031652d370a7d0a"
+  },
+  {
+    "name": "rootless_string_mixed",
+    "target": "mixed",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "result_hex": "7b0a20202261223a20370a7d0a"
+  },
+  {
+    "name": "mapping_mixed",
+    "target": "mixed",
+    "root": {
+      "kept": true,
+      "a": 0
+    },
+    "root_present": true,
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "result_hex": "7b0a20202261223a20372c0a2020226b657074223a20747275650a7d0a"
+  },
+  {
+    "name": "string_sequence_mixed",
+    "target": "mixed",
+    "root": [
+      1,
+      2
+    ],
+    "root_present": true,
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "list indices must be integers or slices, not str"
+  },
+  {
+    "name": "scalar_mixed",
+    "target": "mixed",
+    "root": 12,
+    "root_present": true,
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "'int' object does not support item assignment"
+  },
+  {
+    "name": "null_mixed",
+    "target": "mixed",
+    "root": null,
+    "root_present": true,
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "'NoneType' object does not support item assignment"
+  },
+  {
+    "name": "integer_rootless_mixed",
+    "target": "mixed",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        3,
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "Integer Cell connection targets require an existing sequence"
+  },
+  {
+    "name": "integer_mapping_mixed",
+    "target": "mixed",
+    "root": {},
+    "root_present": true,
+    "members": [
+      [
+        3,
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "Integer Cell connection targets require an existing sequence"
+  },
+  {
+    "name": "integer_list_mixed",
+    "target": "mixed",
+    "root": [
+      1,
+      2,
+      3
+    ],
+    "root_present": true,
+    "members": [
+      [
+        1,
+        7
+      ]
+    ],
+    "result_hex": "5b0a2020312c0a2020372c0a2020330a5d0a"
+  },
+  {
+    "name": "negative_list_mixed",
+    "target": "mixed",
+    "root": [
+      1,
+      2,
+      3
+    ],
+    "root_present": true,
+    "members": [
+      [
+        -1,
+        7
+      ]
+    ],
+    "result_hex": "5b0a2020312c0a2020322c0a2020370a5d0a"
+  },
+  {
+    "name": "bool_list_mixed",
+    "target": "mixed",
+    "root": [
+      1,
+      2,
+      3
+    ],
+    "root_present": true,
+    "members": [
+      [
+        true,
+        7
+      ]
+    ],
+    "result_hex": "5b0a2020312c0a2020372c0a2020330a5d0a"
+  },
+  {
+    "name": "out_of_range_mixed",
+    "target": "mixed",
+    "root": [
+      1,
+      2
+    ],
+    "root_present": true,
+    "members": [
+      [
+        3,
+        7
+      ]
+    ],
+    "error_type": "IndexError",
+    "error_message": "list assignment index out of range"
+  },
+  {
+    "name": "mixed_keys_mixed",
+    "target": "mixed",
+    "root": [
+      1,
+      2
+    ],
+    "root_present": true,
+    "members": [
+      [
+        0,
+        7
+      ],
+      [
+        "a",
+        8
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "list indices must be integers or slices, not str"
+  },
+  {
+    "name": "alias_later_wins_mixed",
+    "target": "mixed",
+    "root": [
+      1,
+      2,
+      3
+    ],
+    "root_present": true,
+    "members": [
+      [
+        -1,
+        7
+      ],
+      [
+        2,
+        8
+      ]
+    ],
+    "result_hex": "5b0a2020312c0a2020322c0a2020380a5d0a"
+  },
+  {
+    "name": "reserved_mixed",
+    "target": "mixed",
+    "root": {},
+    "root_present": true,
+    "members": [
+      [
+        "<root>",
+        7
+      ],
+      [
+        "<numeric>",
+        8
+      ]
+    ],
+    "result_hex": "7b0a2020223c6e756d657269633e223a20382c0a2020223c726f6f743e223a20370a7d0a"
+  },
+  {
+    "name": "float_mixed",
+    "target": "mixed",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        1.5,
+        7
+      ]
+    ],
+    "result_hex": "7b0a202022312e35223a20370a7d0a"
+  },
+  {
+    "name": "none_mixed",
+    "target": "mixed",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        null,
+        7
+      ]
+    ],
+    "result_hex": "7b0a2020226e756c6c223a20370a7d0a"
+  },
+  {
+    "name": "non_ascii_mixed",
+    "target": "mixed",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        "é",
+        1e-07
+      ]
+    ],
+    "result_hex": "7b0a2020225c7530306539223a2031652d30370a7d0a"
+  },
+  {
+    "name": "deep_rootless_deepcell",
+    "target": "deepcell",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        "added",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ]
+    ],
+    "result_hex": "7b0a2020226164646564223a202231313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131220a7d0a"
+  },
+  {
+    "name": "deep_root_deepcell",
+    "target": "deepcell",
+    "root": {
+      "kept": "2222222222222222222222222222222222222222222222222222222222222222",
+      "added": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "root_present": true,
+    "members": [
+      [
+        "added",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ]
+    ],
+    "result_hex": "7b0a2020226164646564223a202231313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131222c0a2020226b657074223a202232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232220a7d0a"
+  },
+  {
+    "name": "deep_rootless_deepfolder",
+    "target": "deepfolder",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        "added",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ]
+    ],
+    "result_hex": "7b0a2020226164646564223a202231313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131220a7d0a"
+  },
+  {
+    "name": "deep_root_deepfolder",
+    "target": "deepfolder",
+    "root": {
+      "kept": "2222222222222222222222222222222222222222222222222222222222222222",
+      "added": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "root_present": true,
+    "members": [
+      [
+        "added",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ]
+    ],
+    "result_hex": "7b0a2020226164646564223a202231313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131222c0a2020226b657074223a202232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232220a7d0a"
+  },
+  {
+    "name": "deep_rootless_folder",
+    "target": "folder",
+    "root": null,
+    "root_present": false,
+    "members": [
+      [
+        "added",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ]
+    ],
+    "result_hex": "7b0a2020226164646564223a202231313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131220a7d0a"
+  },
+  {
+    "name": "deep_root_folder",
+    "target": "folder",
+    "root": {
+      "kept": "2222222222222222222222222222222222222222222222222222222222222222",
+      "added": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "root_present": true,
+    "members": [
+      [
+        "added",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ]
+    ],
+    "result_hex": "7b0a2020226164646564223a202231313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131222c0a2020226b657074223a202232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232220a7d0a"
+  },
+  {
+    "name": "structured_mixed",
+    "target": "mixed",
+    "root": null,
+    "root_present": true,
+    "root_kind": "structured",
+    "members": [
+      [
+        "a",
+        7
+      ]
+    ],
+    "result_hex": "934e554d5059010076007b276465736372273a205b282761272c20273c693827292c20282762272c20273c693827295d2c2027666f727472616e5f6f72646572273a2046616c73652c20277368617065273a2028292c207d2020202020202020202020202020202020202020202020202020202020202020202020202020200a07000000000000000200000000000000"
+  },
+  {
+    "name": "ndarray_mixed",
+    "target": "mixed",
+    "root": null,
+    "root_present": true,
+    "root_kind": "ndarray",
+    "members": [
+      [
+        1,
+        7
+      ]
+    ],
+    "error_type": "TypeError",
+    "error_message": "Integer Cell connection targets require an existing sequence"
+  }
+]
