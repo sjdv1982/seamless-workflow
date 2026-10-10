@@ -968,6 +968,28 @@ class BoundTransformerBackend:
         return _transformer_exception(self._node())
 
     @property
+    def logs(self):
+        node = self._node()
+        if node.state == "failed":
+            return _transformer_exception(node)
+        record = self.context._runtime.current_runs.get(self.node_path)
+        if (
+            record is None
+            or record.phase == "cancelled"
+            or record.identity_checksum is None
+        ):
+            return None
+        from seamless_transformer.transformation_cache import (
+            format_transformation_log,
+            get_transformation_log,
+        )
+
+        entry = get_transformation_log(record.identity_checksum)
+        if entry is None:
+            return None
+        return format_transformation_log(entry)
+
+    @property
     def language(self): return self.cfg.language
     @language.setter
     def language(self, value): self.context._set_node_config(self.node_path, "language", value)
