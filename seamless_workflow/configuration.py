@@ -2,6 +2,7 @@
 import copy
 from seamless import Buffer, Checksum
 from .graph import TransformerConfig
+from seamless_transformer.transformation_utils import apply_lock_meta_update
 
 
 def update_config(original, field, value, key=None, delete=False):
@@ -53,10 +54,12 @@ def update_config(original, field, value, key=None, delete=False):
                 cfg.check_pin_name(key, allow_result=True)
                 if key != 'result': cfg.pins.add(key)
             mapping[key] = copy.deepcopy(value)
-    elif field in {'driver', 'allow_input_fingertip'}:
+    elif field in {'driver', 'process_lock'}:
+        apply_lock_meta_update(cfg.meta, {field: value})
+    elif field == 'allow_input_fingertip':
         cfg.meta[field] = bool(value)
     elif field == 'meta':
-        cfg.meta.update(copy.deepcopy(value))
+        apply_lock_meta_update(cfg.meta, copy.deepcopy(value))
     else:
         if field not in cfg.__dataclass_fields__ or field in {'config_token', 'callable'}:
             raise AttributeError(field)

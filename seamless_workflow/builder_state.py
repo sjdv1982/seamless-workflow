@@ -9,6 +9,7 @@ from typing import Any
 from seamless import Cell, Checksum, Expression
 from seamless.cell_class import _UNSET, append_item_path, append_slice_path
 from seamless_transformer.frozen_transformer import FrozenTransformer
+from seamless_transformer.transformation_utils import resolve_lock_meta
 
 from .endpoints import BoundEndpoint
 from .errors import AuthorityError, DependencyError, ReadOnlyEndpointError, StaleWorkflowHandleError
@@ -1035,9 +1036,13 @@ class BoundTransformerBackend:
     def allow_input_fingertip(self, value):
         self.context._set_node_config(self.node_path, "allow_input_fingertip", value)
     @property
-    def driver(self): return bool(self.cfg.meta.get("driver", False))
+    def driver(self): return resolve_lock_meta(self.cfg.meta)[1]
     @driver.setter
     def driver(self, value): self.context._set_node_config(self.node_path, "driver", value)
+    @property
+    def process_lock(self): return resolve_lock_meta(self.cfg.meta)[0]
+    @process_lock.setter
+    def process_lock(self, value): self.context._set_node_config(self.node_path, "process_lock", value)
     @property
     def result(self): return Cell._from_backend(BoundCellBackend(self.context, self.node_path, (), readonly=True))
     @property
