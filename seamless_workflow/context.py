@@ -497,10 +497,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             CompiledTransformer,
             DirectCompiledTransformer,
         )
+        from seamless_transformer.languages import is_handler_language
         from seamless_transformer.transformer_class import (
             BashTransformer,
             DirectBashTransformer,
+            DirectHandlerTransformer,
             DirectPythonTransformer,
+            HandlerTransformer,
             PythonBashBaseTransformer,
             PythonTransformer,
         )
@@ -514,6 +517,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             cls = DirectPythonTransformer if is_direct else PythonTransformer
         elif cfg.language == "bash":
             cls = DirectBashTransformer if is_direct else BashTransformer
+        elif is_handler_language(cfg.language):
+            cls = DirectHandlerTransformer if is_direct else HandlerTransformer
         else:
             cls = PythonBashBaseTransformer
         bound_cls = cls.__dict__.get("_workflow_bound_class")
