@@ -47,3 +47,41 @@ def test_bound_handler_metavars_defaults_persistence_and_cache_hit(make_context,
     ctx.compute(timeout=10)
     assert ctx.tf.result.value == 15
     assert marker.read_text().splitlines() == ["executed"]
+
+
+
+def test_real_julia_bound_backend_change_uses_recorded_result(make_context, tmp_path, monkeypatch):
+    import os
+    import shutil
+    import subprocess
+
+    executable = shutil.which("julia")
+    if executable is None:
+        pytest.skip("Julia CLI executable is missing from PATH")
+    monkeypatch.setenv("JULIA_PROJECT", os.environ.get("JULIA_PROJECT", "/tmp/seamless-julia-r-support-project"))
+    probe = subprocess.run([executable, "--startup-file=no", "-e", "using NPZ, JSON"],
+                           capture_output=True, text=True, timeout=180)
+    if probe.returncode:
+        pytest.skip("Julia CLI needs NPZ and JSON: " + probe.stderr[-1000:])
+    marker = tmp_path / "julia-calls"
+    tf = Transformer("julia")
+    tf.metavars.BACKEND = "julia"
+    tf.code = 'open(marker, "a") do io; println(io, "executed"); end; result = value + 2'
+    tf.celltypes.value = "int"
+    tf.pins.value = 12
+    tf.celltypes.marker = "str"
+    tf.pins.marker = str(marker)
+    tf.celltypes.result = "plain"
+    tf.local = True
+    ctx = make_context()
+    ctx.tf = tf
+    ctx.compute(timeout=120)
+    assert ctx.tf.result.value == 14
+    checksum = ctx.tf.build().construct()
+    ctx.tf.metavars.BACKEND = "juliacall"
+    assert ctx.tf.build().construct() == checksum
+    assert ctx.tf.metavars.BACKEND == "juliacall"
+    assert ctx.tf.build().meta["metavars"]["BACKEND"] == "juliacall"
+    ctx.compute(timeout=120)
+    assert ctx.tf.result.value == 14
+    assert marker.read_text().splitlines() == ["executed"]
