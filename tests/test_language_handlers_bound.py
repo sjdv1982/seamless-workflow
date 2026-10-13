@@ -35,15 +35,19 @@ def test_bound_handler_metavars_defaults_persistence_and_cache_hit(make_context,
     assert ctx.tf.result.value == 15
     checksum = ctx.tf.build().construct()
     graph_before = ctx.get_graph()
-    ctx.tf.metavars.BACKEND = "memory"
-    assert ctx.tf.metavars.BACKEND == "memory"
+    for invalid in ("ryp", "juliacall", "Rscript", "julia", "arbitrary", 7, None):
+        with pytest.raises(ValueError, match="BACKEND"):
+            ctx.tf.metavars.BACKEND = invalid
+        assert ctx.tf.metavars.BACKEND == "cli"
+    ctx.tf.metavars.BACKEND = "mem"
+    assert ctx.tf.metavars.BACKEND == "mem"
     assert ctx.tf.metavars.OFFSET == 3
     assert ctx.get_graph() != graph_before
     with pytest.raises((AttributeError, KeyError, ValueError)):
         ctx.tf.metavars.UNDECLARED = 1
     snapshot = ctx.tf.build()
     assert snapshot.construct() == checksum
-    assert snapshot.meta["metavars"] == {"BACKEND": "memory", "OFFSET": 3}
+    assert snapshot.meta["metavars"] == {"BACKEND": "mem", "OFFSET": 3}
     ctx.compute(timeout=10)
     assert ctx.tf.result.value == 15
     assert marker.read_text().splitlines() == ["executed"]
@@ -51,21 +55,22 @@ def test_bound_handler_metavars_defaults_persistence_and_cache_hit(make_context,
 
 
 def test_real_julia_bound_backend_change_uses_recorded_result(make_context, tmp_path, monkeypatch):
-    import os
+    from pathlib import Path
     import shutil
     import subprocess
 
     executable = shutil.which("julia")
     if executable is None:
         pytest.skip("Julia CLI executable is missing from PATH")
-    monkeypatch.setenv("JULIA_PROJECT", os.environ.get("JULIA_PROJECT", "/tmp/seamless-julia-r-support-project"))
+    project = Path(__file__).resolve().parents[2] / "seamless" / "julia"
+    monkeypatch.setenv("JULIA_PROJECT", str(project))
     probe = subprocess.run([executable, "--startup-file=no", "-e", "using NPZ, JSON"],
                            capture_output=True, text=True, timeout=180)
     if probe.returncode:
         pytest.skip("Julia CLI needs NPZ and JSON: " + probe.stderr[-1000:])
     marker = tmp_path / "julia-calls"
     tf = Transformer("julia")
-    tf.metavars.BACKEND = "julia"
+    tf.metavars.BACKEND = "cli"
     tf.code = 'open(marker, "a") do io; println(io, "executed"); end; result = value + 2'
     tf.celltypes.value = "int"
     tf.pins.value = 12
@@ -78,10 +83,10 @@ def test_real_julia_bound_backend_change_uses_recorded_result(make_context, tmp_
     ctx.compute(timeout=120)
     assert ctx.tf.result.value == 14
     checksum = ctx.tf.build().construct()
-    ctx.tf.metavars.BACKEND = "juliacall"
+    ctx.tf.metavars.BACKEND = "mem"
     assert ctx.tf.build().construct() == checksum
-    assert ctx.tf.metavars.BACKEND == "juliacall"
-    assert ctx.tf.build().meta["metavars"]["BACKEND"] == "juliacall"
+    assert ctx.tf.metavars.BACKEND == "mem"
+    assert ctx.tf.build().meta["metavars"]["BACKEND"] == "mem"
     ctx.compute(timeout=120)
     assert ctx.tf.result.value == 14
     assert marker.read_text().splitlines() == ["executed"]
