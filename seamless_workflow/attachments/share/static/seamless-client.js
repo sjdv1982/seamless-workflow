@@ -109,9 +109,12 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
       content_type: metadata.content_type ?? "application/octet-stream",
       readonly: Boolean(metadata.readonly),
       auto_read: !String(key).includes("."),
+      serverRead: false,
       oninput: function () {},
       onchange: function () {},
       readGeneration: 0,
+      ownPutMarker: null,
+      unresolvedDroppedChange: false,
       localVersion: 0,
       pending: null,
       _hasPending: false,
@@ -121,8 +124,31 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
     return entry;
   }
 
+  function inspectRestartSnapshot(shareMap) {
+    const lower = [];
+    for (const [key, entry] of entries) {
+      if (!Object.prototype.hasOwnProperty.call(shareMap || {}, key)) continue;
+      const marker = Number(shareMap[key]?.marker ?? entry.marker ?? 0);
+      if (Number.isFinite(marker) && marker < entry.marker) {
+        lower.push({ key, entry, marker });
+      }
+    }
+    if (lower.length === 0) return { restarted: false, toleratedKey: null };
+    const candidate = lower[0];
+    const tolerated = lower.length === 1
+      && candidate.marker === candidate.entry.marker - 1
+      && candidate.entry.ownPutMarker === candidate.entry.marker;
+    return {
+      restarted: !tolerated,
+      toleratedKey: tolerated ? candidate.key : null
+    };
+  }
+
   function installSnapshot(shareMap) {
-    const restartSnapshot = adoptRestartSnapshot;
+    const reconnectSnapshot = adoptRestartSnapshot;
+    const { restarted, toleratedKey } = reconnectSnapshot
+      ? inspectRestartSnapshot(shareMap)
+      : { restarted: false, toleratedKey: null };
     const listed = Object.keys(shareMap || {});
     const keep = new Set(listed);
     for (const [key] of entries) {
@@ -150,17 +176,62 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
       const oldUrl = entry.url;
       const nextMarker = Number(metadata.marker ?? entry.marker ?? 0);
       const nextChecksum = metadata.checksum ?? null;
-      entry.url = metadata.url ?? entry.url;
-      entry.binary = Boolean(metadata.binary);
-      entry.content_type = metadata.content_type ?? entry.content_type;
-      entry.readonly = Boolean(metadata.readonly);
-      if (adoptRestartSnapshot || nextMarker >= entry.marker) {
-        entry.marker = nextMarker;
-        entry.checksum = nextChecksum;
+      const markerIsLower = !created && Number.isFinite(nextMarker)
+        && nextMarker < entry.marker;
+      const ignoreLowerRecord = markerIsLower && !restarted;
+      if (!ignoreLowerRecord) {
+        entry.url = metadata.url ?? entry.url;
+        entry.binary = Boolean(metadata.binary);
+        entry.content_type = metadata.content_type ?? entry.content_type;
+        entry.readonly = Boolean(metadata.readonly);
       }
-      const changed = created || entry.marker !== oldMarker || entry.checksum !== oldChecksum || entry.url !== oldUrl || restartSnapshot;
-      if (!created && changed) entry.serverRevision += 1;
-      if (entry.auto_read && (changed || entry.value === undefined)) fetchValue(entry);
+
+      if (!reconnectSnapshot && ignoreLowerRecord) continue;
+
+      let shouldRead = false;
+      let forceRead = false;
+      if (reconnectSnapshot && restarted) {
+        // Values the client already read stand across a restart. New, unread,
+        // or locally unresolved keys need a fresh read from the new process.
+        entry.marker = nextMarker;
+        if (created || !entry.serverRead || entry.unresolvedDroppedChange) {
+          entry.checksum = nextChecksum;
+          shouldRead = true;
+          forceRead = true;
+        }
+        entry.ownPutMarker = null;
+        if (!created) {
+          entry.serverRevision += 1;
+          entry.readGeneration += 1;
+        }
+      } else if (reconnectSnapshot) {
+        if (!markerIsLower) {
+          entry.marker = nextMarker;
+          entry.checksum = nextChecksum;
+          if (entry.ownPutMarker !== null && nextMarker >= entry.ownPutMarker) {
+            entry.ownPutMarker = null;
+          }
+        } else if (key === toleratedKey) {
+          // The one exact own-PUT lag stays local until its update arrives.
+        }
+        const changed = entry.marker !== oldMarker
+          || entry.checksum !== oldChecksum || entry.url !== oldUrl;
+        if (!created && (changed || reconnectSnapshot)) entry.serverRevision += 1;
+        shouldRead = entry.auto_read || entry.unresolvedDroppedChange;
+        forceRead = entry.unresolvedDroppedChange;
+      } else {
+        if (!markerIsLower) {
+          entry.marker = nextMarker;
+          entry.checksum = nextChecksum;
+          entry.ownPutMarker = null;
+        }
+        const changed = created || entry.marker !== oldMarker
+          || entry.checksum !== oldChecksum || entry.url !== oldUrl;
+        if (!created && changed) entry.serverRevision += 1;
+        shouldRead = entry.auto_read && (changed || entry.value === undefined);
+      }
+
+      if (shouldRead) fetchValue(entry, { force: forceRead });
     }
     self.sharelist = listed;
     adoptRestartSnapshot = false;
@@ -173,6 +244,9 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
     const changed = numericMarker !== entry.marker || checksum !== entry.checksum;
     entry.marker = numericMarker;
     if (checksum !== undefined) entry.checksum = checksum;
+    if (entry.ownPutMarker !== null && numericMarker >= entry.ownPutMarker) {
+      entry.ownPutMarker = null;
+    }
     if (changed) entry.serverRevision += 1;
     return changed;
   }
@@ -208,8 +282,13 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
       if (Number.isFinite(responseMarker) && responseMarker >= requestedMarker && responseMarker >= entry.marker) {
         entry.marker = responseMarker;
         if (responseChecksum) entry.checksum = responseChecksum;
+        if (entry.ownPutMarker !== null && responseMarker >= entry.ownPutMarker) {
+          entry.ownPutMarker = null;
+        }
       }
       entry.value = newValue;
+      entry.serverRead = true;
+      entry.unresolvedDroppedChange = false;
       const contentType = response.headers.get("content-type");
       if (contentType) entry.content_type = contentType;
       callHandlers(entry, "oninput");
@@ -281,7 +360,11 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
               Number.isFinite(Number(result.marker)) && Number(result.marker) >= entry.marker) {
             entry.marker = Number(result.marker);
             if (result.checksum) entry.checksum = result.checksum;
+            if (entry.ownPutMarker !== null && entry.marker >= entry.ownPutMarker) {
+              entry.ownPutMarker = null;
+            }
           }
+          entry.unresolvedDroppedChange = true;
           await fetchValue(entry, { force: true });
           break;
         }
@@ -293,8 +376,12 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
         const responseIsCurrent = requestServerRevision === entry.serverRevision &&
           (!Number.isFinite(responseMarker) || responseMarker >= entry.marker);
         if (responseIsCurrent) {
-          if (Number.isFinite(responseMarker)) entry.marker = responseMarker;
+          if (Number.isFinite(responseMarker)) {
+            entry.marker = responseMarker;
+            entry.ownPutMarker = responseMarker > requestMarker ? responseMarker : null;
+          }
           if (result && result.checksum) entry.checksum = result.checksum;
+          entry.unresolvedDroppedChange = false;
           if (entry.localVersion === operation.revision) {
             entry.value = value;
             callHandlers(entry, "onchange");
@@ -370,7 +457,9 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
       const entry = entries.get(key);
       if (!entry) return;
       const changed = updateMetadata(entry, checksum, marker);
-      if (changed && entry.auto_read) fetchValue(entry);
+      if ((changed && entry.auto_read) || entry.unresolvedDroppedChange) {
+        fetchValue(entry, { force: entry.unresolvedDroppedChange });
+      }
     }
   }
 
