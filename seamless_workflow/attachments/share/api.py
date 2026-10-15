@@ -118,8 +118,12 @@ class ContextShares:
             return build_openapi(())
         return server.openapi(namespace=self._namespace, owner=self._owner)
 
+    def _begin_close_namespace(self, timeout=60):
+        future = self._driver.begin_close_namespace()
+        future.result(timeout)
+
     def _close_namespace(self, timeout=60):
-        future = self._driver.release_namespace()
+        future = self._driver.hold_namespace()
         future.result(timeout)
 
 

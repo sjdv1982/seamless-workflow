@@ -285,10 +285,12 @@ def _state_graph_path_item():
 
 
 def build_openapi(registrations, *, namespaces=None):
-    """Build a document from active registrations and live Context namespaces."""
+    """Build an OpenAPI document from active and held share records."""
     active = tuple(
         registration for registration in registrations
-        if registration.active and not registration.closed and not registration.staged
+        if (registration.active or getattr(registration, "held", False)
+            or getattr(registration, "reattaching", False))
+        and not registration.closed and not registration.staged
     )
     active = tuple(sorted(active, key=lambda registration: registration.route))
     paths = {registration.route: _path_item(registration) for registration in active}

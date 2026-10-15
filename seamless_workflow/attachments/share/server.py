@@ -14,6 +14,7 @@ from importlib.resources import files
 import inspect
 import os
 import threading
+import time
 from urllib.parse import quote
 
 from seamless import Buffer, Checksum
@@ -87,6 +88,17 @@ def _safe_segment(value):
     )
 
 
+def _can_take_over_namespace(ns, owner):
+    return (
+        ns is not None
+        and owner is not None
+        and ns.owner is not owner
+        and not ns.owner_active
+        and ns.hold_until is not None
+        and time.monotonic() < ns.hold_until
+    )
+
+
 @dataclass(eq=False)
 class _WsClient:
     ws: web.WebSocketResponse
@@ -103,6 +115,11 @@ class _Namespace:
     clients: set = field(default_factory=set)
     staged_claim: bool = False
     state_graph: object = None
+    state_graph_publication: object = None
+    owner_active: bool = True
+    closing: bool = False
+    hold_until: float | None = None
+    hold_task: asyncio.Task | None = None
 
 
 @dataclass
@@ -130,6 +147,13 @@ class ShareRegistration:
     ws: int = 0
     lease: object = None
     pending_puts: set = field(default_factory=set)
+    held: bool = False
+    reattaching: bool = False
+    hold_until: float | None = None
+    reattach_future: asyncio.Future | None = None
+    reattached_from: object = None
+    reattach_flags_changed: bool = False
+    state_graph: object = None
 
 
 class ShareServer:
@@ -149,6 +173,7 @@ class ShareServer:
         put_timeout=60,
         get_timeout=60,
         delivery_timeout=60,
+        hold_timeout=10,
         resolver=None,
     ):
         self.host = host
@@ -157,6 +182,7 @@ class ShareServer:
         self.put_timeout = float(put_timeout)
         self.get_timeout = float(get_timeout)
         self.delivery_timeout = float(delivery_timeout)
+        self.hold_timeout = float(hold_timeout)
         self.resolver = resolver if resolver is not None else self._default_resolver
         self.url = None
         self._lock = threading.RLock()
@@ -214,14 +240,16 @@ class ShareServer:
         path = spec.path
         is_top = bool(getattr(spec, "toplevel", False))
         ns = self._namespaces.get(namespace)
-        if ns is not None and (owner is None or ns.owner is not owner):
+        takeover = _can_take_over_namespace(ns, owner)
+        if ns is not None and (owner is None or (ns.owner is not owner and not takeover)):
             raise ValueError(f"namespace {namespace!r} is in use")
         namespace_top = self._top_records.get(namespace)
         if namespace_top is not None and id(namespace_top) not in replaced_ids:
             raise ValueError(f"namespace {namespace!r} conflicts with a top-level share")
         if ns is not None:
             same_key = ns.records.get(path)
-            if same_key is not None and id(same_key) not in replaced_ids:
+            if (same_key is not None and id(same_key) not in replaced_ids
+                    and not (same_key.held and (takeover or ns.owner is owner))):
                 raise ValueError(f"share key {path!r} is already in use in namespace {namespace!r}")
         staged_top = next((other for other in self._staged_reservations.values()
                            if id(other) not in ignored_ids
@@ -231,7 +259,13 @@ class ShareServer:
             raise ValueError(f"namespace {namespace!r} conflicts with a top-level share")
         if is_top:
             top_record = self._top_records.get(path)
-            if top_record is not None and id(top_record) not in replaced_ids:
+            top_record_rejoins = (
+                top_record is not None and top_record.held
+                and top_record.namespace == namespace
+                and (takeover or (ns is not None and ns.owner is owner))
+            )
+            if (top_record is not None and id(top_record) not in replaced_ids
+                    and not top_record_rejoins):
                 raise ValueError(f"share URL {route!r} is in use")
             first, _, rest = path.partition("/")
             if first == namespace or first in self._namespaces:
@@ -241,11 +275,18 @@ class ShareServer:
                 raise ValueError(f"share URL {route!r} is in use")
         else:
             record = self._records.get((namespace, path))
-            if record is not None and id(record) not in replaced_ids:
+            if (record is not None and id(record) not in replaced_ids
+                    and not (record.held and (takeover or (ns is not None and ns.owner is owner)) )):
                 raise ValueError(f"share URL {route!r} is in use")
             full_key = f"{namespace}/{path}"
             top_record = self._top_records.get(full_key)
-            if top_record is not None and id(top_record) not in replaced_ids:
+            top_record_rejoins = (
+                top_record is not None and top_record.held
+                and top_record.route == route
+                and (takeover or (ns is not None and ns.owner is owner))
+            )
+            if (top_record is not None and id(top_record) not in replaced_ids
+                    and not top_record_rejoins):
                 raise ValueError(f"share URL {route!r} is in use")
         for other in self._staged_reservations.values():
             if id(other) in ignored_ids or id(other) in replaced_ids:
@@ -255,6 +296,33 @@ class ShareServer:
                 raise ValueError(f"share URL {route!r} is in use")
             if is_top and other.namespace == path:
                 raise ValueError(f"share URL {route!r} conflicts with namespace {path!r}")
+
+    def _held_registration_for_locked(self, namespace, spec, route):
+        ns = self._namespaces.get(namespace)
+        if ns is not None:
+            registration = ns.records.get(spec.path)
+            if (registration is not None and registration.held
+                    and registration.route == route):
+                return registration
+        registration = self._top_records.get(spec.path) if spec.toplevel else self._records.get((namespace, spec.path))
+        if (registration is not None and registration.held
+                and registration.route == route):
+            return registration
+        return None
+
+    def _adopt_held_registration_locked(self, registration, held):
+        registration.checksum = held.checksum
+        registration.marker = max(registration.marker, held.marker)
+        registration.lease, held.lease = held.lease, None
+        registration.held = True
+        registration.reattaching = True
+        registration.reattached_from = held
+        registration.reattach_flags_changed = (
+            bool(getattr(registration.spec, "readonly", False))
+            != bool(getattr(held.spec, "readonly", False))
+            or registration.content_type != held.content_type
+            or registration.binary != held.binary
+        )
 
     def reserve(self, namespace, spec, celltype, session_id, sink, owner=None, *,
                 replaces=(), staged=False, node_path=(), state_graph=None):
@@ -281,12 +349,11 @@ class ShareServer:
                 ns = _Namespace(namespace, owner if owner is not None else object())
                 ns.staged_claim = bool(staged)
                 self._namespaces[namespace] = ns
-            if state_graph is not None:
-                ns.state_graph = state_graph
+            registration_owner = ns.owner if owner is None else owner
             reg = ShareRegistration(
                 server=self,
                 namespace=namespace,
-                owner=ns.owner,
+                owner=registration_owner,
                 spec=spec,
                 celltype=celltype,
                 session_id=session_id,
@@ -298,10 +365,22 @@ class ShareServer:
                 staged=bool(staged),
                 replaces=replaces,
                 marker=self._marker_floors.get(route, 0),
+                state_graph=state_graph,
             )
             if staged:
                 self._staged_reservations[id(reg)] = reg
             else:
+                held = self._held_registration_for_locked(namespace, spec, route)
+                if held is not None:
+                    self._adopt_held_registration_locked(reg, held)
+                    self._remove_registration(held)
+                if _can_take_over_namespace(ns, registration_owner):
+                    ns.owner = registration_owner
+                    ns.owner_active = True
+                    ns.closing = False
+                    ns.hold_until = None
+                if state_graph is not None:
+                    ns.state_graph = state_graph
                 if is_top:
                     self._top_records[path] = reg
                     ns.records[path] = reg
@@ -336,12 +415,25 @@ class ShareServer:
                     )
                     if reg.route == other.route or same_key or namespace_collision:
                         raise ValueError(f"share URL {reg.route!r} conflicts with another graph share")
+            for reg in registrations:
+                ns = self._namespaces[reg.namespace]
+                if _can_take_over_namespace(ns, reg.owner):
+                    ns.owner = reg.owner
+                    ns.owner_active = True
+                    ns.closing = False
+                    ns.hold_until = None
             replaced = {}
             for reg in registrations:
                 ns = self._namespaces[reg.namespace]
                 same_key = ns.records.get(reg.spec.path)
                 current = (self._top_records.get(reg.spec.path) if reg.spec.toplevel
                            else self._records.get((reg.namespace, reg.spec.path)))
+                held = self._held_registration_for_locked(
+                    reg.namespace, reg.spec, reg.route
+                )
+                if held is not None:
+                    self._adopt_held_registration_locked(reg, held)
+                    replaced[id(held)] = held
                 for old in (same_key, current):
                     if old is not None:
                         replaced[id(old)] = old
@@ -355,6 +447,8 @@ class ShareServer:
                 ns.staged_claim = False
                 reg.staged = False
                 self._staged_reservations.pop(id(reg), None)
+                if reg.state_graph is not None:
+                    ns.state_graph = reg.state_graph
             # The new routes are visible before the old registrations release
             # their checksum leases. Their identity checks keep cleanup from
             # removing the just-published records.
@@ -446,20 +540,50 @@ class ShareServer:
             return _completed_future(error=RuntimeError("share server is closed"))
         return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
 
-    def activate(self, registration):
-        return self._submit(self._activate(registration))
+    def activate(self, registration, ready=None):
+        return self._submit(self._activate(registration, ready=ready))
 
-    async def _activate(self, registration):
+    async def _activate(self, registration, ready=None):
         with self._lock:
             if registration.closed:
                 raise RuntimeError("share registration is closed")
-            if registration.active:
-                return registration
             registration.active = True
             ns = self._namespaces.get(registration.namespace)
-        if ns is not None:
-            await self._broadcast_shares(ns)
+            held_predecessor = registration.reattached_from
+        if held_predecessor is None:
+            if ns is not None:
+                await self._broadcast_shares(ns)
+            return registration
+        if ready is None or ready.done():
+            await self._complete_reattach(registration)
+        else:
+            def complete(_):
+                try:
+                    self._submit(self._complete_reattach(registration))
+                except Exception:
+                    pass
+            ready.add_done_callback(complete)
         return registration
+
+    async def _complete_reattach(self, registration):
+        with self._lock:
+            if registration.closed:
+                return
+            held_predecessor = registration.reattached_from
+            if held_predecessor is None:
+                return
+            registration.held = False
+            registration.reattaching = False
+            registration.hold_until = None
+            registration.reattached_from = None
+            future = held_predecessor.reattach_future
+            if future is not None and not future.done():
+                future.set_result(registration)
+            ns = self._namespaces.get(registration.namespace)
+            flags_changed = registration.reattach_flags_changed
+            registration.reattach_flags_changed = False
+        if ns is not None and flags_changed:
+            await self._broadcast_shares(ns)
 
     def deliver(self, registration, delivery):
         return self._submit(self._deliver(registration, delivery))
@@ -541,7 +665,7 @@ class ShareServer:
     async def _poll(self, registration, force=False):
         return None
 
-    def unregister(self, registration, close_namespace=False):
+    def unregister(self, registration, close_namespace=False, hold=False):
         if self._closed:
             return _completed_future(None)
         if self._loop is None or not self._started.is_set() or self._startup_error is not None:
@@ -549,7 +673,21 @@ class ShareServer:
             if close_namespace:
                 self._release_namespace(registration.namespace, registration.owner)
             return _completed_future(None)
+        if hold:
+            return self._submit(self._hold_registration(registration))
         return self._submit(self._unregister(registration, close_namespace))
+
+    async def _hold_registration(self, reg):
+        with self._lock:
+            if reg.closed:
+                return None
+            reg.active = False
+            reg.held = True
+            reg.reattaching = False
+            reg.sink = None
+            if reg.reattach_future is None or reg.reattach_future.done():
+                reg.reattach_future = asyncio.get_running_loop().create_future()
+        return None
 
     def release_namespace(self, namespace, owner):
         if self._closed:
@@ -559,22 +697,150 @@ class ShareServer:
             return _completed_future(None)
         return self._submit(self._close_namespace(namespace, owner))
 
+    def begin_close_namespace(self, namespace, owner):
+        if self._closed or self._loop is None or not self._started.is_set():
+            return _completed_future(None)
+        return self._submit(self._begin_close_namespace(namespace, owner))
+
+    def hold_namespace(self, namespace, owner):
+        if self._closed or self._loop is None or not self._started.is_set():
+            return _completed_future(None)
+        return self._submit(self._hold_namespace(namespace, owner))
+
+    async def _begin_close_namespace(self, namespace, owner):
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            ns = self._namespaces.get(namespace)
+            if ns is None or ns.owner is not owner:
+                return
+            ns.closing = True
+            for reg in ns.records.values():
+                if reg.owner is not owner or reg.closed:
+                    continue
+                if reg.reattach_future is None or reg.reattach_future.done():
+                    reg.reattach_future = loop.create_future()
+
+    async def _hold_namespace(self, namespace, owner):
+        with self._lock:
+            ns = self._namespaces.get(namespace)
+            if ns is None or ns.owner is not owner:
+                return
+            deadline = time.monotonic() + self.hold_timeout
+            ns.closing = False
+            ns.owner_active = False
+            ns.hold_until = deadline
+            ns.state_graph = None
+            for reg in ns.records.values():
+                if reg.owner is not owner or reg.closed:
+                    continue
+                reg.active = False
+                reg.held = True
+                reg.reattaching = False
+                reg.hold_until = deadline
+                reg.sink = None
+                if reg.reattach_future is None or reg.reattach_future.done():
+                    reg.reattach_future = asyncio.get_running_loop().create_future()
+            if ns.hold_task is None or ns.hold_task.done():
+                ns.hold_task = asyncio.create_task(self._expire_holds(ns))
+
+    async def _expire_holds(self, ns):
+        while True:
+            with self._lock:
+                if self._namespaces.get(ns.name) is not ns:
+                    ns.hold_task = None
+                    return
+                now = time.monotonic()
+                expired = tuple(
+                    reg for reg in ns.records.values()
+                    if reg.held and reg.hold_until is not None and reg.hold_until <= now
+                )
+                for reg in expired:
+                    future = reg.reattach_future
+                    if future is not None and not future.done():
+                        future.set_result(None)
+                    self._remove_registration(reg)
+
+                if ns.hold_until is not None and ns.hold_until <= now:
+                    ns.hold_until = None
+                release = (
+                    not ns.owner_active and ns.hold_until is None and not ns.records
+                )
+                if release:
+                    clients = tuple(ns.clients)
+                    ns.clients.clear()
+                    ns.state_graph = None
+                    ns.state_graph_publication = None
+                    self._namespaces.pop(ns.name, None)
+                    ns.hold_task = None
+                    deadlines = ()
+                else:
+                    clients = ()
+                    deadlines = [
+                        reg.hold_until for reg in ns.records.values()
+                        if reg.held and reg.hold_until is not None
+                    ]
+                    if not ns.owner_active and ns.hold_until is not None:
+                        deadlines.append(ns.hold_until)
+                    if not deadlines:
+                        ns.hold_task = None
+
+            if expired:
+                await self._broadcast_shares(ns)
+            if release:
+                for client in clients:
+                    try:
+                        await client.ws.close(code=1001, message=b"namespace released")
+                    except Exception:
+                        pass
+                return
+            if not deadlines:
+                return
+            await asyncio.sleep(max(0, min(deadlines) - time.monotonic()))
+
     async def _close_namespace(self, namespace, owner):
         with self._lock:
             ns = self._namespaces.get(namespace)
-            if ns is None or ns.owner is not owner or ns.records:
+            if ns is None or ns.owner is not owner:
                 return
+            active_owner_records = any(
+                reg.owner is owner and reg.active and not reg.closed
+                for reg in ns.records.values()
+            )
+            if active_owner_records:
+                return
+
             clients = tuple(ns.clients)
+            task = ns.hold_task
+            ns.hold_task = None
+            for reg in tuple(ns.records.values()):
+                future = reg.reattach_future
+                if future is not None and not future.done():
+                    future.set_result(None)
+                self._remove_registration(reg)
+            for reg in tuple(self._staged_reservations.values()):
+                if reg.namespace != namespace or reg.owner is not owner:
+                    continue
+                future = reg.reattach_future
+                if future is not None and not future.done():
+                    future.set_result(None)
+                self._remove_registration(reg)
+
+            ns.owner_active = False
+            ns.closing = False
+            ns.hold_until = None
+            ns.state_graph = None
+            ns.state_graph_publication = None
+            ns.clients.clear()
+            self._namespaces.pop(namespace, None)
+
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         for client in clients:
             try:
                 await client.ws.close(code=1001, message=b"namespace released")
             except Exception:
                 pass
-        with self._lock:
-            ns = self._namespaces.get(namespace)
-            if ns is not None and ns.owner is owner and not ns.records:
-                ns.clients.clear()
-                self._namespaces.pop(namespace, None)
 
     async def _unregister(self, reg, close_namespace=False):
         with self._lock:
@@ -682,7 +948,7 @@ class ShareServer:
         with self._lock:
             top_reg = self._top_records.get(path)
         if top_reg is not None:
-            if top_reg.active and not top_reg.closed:
+            if (top_reg.active or top_reg.held or top_reg.reattaching) and not top_reg.closed:
                 return await self._serve(request, top_reg)
             return self._json_error(404, "no such share")
         if len(parts) == 1:
@@ -699,7 +965,7 @@ class ShareServer:
             if ns is None:
                 return self._json_error(404, "no such share")
             return await self._serve_state_graph(request, ns)
-        if reg is not None and reg.active and not reg.closed:
+        if reg is not None and (reg.active or reg.held or reg.reattaching) and not reg.closed:
             return await self._serve(request, reg)
         return self._json_error(404, "no such share")
 
@@ -707,12 +973,12 @@ class ShareServer:
         if namespace is None:
             with self._lock:
                 reg = self._top_records.get("index.html")
-            if reg is not None and reg.active and not reg.closed:
+            if reg is not None and (reg.active or reg.held or reg.reattaching) and not reg.closed:
                 return self._response(status=302, headers={"Location": "/index.html"})
         else:
             with self._lock:
                 reg = self._records.get((namespace, "index.html"))
-            if reg is not None and reg.active and not reg.closed:
+            if reg is not None and (reg.active or reg.held or reg.reattaching) and not reg.closed:
                 return self._response(status=302, headers={"Location": f"/{quote(namespace, safe='-._~')}/index.html"})
         return self._json_error(404, "no such share")
 
@@ -764,28 +1030,52 @@ class ShareServer:
             return self._json_error(503, str(exc) or "value resolution failed", headers=headers)
         return self._response(status=200, body=body, headers=headers)
 
+    def _normalize_state_graph_publication(self, ns, publication):
+        marker, digest, body = publication
+        with self._lock:
+            if self._namespaces.get(ns.name) is not ns:
+                return publication
+            previous = ns.state_graph_publication
+            if previous is None:
+                normalized = (marker, digest, body)
+            elif previous[1] == digest:
+                normalized = (previous[0], digest, body)
+            else:
+                normalized = (previous[0] + 1, digest, body)
+            ns.state_graph_publication = normalized
+            return normalized
+
     async def _serve_state_graph(self, request, ns):
         if request.method == "PUT":
             return self._response(
                 status=405, headers={"Allow": "GET, HEAD, OPTIONS"}
             )
-        provider = ns.state_graph
-        if provider is None:
-            return self._json_error(404, "no such share")
-        try:
-            loop = asyncio.get_running_loop()
-            future = loop.run_in_executor(
-                self._executor, provider, self.get_timeout, False
-            )
-            publication = await asyncio.wait_for(
-                asyncio.shield(future), timeout=self.get_timeout
-            )
-        except asyncio.TimeoutError:
-            return self._json_error(503, "state graph request timed out")
-        except Exception as exc:
-            return self._json_error(
-                503, str(exc) or "state graph request failed"
-            )
+        with self._lock:
+            provider = ns.state_graph
+            cached = ns.state_graph_publication
+            closing = ns.closing or not ns.owner_active or ns.hold_until is not None
+        publication = None
+        if provider is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                future = loop.run_in_executor(
+                    self._executor, provider, self.get_timeout, False
+                )
+                publication = await asyncio.wait_for(
+                    asyncio.shield(future), timeout=self.get_timeout
+                )
+            except asyncio.TimeoutError:
+                if not closing:
+                    return self._json_error(503, "state graph request timed out")
+            except Exception as exc:
+                if not closing:
+                    return self._json_error(
+                        503, str(exc) or "state graph request failed"
+                    )
+        if publication is not None:
+            publication = self._normalize_state_graph_publication(ns, publication)
+        elif closing:
+            publication = cached
         if publication is None:
             return self._json_error(404, "no such share")
         marker, digest, body = publication
@@ -818,6 +1108,23 @@ class ShareServer:
         }
 
     async def _put(self, request, reg):
+        with self._lock:
+            ns = self._namespaces.get(reg.namespace)
+            must_wait = reg.held or reg.reattaching or (ns is not None and ns.closing)
+            reattach_future = reg.reattach_future
+            if must_wait and reattach_future is None:
+                reattach_future = asyncio.get_running_loop().create_future()
+                reg.reattach_future = reattach_future
+        if must_wait:
+            try:
+                replacement = await asyncio.wait_for(
+                    asyncio.shield(reattach_future), timeout=self.put_timeout
+                )
+            except asyncio.TimeoutError:
+                return self._json_error(503, "share re-attach timed out")
+            if replacement is None:
+                return self._json_error(404, "no such share")
+            return await self._put(request, replacement)
         if getattr(reg.spec, "readonly", False):
             return self._response(status=405, headers={"Allow": "GET, HEAD"})
         mode = request.query.get("mode")
@@ -970,7 +1277,7 @@ class ShareServer:
             items = tuple(ns.records.items())
         result = {}
         for key, reg in items:
-            if reg.closed or not reg.active:
+            if reg.closed or not (reg.active or reg.held or reg.reattaching):
                 continue
             result[key] = {
                 "url": reg.route,
@@ -1013,27 +1320,35 @@ class ShareServer:
             with self._lock:
                 namespaces = tuple(
                     ns for ns in self._namespaces.values()
-                    if ns.state_graph is not None and ns.clients
+                    if (ns.state_graph is not None
+                        or ns.state_graph_publication is not None)
+                    and ns.clients
                 )
             for ns in namespaces:
                 await self._state_graph_tick(ns)
 
     async def _state_graph_tick(self, ns):
         with self._lock:
-            if (self._namespaces.get(ns.name) is not ns
-                    or ns.state_graph is None or not ns.clients):
+            if self._namespaces.get(ns.name) is not ns or not ns.clients:
                 return
             provider = ns.state_graph
-        try:
-            loop = asyncio.get_running_loop()
-            future = loop.run_in_executor(
-                self._executor, provider, self.get_timeout, True
-            )
-            publication = await asyncio.wait_for(
-                asyncio.shield(future), timeout=self.get_timeout
-            )
-        except Exception:
-            return
+            publication = ns.state_graph_publication
+            closing = ns.closing or not ns.owner_active or ns.hold_until is not None
+        if provider is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                future = loop.run_in_executor(
+                    self._executor, provider, self.get_timeout, True
+                )
+                fresh = await asyncio.wait_for(
+                    asyncio.shield(future), timeout=self.get_timeout
+                )
+            except Exception:
+                fresh = None
+            if fresh is not None:
+                publication = self._normalize_state_graph_publication(ns, fresh)
+            elif not closing:
+                return
         if publication is None:
             return
         marker, digest, _ = publication
@@ -1099,7 +1414,15 @@ class ShareServer:
             self._state_graph_task.cancel()
             await asyncio.gather(self._state_graph_task, return_exceptions=True)
             self._state_graph_task = None
-        for ns in tuple(self._namespaces.values()):
+        namespaces = tuple(self._namespaces.values())
+        hold_tasks = tuple(
+            ns.hold_task for ns in namespaces if ns.hold_task is not None
+        )
+        for task in hold_tasks:
+            task.cancel()
+        if hold_tasks:
+            await asyncio.gather(*hold_tasks, return_exceptions=True)
+        for ns in namespaces:
             for client in tuple(ns.clients):
                 try:
                     await client.ws.close(code=1001, message=b"server closed")
@@ -1124,13 +1447,15 @@ class ShareServer:
         with self._lock:
             registrations = tuple(
                 reg for reg in (*self._top_records.values(), *self._records.values())
-                if reg.active and not reg.closed and not reg.staged
+                if (reg.active or reg.held or reg.reattaching)
+                and not reg.closed and not reg.staged
                 and (namespace is None or reg.namespace == namespace)
                 and (owner is None or reg.owner is owner)
             )
             namespaces = tuple(
                 ns.name for ns in self._namespaces.values()
-                if ns.state_graph is not None
+                if (ns.state_graph is not None or ns.state_graph_publication is not None
+                    or ns.closing or ns.hold_until is not None)
                 and (namespace is None or ns.name == namespace)
                 and (owner is None or ns.owner is owner)
             )

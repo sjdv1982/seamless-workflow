@@ -307,6 +307,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 shares._lock.acquire()
             try:
                 self._closing = True
+                if shares is not None:
+                    shares._begin_close_namespace()
                 controller.begin_close().result()
                 import time
                 bound = 60 if timeout is None else timeout
@@ -316,20 +318,23 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 except TimeoutError:
                     import logging
                     logging.getLogger(__name__).warning('Context mount close flush timed out')
-                cleanups = controller.enqueue('_mount_close_finish', klass=1, internal=True).result()
+                cleanups = controller.enqueue(
+                    '_mount_close_finish', kwargs={"hold_shares": True},
+                    klass=1, internal=True,
+                ).result()
                 for cleanup in cleanups:
                     if cleanup is not None:
                         try: cleanup.result(max(0, deadline - time.monotonic()))
                         except TimeoutError: pass
+                self._side.close()
+                controller.enqueue("_finish_close", klass=1, internal=True).result()
+                controller.stop()
+                self._closed_event.set()
                 if shares is not None:
                     try:
                         shares._close_namespace(max(0, deadline - time.monotonic()))
                     except TimeoutError:
                         pass
-                self._side.close()
-                controller.enqueue("_finish_close", klass=1, internal=True).result()
-                controller.stop()
-                self._closed_event.set()
             finally:
                 if shares is not None:
                     shares._lock.release()

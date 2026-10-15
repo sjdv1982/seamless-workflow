@@ -56,8 +56,8 @@ class ShareDriver:
         ))
         return future
 
-    def activate(self, registration):
-        return registration.server.activate(registration)
+    def activate(self, registration, ready=None):
+        return registration.server.activate(registration, ready=ready)
 
     def deliver(self, registration, delivery):
         return registration.server.deliver(registration, delivery)
@@ -69,10 +69,26 @@ class ShareDriver:
         return registration.server.poll(registration)
 
     def unregister(self, registration, *, delete=False, expected=None,
-                   close_namespace=False):
+                   close_namespace=False, hold=False):
         return registration.server.unregister(
-            registration, close_namespace=close_namespace
+            registration, close_namespace=close_namespace, hold=hold
         )
+
+    def begin_close_namespace(self):
+        server = self.server or server_module.get_server_if_started()
+        if server is None:
+            future = Future()
+            future.set_result(None)
+            return future
+        return server.begin_close_namespace(self.namespace, self.owner)
+
+    def hold_namespace(self):
+        server = self.server or server_module.get_server_if_started()
+        if server is None:
+            future = Future()
+            future.set_result(None)
+            return future
+        return server.hold_namespace(self.namespace, self.owner)
 
     def release_namespace(self):
         server = self.server or server_module.get_server_if_started()

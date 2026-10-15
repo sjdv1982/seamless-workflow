@@ -159,7 +159,14 @@ class AttachmentRuntime:
             if spec.mode == 'rw' and observation.needs_canonical_write and action in {'sense', 'nothing'}:
                 self._mount_request(session, observation.checksum if action == 'sense' else checksum, force=True)
             if action != 'write' and session.pending is None: session.initial.set_result(None)
-            self._effects.append(lambda: registration.service.activate(registration))
+            if spec.driver == 'share':
+                self._effects.append(
+                    lambda: registration.service.activate(
+                        registration, ready=session.initial
+                    )
+                )
+            else:
+                self._effects.append(lambda: registration.service.activate(registration))
             self._mount_event(session, 'attach', action=action)
             self._derive_all()
             return session.initial
@@ -454,7 +461,7 @@ class AttachmentRuntime:
         if 'w' in session.spec.mode and node.state == 'complete' and node.current_checksum:
             self._mount_request(session, node.current_checksum.hex())
 
-    def _mount_detach(self, path, driver='file', registration=None, *, delete=True, derive=True):
+    def _mount_detach(self, path, driver='file', registration=None, *, delete=True, derive=True, hold=False):
         path = tuple(path)
         if registration is not None:
             driver = registration.spec.driver
@@ -477,8 +484,16 @@ class AttachmentRuntime:
                 node.mount_inactive = False
             else:
                 node.attachments.pop(driver, None)
-        future = session.registration.service.unregister(session.registration,
-                    delete=delete and not session.spec.persistent, expected=session.fingerprint)
+        if driver == 'share' and hold:
+            future = session.registration.service.unregister(
+                session.registration, hold=True
+            )
+        else:
+            future = session.registration.service.unregister(
+                session.registration,
+                delete=delete and not session.spec.persistent,
+                expected=session.fingerprint,
+            )
         delivery_timeout = getattr(session.registration.service, 'delivery_timeout', None)
         if future is not None and delivery_timeout is not None:
             future.delivery_timeout = delivery_timeout
@@ -507,7 +522,8 @@ class AttachmentRuntime:
         self._mount_wake_timer = None
         self._mount_wake_deadline = None
         for session in self._mount_sessions.values():
-            session.registration.active = False
+            if session.spec.driver != 'share':
+                session.registration.active = False
             if session.spec.persistent and not session.error: self._mount_dispatch(session)
         effects, self._effects = self._effects, []
         for effect in effects: effect()
@@ -522,10 +538,15 @@ class AttachmentRuntime:
     def _mount_close_busy(self):
         return any(s.in_flight or (s.pending and not s.error and s.spec.persistent) for s in self._mount_sessions.values())
 
-    def _mount_close_finish(self):
+    def _mount_close_finish(self, hold_shares=False):
         futures = []
         for path, driver in tuple(self._mount_sessions):
-            future = self._mount_detach(path, driver=driver, derive=False)
+            future = self._mount_detach(
+                path,
+                driver=driver,
+                derive=False,
+                hold=hold_shares and driver == 'share',
+            )
             if future is not None:
                 futures.append(future)
         return futures
