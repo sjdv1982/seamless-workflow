@@ -29,6 +29,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 
+[project.scripts]
+seamless-serve-graph = "seamless_workflow.serve_graph:main"
+
 [project.optional-dependencies]
 dev = ["pytest"]
 
