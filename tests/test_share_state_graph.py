@@ -8,8 +8,9 @@ import pytest
 import requests
 
 from seamless import Cell
+from seamless_workflow import Context
 from seamless_workflow.diagnostics import record_turns
-from test_contract_shares import ctx, server, get, updates, fail_negative
+from test_contract_shares import ctx, server, short_hold_server, get, updates, fail_negative
 from test_share_transport import Spec, Sink, server as transport_server, attach, deliver
 
 
@@ -73,10 +74,10 @@ def test_state_graph_notifications_coalesce(transport_server):
         assert receive('state-graph', timeout=1.2) == ['state-graph', [current[0][1], 1]]
         with pytest.raises(queue.Empty):
             receive('state-graph', timeout=0.65)
-        # All intermediate states fit inside one ticker interval.
+        # Provider revisions 2–9 coalesce into one changed publication.
         for marker in range(2, 10):
             current[0] = publication(marker, str(marker))
-        assert receive('state-graph', timeout=1.2) == ['state-graph', [current[0][1], 9]]
+        assert receive('state-graph', timeout=1.2) == ['state-graph', [current[0][1], 2]]
         with pytest.raises(queue.Empty):
             receive('state-graph', timeout=0.65)
 
@@ -146,14 +147,20 @@ def test_state_graph_burst_builds_at_most_once_per_interval(ctx, monkeypatch):
     assert all(b - a >= 0.49 for a, b in zip(builds, builds[1:])), builds
 
 
-def test_state_graph_context_close(ctx):
-    ctx.a = Cell('int'); ctx.a.set(1)
-    url = graph_url(ctx)
-    with updates(url.rsplit('/', 1)[0]) as receive:
-        receive('state-graph', timeout=1.2)
+def test_state_graph_context_close(short_hold_server):
+    ctx = Context()
+    try:
+        ctx.shares.namespace = "state-graph-close"
+        ctx.a = Cell('int'); ctx.a.set(1)
+        url = graph_url(ctx)
+        with updates(ctx.shares.url) as receive:
+            receive('state-graph', timeout=1.2)
+            ctx.close()
+            assert get(url).status_code == 200
+            assert receive('closed', timeout=5) == ('closed', 1001)
+            assert get(url).status_code == 404
+    finally:
         ctx.close()
-        assert get(url).status_code == 404
-        assert receive('closed') == ('closed', 1001)
 
 
 def test_state_graph_300_node_publish_budget(ctx):

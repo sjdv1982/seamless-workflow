@@ -35,6 +35,17 @@ def server():
 
 
 @pytest.fixture
+def short_hold_server(server):
+    """Give close-hold lifecycle tests a brief, isolated expiry window."""
+    from seamless_workflow import shareserver
+    shareserver.close()
+    shareserver.configure(host="127.0.0.1", port=0, hold_timeout=0.3)
+    yield shareserver
+    shareserver.close()
+    shareserver.configure(host="127.0.0.1", port=0)
+
+
+@pytest.fixture
 def ctx(server):
     with Context() as context:
         yield context
@@ -182,6 +193,7 @@ with socket.socket() as occupied:
     @pytest.mark.parametrize("readonly", [True, False])
     def test_initial_empty_cell(self, ctx, readonly):
         """The initial decision: empty read-only absent; writable installs null."""
+        ctx.shares.namespace = f"initial-empty-cell-{readonly}"
         ctx.a = Cell(celltype="int")
         ctx.a.share(readonly=readonly)
         response = get(ctx.a.share.url)
@@ -475,19 +487,24 @@ with socket.socket() as occupied:
             else:
                 assert snapshot["marker"] == marker(served)
 
-    def test_context_close_removes_urls_and_closes_websocket(self, ctx, server):
-        """Lifecycle; Websocket: close removes URLs and sends close code 1001."""
-        cell(ctx).share()
-        url = ctx.a.share.url
-        with updates(ctx.shares.url) as receive:
-            receive("shares")
+    def test_context_close_removes_urls_and_closes_websocket(self, short_hold_server):
+        """A closed Context keeps its routes and websocket through the hold window."""
+        ctx = Context()
+        try:
+            cell(ctx).share()
+            url = ctx.a.share.url
+            with updates(ctx.shares.url) as receive:
+                receive("shares")
+                ctx.close()
+                assert get(url).status_code == 200
+                assert receive("closed", timeout=5) == ("closed", 1001)
+                assert get(url).status_code == 404
+            with Context() as other:
+                cell(other).share()
+                assert get(other.a.share.url).status_code == 200
+            assert get(short_hold_server.url + "/absent").status_code == 404
+        finally:
             ctx.close()
-            assert receive("closed")[1] == 1001
-        assert get(url).status_code == 404
-        with Context() as other:
-            cell(other).share()
-            assert get(other.a.share.url).status_code == 200
-        assert get(server.url + "/absent").status_code == 404
 
     def test_node_delete_and_graph_replace_detach(self, ctx):
         """Lifecycle: deleting a node and replacing its graph remove its URL."""
@@ -909,6 +926,7 @@ with Context() as ctx:
 
     def test_readonly_empty_then_null(self, ctx):
         """Initial decision; Cell to share: no value followed by null becomes 204."""
+        ctx.shares.namespace = "readonly-empty-then-null"
         ctx.a = Cell(celltype="int")
         ctx.a.share()
         assert get(ctx.a.share.url).status_code == 404
@@ -1129,28 +1147,45 @@ class TestSharePersistenceAudit:
                 ctx.set_graph(graph, shares=enabled)
             assert ctx.get_graph() == before
 
-    def test_graph_replacement_releases_old_claim_and_holds_new_record(self, ctx):
-        """Record; Graph serialization: graph swap transfers served checksum claims."""
+    def test_graph_replacement_releases_old_claim_and_holds_new_record(self, short_hold_server):
+        """Graph replacement drops the old claim; close holds the new record temporarily."""
         from seamless.caching.buffer_cache import get_buffer_cache
         cache = get_buffer_cache()
-        cell(ctx, "before-persistence-swap", "text").share()
-        old = ctx.a.checksum
-        url = ctx.a.share.url
-        before_marker = marker(get(url))
-        with Context() as source:
-            cell(source, "after-persistence-swap", "text")
-            graph = source.get_graph()
-        graph["nodes"][0]["share"] = {"path": "a", "readonly": True, "mimetype": None, "toplevel": False}
-        ctx.set_graph(graph)
-        new = ctx.a.checksum
-        response = get(url)
-        assert response.content == ctx.a.buffer.content
-        assert response.content == Buffer("after-persistence-swap", "text").content
-        assert marker(response) > before_marker
-        assert cache.reference_snapshot().get(old, (0, 0, False))[0] == 0
-        assert cache.reference_snapshot().get(new, (0, 0, False))[0] > 0
-        ctx.close()
-        assert cache.reference_snapshot().get(new, (0, 0, False))[0] == 0
+        ctx = Context()
+        try:
+            cell(ctx, "before-persistence-swap", "text").share()
+            old = ctx.a.checksum
+            url = ctx.a.share.url
+            before_marker = marker(get(url))
+            with Context() as source:
+                cell(source, "after-persistence-swap", "text")
+                graph = source.get_graph()
+            graph["nodes"][0]["share"] = {"path": "a", "readonly": True, "mimetype": None, "toplevel": False}
+            ctx.set_graph(graph)
+            new = ctx.a.checksum
+            response = get(url)
+            assert response.content == ctx.a.buffer.content
+            assert response.content == Buffer("after-persistence-swap", "text").content
+            assert marker(response) > before_marker
+            assert cache.reference_snapshot().get(old, (0, 0, False))[0] == 0
+            assert cache.reference_snapshot().get(new, (0, 0, False))[0] > 0
+
+            ctx.close()
+            held = get(url)
+            assert held.status_code == 200
+            assert held.content == Buffer("after-persistence-swap", "text").content
+            assert cache.reference_snapshot().get(new, (0, 0, False))[0] > 0
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                new_claims = cache.reference_snapshot().get(new, (0, 0, False))[0]
+                if get(url).status_code == 404 and new_claims == 0:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("closed graph record and checksum claim remained after the hold window")
+        finally:
+            ctx.close()
 
     def test_failed_bind_graph_load_preserves_old_graph_and_allows_retry(self):
         """Graph serialization; Server: bind failure cannot replace the current graph."""
