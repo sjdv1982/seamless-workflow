@@ -260,12 +260,12 @@ assert.equal(ctx.a.readonly,false);
             server.close()
 
 
-def test_wheel_contains_client_and_optional_share_extra(tmp_path):
-    """Packaging: share extra supplies aiohttp and wheel includes static browser client."""
+def test_wheel_contains_client_and_base_share_dependencies(tmp_path):
+    """Packaging: base share dependencies and wheel include the static browser client."""
     config=tomllib.loads((ROOT/'pyproject.toml').read_text())
-    extra=config['project']['optional-dependencies']['share']
-    assert any(requirement.lower().startswith('aiohttp') for requirement in extra)
-    assert not any(requirement.lower().startswith('aiohttp') for requirement in config['project']['dependencies'])
+    dependencies=config['project']['dependencies']
+    assert any(requirement.lower().startswith('aiohttp>=3.9') for requirement in dependencies)
+    assert 'share' not in config['project']['optional-dependencies']
     isolated=tmp_path/'source'
     isolated.mkdir()
     for name in ('pyproject.toml','README.md'):
@@ -279,8 +279,14 @@ def test_wheel_contains_client_and_optional_share_extra(tmp_path):
         path='seamless_workflow/attachments/share/static/seamless-client.js'
         assert archive.read(path)==CLIENT.read_bytes()
         metadata=archive.read(next(name for name in archive.namelist() if name.endswith('.dist-info/METADATA'))).decode()
-        assert 'Provides-Extra: share' in metadata
-        assert any('aiohttp' in line.lower() and 'share' in line for line in metadata.splitlines() if line.startswith('Requires-Dist:'))
+        requirements=[
+            line.split(':',1)[1].strip().lower()
+            for line in metadata.splitlines()
+            if line.startswith('Requires-Dist:')
+        ]
+        assert 'Provides-Extra: share' not in metadata
+        assert any(requirement.startswith('aiohttp>=3.9') and ';' not in requirement
+                   for requirement in requirements)
 
 
 class TestShareClientJSRaces:

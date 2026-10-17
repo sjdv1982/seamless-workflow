@@ -14,6 +14,8 @@ from test_contract_shares import get
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples/share-sliders"
+WORKFLOW_SOURCE = EXAMPLE.parents[1]
+CORE_SOURCE = WORKFLOW_SOURCE.parent / "seamless-core"
 
 
 def wait_python(predicate, timeout=15):
@@ -136,6 +138,11 @@ def test_notebook_mounted_page_resolves_from_any_working_directory(tmp_path):
             if not any(isinstance(n, ast.Name) and n.id == "ctx" for n in ast.walk(statement.value)):
                 setup.append(statement)
     script = ast.unparse(ast.Module(body=setup, type_ignores=[]))
+    script = (
+        "import sys\n"
+        f"sys.path[:0] = {[str(WORKFLOW_SOURCE), str(CORE_SOURCE)]!r}\n"
+        + script
+    )
     script += "\nfrom pathlib import Path\npage = Path(" + ast.unparse(mount.args[0]) + ").resolve()\n"
     script += "assert page.is_file(), str(page)\nassert page == Path(" + repr(str(EXAMPLE / "index.html")) + ")\n"
     for cwd in (EXAMPLE.parents[1], EXAMPLE.parent, EXAMPLE.parents[2], tmp_path):
