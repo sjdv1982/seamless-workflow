@@ -542,7 +542,9 @@ def test_the_cascade_rederives_rather_than_force_sets(make_context):
 def test_quiescence_ignores_a_superseded_run_still_in_flight(make_context):
     """§Equilibrium: quiescent != cluster-idle; prune makes them coincide."""
     ctx = make_context()
+    # Let the replacement finish while the superseded body is still running.
     ctx.s = sleepy
+    ctx.s.process_lock = False
     ctx.s.pins.x = 3
     wait_started(ctx, "s")
 

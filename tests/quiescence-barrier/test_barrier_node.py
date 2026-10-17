@@ -111,12 +111,15 @@ def test_a_node_barrier_waits_only_for_its_own_cone():
     """
 
     ctx = Context()
+    # This test isolates barrier scope from the default process-wide body lock.
     ctx.slow = slow_add
+    ctx.slow.process_lock = False
     ctx.slow.pins.x = 1
     ctx.slow.pins.y = 2
     ctx.slow.pins.delay = SHORT_BODY_SECONDS * 2
 
     ctx.fast = slow_add
+    ctx.fast.process_lock = False
     ctx.fast.pins.x = 3
     ctx.fast.pins.y = 4
     ctx.fast.pins.delay = 0

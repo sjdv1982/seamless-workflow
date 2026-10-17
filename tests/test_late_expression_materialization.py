@@ -3,7 +3,7 @@
 import asyncio
 import threading
 
-from seamless.checksum import expression as expression_mod
+import seamless_workflow.context as context_mod
 from seamless_workflow import Context
 
 
@@ -17,7 +17,7 @@ def test_expression_result_arriving_after_supersession_does_not_reach_node(
     release = threading.Event()
     delivered = threading.Event()
     accepted = threading.Event()
-    original_evaluate = expression_mod.evaluate_expression_placed
+    original_evaluate = context_mod.evaluate_expression_placed
     original_accept = Context._accept_fact
 
     async def delayed_result(checksum, path, *args, **kwargs):
@@ -42,7 +42,7 @@ def test_expression_result_arriving_after_supersession_does_not_reach_node(
                     and key[1] == old_checksum.hex() and delivered.is_set()):
                 accepted.set()
 
-    monkeypatch.setattr(expression_mod, "evaluate_expression_placed", delayed_result)
+    monkeypatch.setattr(context_mod, "evaluate_expression_placed", delayed_result)
     monkeypatch.setattr(Context, "_accept_fact", observe_accept)
     try:
         ctx.projected = ctx.source["value"]
