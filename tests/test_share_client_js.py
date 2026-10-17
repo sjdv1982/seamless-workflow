@@ -20,6 +20,18 @@ from test_contract_shares import get
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "seamless_workflow/attachments/share/static/seamless-client.js"
 NODE = shutil.which("node")
+NODE_HAS_WEBSOCKET = False
+if NODE is not None:
+    websocket_probe = subprocess.run(
+        [
+            NODE,
+            "-e",
+            "try { const Impl = globalThis.WebSocket || require('ws'); if (typeof Impl !== 'function') process.exit(1); } catch { process.exit(1); }",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    NODE_HAS_WEBSOCKET = websocket_probe.returncode == 0
 
 
 PRELUDE = r'''
@@ -36,7 +48,10 @@ const wait = async (predicate, message='condition timed out') => {
 };
 global.window = {location: {origin: 'http://example.test:5813', protocol: 'http:', hostname: 'example.test', host: 'example.test:5813', port: '5813', href: 'http://example.test:5813/page.html'}};
 global.location = window.location;
-window.WebSocket=global.WebSocket; window.fetch=global.fetch; window.Blob=global.Blob;
+if (typeof globalThis.WebSocket !== 'function') {
+  try { globalThis.WebSocket = require('ws'); } catch {}
+}
+window.WebSocket=globalThis.WebSocket; window.fetch=global.fetch; window.Blob=global.Blob;
 const loadClient = () => vm.runInThisContext(fs.readFileSync(process.argv[2], 'utf8'), {filename: process.argv[2]});
 '''
 
@@ -217,6 +232,10 @@ await new Promise(resolve=>realSetTimeout(resolve,25));
 assert.equal(ctx.a.value,'new');assert.equal(ctx.a.marker,2);
 ''')
 
+    @pytest.mark.skipif(
+        not NODE_HAS_WEBSOCKET,
+        reason="real-server case requires Node.js WebSocket support (global WebSocket or the 'ws' module)",
+    )
     def test_real_server_text_put_and_change_callback(self):
         """seamless-client.js: native Node fetch/WebSocket against the real one-port server."""
         from seamless_workflow.attachments.share.server import ShareServer
