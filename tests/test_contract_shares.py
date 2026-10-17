@@ -681,7 +681,7 @@ class TestSharePersistence:
 
 class TestShareOpenAPI:
     @pytest.mark.parametrize("celltype,value,schema", [("int", 1, {"type": "integer"}), ("float", 1.5, {"type": "number"}), ("bool", True, {"type": "boolean"}), ("str", "a", {"type": "string"}), ("plain", {}, {}), ("text", "a", {"type": "string"})])
-    def test_live_document_schema_and_readonly(self, ctx, server, celltype, value, schema):
+    def test_live_document_schema_and_readonly(self, short_hold_server, ctx, server, celltype, value, schema):
         """openapi.json: live OpenAPI 3.1, cell schema, operation extensions."""
         cell(ctx, value, celltype).share()
         document = get(server.url + "/openapi.json").json()
@@ -698,7 +698,7 @@ class TestShareOpenAPI:
         del ctx.a.share
         assert "/ctx/a" not in server.openapi()["paths"]
 
-    def test_writable_statuses_scope_and_no_graph_leak(self, ctx, server):
+    def test_writable_statuses_scope_and_no_graph_leak(self, short_hold_server, ctx, server):
         """openapi.json: status codes, Context restriction, no unshared value routes."""
         cell(ctx).share(readonly=False)
         cell(ctx, 2, name="hidden")
