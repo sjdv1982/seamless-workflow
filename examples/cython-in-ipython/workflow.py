@@ -1,5 +1,6 @@
 """Mounted Cython annotation demo, ported from legacy injection4.py."""
 
+import re
 from pathlib import Path
 
 import seamless
@@ -7,9 +8,7 @@ from seamless.workflow import Cell, Context
 
 
 def run_ipython(ipy: str, i: int):
-    """Compile the IPython cells, retain their HTML, and time func(i)."""
-    from time import perf_counter
-
+    """Compile the IPython cells and retain their HTML."""
     from IPython.core.interactiveshell import InteractiveShell
 
     # A separate shell keeps edited definitions and output history isolated.
@@ -25,10 +24,8 @@ def run_ipython(ipy: str, i: int):
                 shell.user_ns["_"] = execution.result
         func = shell.user_ns["func"]
         html = shell.user_ns["func_html"]
-        start = perf_counter()
         value = func(i)
-        elapsed = perf_counter() - start
-        return {"value": value, "html": html, "seconds": elapsed}
+        return {"value": value, "html": html}
     finally:
         shell.reset(new_session=False)
 
@@ -53,8 +50,6 @@ def build(directory=None, i=100):
         ctx.tf.pins.i = ctx.i
         ctx.result = Cell("float")
         ctx.result = ctx.tf.result["value"].as_celltype("float")
-        ctx.seconds = Cell("float")
-        ctx.seconds = ctx.tf.result["seconds"].as_celltype("float")
         ctx.html = Cell("text")
         ctx.html = ctx.tf.result["html"].as_celltype("text")
         ctx.html.mount(directory / "cell-ipython.html", mode="w")
@@ -74,7 +69,19 @@ def main():
             if ctx.tf.exception:
                 print(ctx.tf.exception)
             else:
-                print(f"result: {ctx.result.value}; func time: {ctx.seconds.value:.6f}s")
+                logs = ctx.tf.logs or ""
+                match = re.search(
+                    r"^Execution time: ([0-9.]+) seconds$",
+                    logs,
+                    re.MULTILINE,
+                )
+                transformer_time = (
+                    f"{match.group(1)}s" if match else "unavailable"
+                )
+                print(
+                    f"result: {ctx.result.value}; "
+                    f"transformer time: {transformer_time}"
+                )
                 print(f"HTML: {Path(__file__).with_name('cell-ipython.html')}")
             input("Edit cell-ipython.ipy, then press Enter to synchronize (Ctrl-C to stop): ")
     except (EOFError, KeyboardInterrupt):

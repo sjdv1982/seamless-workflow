@@ -15,7 +15,8 @@ Requires IPython, Cython, setuptools, and a C compiler. Open the generated
 `cell-ipython.html` in a browser and edit the mounted `cell-ipython.ipy`.
 Copy either snapshot over it, or interpolate between them. Press Enter to wait
 for graph computation and filesystem delivery and print the current result and
-function timing. Edits are sensed automatically while the Context is alive.
+transformer execution time from its logs. Edits are sensed automatically while
+the Context is alive.
 
 For an interactive IPython session:
 
@@ -24,7 +25,7 @@ from workflow import build
 ctx = build(i=6000)
 ctx.compute()
 ctx.mounts.sync(timeout=120)
-ctx.result.value, ctx.seconds.value
+ctx.result.value, ctx.tf.logs
 # Edit cell-ipython.ipy, then synchronize before reading the output file.
 ctx.mounts.sync(timeout=120)
 ctx.compute()
@@ -37,11 +38,12 @@ seamless.close()
 
 Modern Seamless accepts Python and Bash transformers. This example executes the
 IPython source in a fresh `InteractiveShell` inside a Python transformer, then
-projects its result, HTML, and timing into separate cells. It does not use the
-legacy interpreted IPython module injection. Blank lines delimit the code cells
-in these `.ipy` files; keep the Cython block together when editing it.
-
-`ctx.seconds` measures only `func(i)`. It is diagnostic data saved with the
-transformation result: a cache hit restores the old timing without rerunning
-the function. Compilation and mount synchronization are excluded. See
-[PROBE-RESULTS.md](PROBE-RESULTS.md) for independently measured wall times.
+projects its result and HTML into separate cells. The transformer's `logs`
+property includes an `Execution time` line. It reports the whole transformer
+wall time, including shell setup and Cython compilation; mount synchronization
+is outside the transformation and is excluded. A cache hit returns the log from
+the cached transformation. The reported time is rounded to tenths of a second.
+This example does not use the legacy interpreted IPython module injection.
+Blank lines delimit the code cells in these `.ipy` files; keep the Cython block
+together when editing it. See [PROBE-RESULTS.md](PROBE-RESULTS.md) for
+independently measured wall times.
