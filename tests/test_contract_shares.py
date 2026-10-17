@@ -1337,7 +1337,7 @@ class TestSharePersistenceRollback:
             release.set()
             object.__setattr__(ctx, "_close_lock", close_lock)
 
-    def test_staged_toplevel_load_blocks_foreign_toplevel_namespace_claim(self, ctx, monkeypatch):
+    def test_staged_toplevel_load_blocks_foreign_toplevel_namespace_claim(self, short_hold_server, ctx, monkeypatch):
         """Graph serialization; URL space: staged top-level names reserve namespace space."""
         from concurrent.futures import ThreadPoolExecutor
         from seamless_workflow.attachments.share.driver import ShareDriver
@@ -1368,7 +1368,18 @@ class TestSharePersistenceRollback:
                 loading.result(timeout=10)
             assert get(ctx.a.share.url).json() == 1
             ctx.close()
-            other.a.share("bar", toplevel=True)
+            with pytest.raises(ValueError):
+                other.a.share("bar", toplevel=True)
+            assert other.a.share.spec is None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    other.a.share("bar", toplevel=True)
+                    break
+                except ValueError:
+                    time.sleep(0.05)
+            else:
+                pytest.fail("held top-level namespace claim did not expire")
             assert get(other.a.share.url).json() == 5
 
 
@@ -1440,7 +1451,7 @@ class TestShareOpenAPIAudit:
         assert "checksum" in item["put"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
         assert "marker" in item["put"]["responses"]["409"]["content"]["application/json"]["schema"]["properties"]
 
-    def test_live_alias_path_node_extensions_and_no_graph_leak(self, ctx, server):
+    def test_live_alias_path_node_extensions_and_no_graph_leak(self, short_hold_server, ctx):
         """openapi.json: URLs follow alias keys; extensions identify actual nodes."""
         cell(ctx, name="actual").share("alias")
         cell(ctx, 2, name="hidden")
@@ -1456,11 +1467,11 @@ class TestShareOpenAPIAudit:
         assert "websocket" in document["info"]["description"].lower()
         assert document["x-seamless-updates"] == {"ctx": "/ctx"}
         cell(ctx, 3, name="new").share("top", toplevel=True)
-        assert set(server.openapi()["paths"]) == {"/ctx/alias", "/top", "/ctx/state-graph"}
+        assert set(short_hold_server.openapi()["paths"]) == {"/ctx/alias", "/top", "/ctx/state-graph"}
         del ctx.actual.share
         assert set(ctx.shares.openapi()["paths"]) == {"/top", "/ctx/state-graph"}
 
-    def test_openapi_ignores_staged_registry_and_matches_http(self, ctx, server):
+    def test_openapi_ignores_staged_registry_and_matches_http(self, short_hold_server, ctx):
         """openapi.json; Graph serialization: uncommitted reservations are invisible."""
         from seamless_workflow.attachments.share.spec import ShareSpec
         from concurrent.futures import Future
@@ -1474,10 +1485,10 @@ class TestShareOpenAPIAudit:
             return reply
         staged = transport.reserve("staged", ShareSpec("hidden"), "int", "staged-openapi", sink, owner=object(), staged=True)
         try:
-            global_doc = server.openapi()
+            global_doc = short_hold_server.openapi()
             assert "/staged/hidden" not in global_doc["paths"]
             assert set(global_doc["paths"]) == {"/ctx/a", "/ctx/state-graph"}
-            assert get(server.url + "/openapi.json").json() == global_doc
+            assert get(short_hold_server.url + "/openapi.json").json() == global_doc
         finally:
             transport.unregister(staged, close_namespace=True).result(10)
 
@@ -1548,22 +1559,22 @@ class TestShareOpenAPIMetadata:
                 or "null" in schema.get("type", [])
                 or schema.get("nullable") is True)
 
-    def test_returned_schema_mutations_do_not_change_fresh_documents(self, ctx, server):
+    def test_returned_schema_mutations_do_not_change_fresh_documents(self, short_hold_server, ctx):
         """openapi.json: each returned document is independent mutable caller data."""
         cell(ctx).share(readonly=False)
-        baseline = server.openapi()
+        baseline = short_hold_server.openapi()
         mutable = ctx.shares.openapi()
         item = mutable["paths"]["/ctx/a"]
         item["get"]["responses"]["200"]["content"]["application/json"]["schema"]["type"] = "poison"
         item["put"]["responses"]["422"]["content"]["application/json"]["schema"].clear()
         item["put"]["requestBody"]["content"]["application/json"]["schema"].clear()
-        assert server.openapi() == baseline
+        assert short_hold_server.openapi() == baseline
         assert ctx.shares.openapi() == baseline
-        assert get(server.url + "/openapi.json").json() == baseline
-        mutable_global = server.openapi()
+        assert get(short_hold_server.url + "/openapi.json").json() == baseline
+        mutable_global = short_hold_server.openapi()
         mutable_global["paths"].clear()
         mutable_global["x-seamless-updates"].clear()
-        assert server.openapi() == baseline
+        assert short_hold_server.openapi() == baseline
 
 
 class TestShareRuntimeOptionalDependency:
