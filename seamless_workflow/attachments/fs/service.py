@@ -326,11 +326,45 @@ class FileSystemService:
             return await asyncio.wait_for(checksum.resolution(), self.delivery_timeout)
         return asyncio.run(resolve())
 
+    def _directory_leaf_loader(self, reg, relative_paths, checksum):
+        from seamless.checksum.calculate_checksum import calculate_checksum
+
+        def load():
+            if reg.closing or reg.closed:
+                return None
+            for relative in relative_paths:
+                try:
+                    path = os.path.join(reg.path, relative)
+                    absolute_path = os.path.abspath(path)
+                    real_path = os.path.realpath(path)
+                    if (os.path.islink(path) or real_path != absolute_path
+                            or os.path.commonpath((real_path, reg.path)) != reg.path):
+                        continue
+                    content = self._read_bytes(path)
+                except (OSError, ValueError):
+                    continue
+                if calculate_checksum(content) == checksum.hex():
+                    return content
+            return None
+        return load
+
+    def _replace_directory_materializers(self, reg, leaves):
+        from seamless.caching.buffer_cache import get_buffer_cache
+
+        sources = {}
+        for checksum, paths in leaves.items():
+            checksum = Checksum(checksum)
+            sources[checksum] = self._directory_leaf_loader(
+                reg, tuple(paths), checksum
+            )
+        get_buffer_cache().replace_materializers(reg, sources)
+
     def _write_directory(self, reg, delivery, content):
         import json
         index = json.loads(content)
         if index is None:
             if self._fingerprint(reg) != delivery.expected_fingerprint: return False
+            self._replace_directory_materializers(reg, {})
             return True
         if not isinstance(index, dict): raise ValueError('Directory index must be a mapping')
         if len(index) > self.max_files: raise ValueError('Directory file-count limit exceeded')
@@ -347,6 +381,7 @@ class FileSystemService:
                 physical_names[key] = relative
         os.makedirs(reg.path, exist_ok=True)
         total, started = 0, time.monotonic()
+        leaf_sources = {}
         for name, checksum in sorted(index.items()):
             if reg.closed: raise RuntimeError('Directory mount closed during write')
             default_name = name + ('.gz' if name.endswith('.gz') else '.zst' if name.endswith('.zst') else '')
@@ -360,8 +395,10 @@ class FileSystemService:
                 raise ValueError('Directory delivery limit exceeded')
             os.makedirs(os.path.dirname(path), exist_ok=True)
             expected = self._stat(path)
-            if expected is not None and self._read_bytes(path) == data: continue
-            if not self._atomic_write(path, data, expected): raise OSError(f'Directory leaf changed: {name}')
+            if expected is None or self._read_bytes(path) != data:
+                if not self._atomic_write(path, data, expected):
+                    raise OSError(f'Directory leaf changed: {name}')
+            leaf_sources.setdefault(checksum, []).append(os.path.relpath(path, reg.path))
         if reg.spec.mode == 'w' or reg.spec.authority == 'cell':
             for parent, dirs, files in os.walk(reg.path, topdown=False):
                 for name in files:
@@ -373,6 +410,7 @@ class FileSystemService:
                 for name in dirs:
                     try: os.rmdir(os.path.join(parent, name))
                     except OSError: pass
+        self._replace_directory_materializers(reg, leaf_sources)
         return True
 
     def deliver(self, reg, delivery):
@@ -410,6 +448,8 @@ class FileSystemService:
     def unregister(self, reg, *, delete=False, expected=None):
         reg.active = False
         reg.closing = True
+        from seamless.caching.buffer_cache import get_buffer_cache
+        get_buffer_cache().unregister_materializers(reg)
         def cleanup():
             try:
                 with self.lock:
@@ -422,10 +462,16 @@ class FileSystemService:
                     else: self.fs.unlink(reg.path)
             finally:
                 reg.closed = True
-                with self.lock:
-                    self.registrations.discard(reg)
-                    if not any(r.path == reg.path for r in self.registrations):
-                        self.read_locks.pop(reg.path, None)
+                try:
+                    # An in-flight delivery may have replaced the sources after
+                    # unregister() started. The cleanup is serialized behind it,
+                    # so remove its final source map here as well.
+                    get_buffer_cache().unregister_materializers(reg)
+                finally:
+                    with self.lock:
+                        self.registrations.discard(reg)
+                        if not any(r.path == reg.path for r in self.registrations):
+                            self.read_locks.pop(reg.path, None)
         return self._submit(reg, cleanup)
 
     def close(self, timeout=60):

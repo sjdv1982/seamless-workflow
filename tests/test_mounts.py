@@ -312,6 +312,211 @@ def test_directory_compressed_leaf_update(tmp_path):
         assert not (p/'a').exists()
 
 
+def _wait_for_directory_mount_ack(cell, timeout=5):
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = cell.mount.status
+        if (status is not None and status.get('in_sync')
+                and status.get('node_checksum') == cell.checksum.hex()):
+            return status
+        time.sleep(.01)
+    raise AssertionError(f'Directory mount did not acknowledge: {cell.mount.status!r}')
+
+
+def _evict_tempref(cache, checksum):
+    import gc
+    import time
+    entry = cache.strong_cache.get(checksum)
+    assert entry is not None and entry.tempref is not None
+    entry.tempref.last_refreshed = time.time() - 120
+    del entry
+    gc.collect()
+    cache.run_eviction_once()
+    gc.collect()
+    assert cache.get(checksum) is None
+
+
+def test_directory_write_mount_materializes_evicted_leaf(tmp_path, monkeypatch):
+    import asyncio
+    import gc
+    import time
+    from seamless import CacheMissError, Checksum
+    from seamless.caching.buffer_cache import get_buffer_cache
+    from seamless_workflow.attachments.fs.service import FileSystemService
+
+    monkeypatch.setattr(FileSystemService, 'poll_interval', 100)
+    content = b'mounted directory backup leaf ' + str(tmp_path).encode()
+    leaf = Buffer(content)
+    checksum = leaf.get_checksum()
+    leaf.tempref()
+    del leaf
+    cache = get_buffer_cache()
+    path = tmp_path / 'backup'
+
+    with Context() as c:
+        c.source = Cell(celltype='deepfolder')
+        c.source.set({'leaf.pdb': checksum})
+        c.backup = c.source.as_celltype('folder')
+        c.backup.mount(path, mode='w')
+        _wait_for_directory_mount_ack(c.backup)
+
+        assert (path / 'leaf.pdb').read_bytes() == content
+        assert cache.get(checksum) is not None
+        assert cache.reference_snapshot().get(checksum, (0, 0, False))[0] == 0
+        _evict_tempref(cache, checksum)
+        assert Checksum(checksum).resolve().content == content
+
+        # Checksum.resolution uses the same mounted backup after the sync path
+        # has materialized and released its temporary Buffer.
+        gc.collect()
+        assert cache.get(checksum) is None
+        async_buffer = asyncio.run(Checksum(checksum).resolution())
+        assert async_buffer.content == content
+        del async_buffer
+        gc.collect()
+        assert cache.get(checksum) is None
+
+        del c.backup.mount
+        with pytest.raises(CacheMissError):
+            Checksum(checksum).resolve()
+
+
+@pytest.mark.parametrize('damage', ['changed', 'deleted'])
+def test_directory_materializer_rejects_stale_leaf(tmp_path, monkeypatch, damage):
+    import gc
+    from seamless import Buffer, CacheMissError, Cell, Checksum
+    from seamless.caching.buffer_cache import get_buffer_cache
+    from seamless_workflow.attachments.fs.service import FileSystemService
+
+    monkeypatch.setattr(FileSystemService, 'poll_interval', 100)
+    content = b'mounted directory stale leaf ' + damage.encode() + str(tmp_path).encode()
+    leaf = Buffer(content)
+    checksum = leaf.get_checksum()
+    leaf.tempref()
+    del leaf
+    cache = get_buffer_cache()
+    path = tmp_path / 'backup'
+
+    with Context() as c:
+        c.source = Cell(celltype='deepfolder')
+        c.source.set({'leaf.pdb': checksum})
+        c.backup = c.source.as_celltype('folder')
+        c.backup.mount(path, mode='w')
+        _wait_for_directory_mount_ack(c.backup)
+
+        leaf_path = path / 'leaf.pdb'
+        if damage == 'changed':
+            leaf_path.write_bytes(b'changed mounted content')
+        else:
+            leaf_path.unlink()
+        _evict_tempref(cache, checksum)
+        with pytest.raises(CacheMissError):
+            Checksum(checksum).resolve()
+        assert cache.get(checksum) is None
+
+
+def test_directory_materializer_skips_stale_duplicate_path(tmp_path, monkeypatch):
+    from seamless import Buffer, Checksum, Cell
+    from seamless.caching.buffer_cache import get_buffer_cache
+    from seamless_workflow.attachments.fs.service import FileSystemService
+
+    monkeypatch.setattr(FileSystemService, 'poll_interval', 100)
+    content = b'duplicate mounted backup leaf ' + str(tmp_path).encode()
+    leaf = Buffer(content)
+    checksum = leaf.get_checksum()
+    leaf.tempref()
+    del leaf
+    cache = get_buffer_cache()
+    path = tmp_path / 'backup'
+
+    with Context() as c:
+        c.source = Cell(celltype='deepfolder')
+        c.source.set({'a.pdb': checksum, 'b.pdb': checksum})
+        c.backup = c.source.as_celltype('folder')
+        c.backup.mount(path, mode='w')
+        _wait_for_directory_mount_ack(c.backup)
+
+        (path / 'a.pdb').write_bytes(b'stale duplicate path')
+        _evict_tempref(cache, checksum)
+        assert Checksum(checksum).resolve().content == content
+
+
+def test_directory_materializer_replacement_tracks_current_index(tmp_path, monkeypatch):
+    from seamless import Buffer, CacheMissError, Cell, Checksum
+    from seamless.caching.buffer_cache import get_buffer_cache
+    from seamless_workflow.attachments.fs.service import FileSystemService
+
+    monkeypatch.setattr(FileSystemService, 'poll_interval', 100)
+    old_content = b'old directory materializer ' + str(tmp_path).encode()
+    new_content = b'new directory materializer ' + str(tmp_path).encode()
+    old_leaf = Buffer(old_content)
+    old_checksum = old_leaf.get_checksum()
+    old_leaf.tempref()
+    new_leaf = Buffer(new_content)
+    new_checksum = new_leaf.get_checksum()
+    new_leaf.tempref()
+    del old_leaf, new_leaf
+    cache = get_buffer_cache()
+    path = tmp_path / 'backup'
+
+    with Context() as c:
+        c.source = Cell(celltype='deepfolder')
+        c.source.set({'old.pdb': old_checksum})
+        c.backup = c.source.as_celltype('folder')
+        c.backup.mount(path, mode='w')
+        _wait_for_directory_mount_ack(c.backup)
+        assert (path / 'old.pdb').read_bytes() == old_content
+
+        c.source.set({'new.pdb': new_checksum})
+        _wait_for_directory_mount_ack(c.backup)
+        assert not (path / 'old.pdb').exists()
+        assert (path / 'new.pdb').read_bytes() == new_content
+
+        _evict_tempref(cache, old_checksum)
+        with pytest.raises(CacheMissError):
+            Checksum(old_checksum).resolve()
+        _evict_tempref(cache, new_checksum)
+        assert Checksum(new_checksum).resolve().content == new_content
+
+
+def test_directory_materializer_unregister_waits_for_inflight_replacement(tmp_path):
+    from threading import Event
+    from seamless import Buffer
+    from seamless.caching.buffer_cache import get_buffer_cache
+    from seamless_workflow.attachments.fs.service import get_service
+
+    content = b'inflight unregister backup ' + str(tmp_path).encode()
+    checksum = Buffer(content).get_checksum()
+    path = tmp_path / 'backup'
+    path.mkdir()
+    (path / 'leaf.pdb').write_bytes(content)
+    service = get_service()
+    reg = service.reserve(
+        AttachmentSpec(str(path), 'w', 'cell'), 'folder',
+        'materializer-unregister-' + str(tmp_path), lambda *args: None,
+    )
+    cache = get_buffer_cache()
+    entered = Event()
+    release = Event()
+
+    def in_flight_delivery():
+        entered.set()
+        assert release.wait(5)
+        service._replace_directory_materializers(reg, {checksum.hex(): ['leaf.pdb']})
+
+    delivery_future = service._submit(reg, in_flight_delivery)
+    assert entered.wait(5)
+    cleanup_future = service.unregister(reg)
+    release.set()
+    delivery_future.result(timeout=5)
+    cleanup_future.result(timeout=5)
+
+    assert reg.closed
+    assert reg not in cache._materializers_by_owner
+    assert checksum not in cache._materializers_by_checksum
+
+
 def test_directory_leaf_claims_survive_unmount(tmp_path):
     from seamless.reference_lifecycle import audit_reference_accounting
     from seamless.caching.buffer_cache import get_buffer_cache
