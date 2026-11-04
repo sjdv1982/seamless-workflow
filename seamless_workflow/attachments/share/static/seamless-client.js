@@ -329,6 +329,14 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
   async function drainWrites(entry) {
     if (entry.writing || !isCurrentEntry(entry)) return;
     entry.writing = true;
+    let retryDelay = 100;
+    const retry = async operation => {
+      if (entry._hasPending || !isCurrentEntry(entry)) return;
+      entry.pending = operation;
+      entry._hasPending = true;
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+      retryDelay = Math.min(retryDelay * 2, 5000);
+    };
     try {
       while (entry._hasPending && isCurrentEntry(entry)) {
         const operation = entry.pending;
@@ -347,6 +355,7 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
           response = await fetch(url.href, { method: "PUT", headers, body });
         } catch (error) {
           console.warn("Seamless share PUT failed:", entry.key, error);
+          await retry(operation);
           continue;
         }
         if (!isCurrentEntry(entry)) break;
@@ -370,8 +379,14 @@ function connect_seamless(update_server = null, rest_server = null, share_namesp
         }
         if (!response.ok) {
           console.warn("Seamless share PUT rejected:", entry.key, response.status);
+          if (response.status === 408 || response.status === 429 || response.status >= 500) {
+            await retry(operation);
+          } else {
+            retryDelay = 100;
+          }
           continue;
         }
+        retryDelay = 100;
         const responseMarker = result && result.marker !== undefined ? Number(result.marker) : NaN;
         const responseIsCurrent = requestServerRevision === entry.serverRevision &&
           (!Number.isFinite(responseMarker) || responseMarker >= entry.marker);
