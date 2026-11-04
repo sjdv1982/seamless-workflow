@@ -67,6 +67,7 @@ class FileSystemService:
         self.native = NativeNotifications() if native else None
         self.lock = RLock()
         self.registrations = set()
+        self._directory_source_owners = {}
         self.read_locks = {}
         self.work = Queue()
         self.stopping = Event()
@@ -344,27 +345,111 @@ class FileSystemService:
                 except (OSError, ValueError):
                     continue
                 if calculate_checksum(content) == checksum.hex():
-                    return content
+                    return Buffer(content, checksum=checksum)
             return None
         return load
 
-    def _replace_directory_materializers(self, reg, leaves):
-        from seamless.caching.buffer_cache import get_buffer_cache
+    def _directory_leaf_metadata(self, reg, relative_paths):
+        if reg.closing or reg.closed:
+            return ()
+        result = []
+        for relative in relative_paths:
+            try:
+                path = os.path.join(reg.path, relative)
+                absolute_path = os.path.abspath(path)
+                real_path = os.path.realpath(path)
+                if (os.path.islink(path) or real_path != absolute_path
+                        or os.path.commonpath((real_path, reg.path)) != reg.path):
+                    continue
+                metadata = self.fs.stat(path)
+            except (OSError, ValueError):
+                continue
+            if stat.S_ISREG(metadata.st_mode):
+                result.append(metadata)
+        return tuple(result)
 
-        sources = {}
+    def _directory_buffer_source(self, reg, leaves):
+        from seamless.caching.buffer_source import BufferSource
+
+        loaders = {}
         for checksum, paths in leaves.items():
             checksum = Checksum(checksum)
-            sources[checksum] = self._directory_leaf_loader(
-                reg, tuple(paths), checksum
+            paths = tuple(paths)
+            loaders[checksum] = (
+                self._directory_leaf_loader(reg, paths, checksum),
+                paths,
             )
-        get_buffer_cache().replace_materializers(reg, sources)
+
+        def get_buffer(checksum):
+            entry = loaders.get(Checksum(checksum))
+            return None if entry is None else entry[0]()
+
+        def metadata(checksum):
+            entry = loaders.get(Checksum(checksum))
+            if entry is None:
+                return ()
+            return self._directory_leaf_metadata(reg, entry[1])
+
+        def has_buffer(checksum):
+            return bool(metadata(checksum))
+
+        def get_buffer_length(checksum):
+            entry = loaders.get(Checksum(checksum))
+            if entry is None:
+                return None
+            # Mount paths can be transparently compressed. Their physical
+            # size is not the size of the checksum-addressed buffer.
+            for relative in entry[1]:
+                if relative.endswith((".gz", ".zst")):
+                    continue
+                files = self._directory_leaf_metadata(reg, (relative,))
+                if files:
+                    return files[0].st_size
+            return None
+
+        return BufferSource(
+            get_buffer=get_buffer,
+            has_buffer=has_buffer,
+            get_buffer_length=get_buffer_length,
+            returns_verified_buffer=True,
+        )
+
+    def _replace_directory_buffer_sources(self, reg, leaves):
+        from seamless.caching.buffer_source import replace_buffer_sources
+
+        source = self._directory_buffer_source(reg, leaves) if leaves else ()
+        replace_buffer_sources(reg, source)
+
+    def _unregister_directory_buffer_sources(self, reg):
+        from seamless.caching.buffer_source import unregister_buffer_sources
+
+        unregister_buffer_sources(reg)
+        owner = self._directory_source_owners.pop(reg, None)
+        if owner is not None:
+            unregister_buffer_sources(owner)
+
+    def _stage_directory_buffer_sources(self, reg, leaves):
+        from seamless.caching.buffer_source import replace_buffer_sources
+
+        owner = self._directory_source_owners.setdefault(reg, object())
+        source = self._directory_buffer_source(reg, leaves)
+        replace_buffer_sources(owner, source)
+        return owner
+
+    def _clear_staged_directory_buffer_sources(self, reg):
+        from seamless.caching.buffer_source import unregister_buffer_sources
+
+        owner = self._directory_source_owners.pop(reg, None)
+        if owner is not None:
+            unregister_buffer_sources(owner)
 
     def _write_directory(self, reg, delivery, content):
         import json
         index = json.loads(content)
         if index is None:
             if self._fingerprint(reg) != delivery.expected_fingerprint: return False
-            self._replace_directory_materializers(reg, {})
+            self._replace_directory_buffer_sources(reg, {})
+            self._clear_staged_directory_buffer_sources(reg)
             return True
         if not isinstance(index, dict): raise ValueError('Directory index must be a mapping')
         if len(index) > self.max_files: raise ValueError('Directory file-count limit exceeded')
@@ -379,14 +464,28 @@ class FileSystemService:
                 key = relative[:-3] if relative.endswith('.gz') else relative[:-4] if relative.endswith('.zst') else relative
                 if key in physical_names: raise ValueError(f'Duplicate decompressed directory path: {key}')
                 physical_names[key] = relative
-        os.makedirs(reg.path, exist_ok=True)
-        total, started = 0, time.monotonic()
         leaf_sources = {}
+        for name, checksum in sorted(index.items()):
+            default_name = name + ('.gz' if name.endswith('.gz') else '.zst' if name.endswith('.zst') else '')
+            path = os.path.join(reg.path, physical_names.get(name, default_name))
+            if os.path.commonpath((os.path.realpath(path), reg.path)) != reg.path:
+                raise ValueError('Directory path escapes mount through a symlink')
+            leaf_sources.setdefault(checksum, []).append(os.path.relpath(path, reg.path))
+
+        os.makedirs(reg.path, exist_ok=True)
+        # Keep the previous source owner available while writing a replacement
+        # index. Staged paths become usable as each leaf is written; the source
+        # callbacks validate content before returning it.
+        self._stage_directory_buffer_sources(reg, leaf_sources)
+        total, started = 0, time.monotonic()
         for name, checksum in sorted(index.items()):
             if reg.closed: raise RuntimeError('Directory mount closed during write')
             default_name = name + ('.gz' if name.endswith('.gz') else '.zst' if name.endswith('.zst') else '')
             path = os.path.join(reg.path, physical_names.get(name, default_name))
-            if os.path.commonpath((os.path.realpath(path), reg.path)) != reg.path:
+            absolute_path = os.path.abspath(path)
+            real_path = os.path.realpath(path)
+            if (os.path.islink(path) or real_path != absolute_path
+                    or os.path.commonpath((real_path, reg.path)) != reg.path):
                 raise ValueError('Directory path escapes mount through a symlink')
             buf = self._resolve(Checksum(checksum))
             data = buf.content if hasattr(buf, 'content') else bytes(buf)
@@ -398,7 +497,6 @@ class FileSystemService:
             if expected is None or self._read_bytes(path) != data:
                 if not self._atomic_write(path, data, expected):
                     raise OSError(f'Directory leaf changed: {name}')
-            leaf_sources.setdefault(checksum, []).append(os.path.relpath(path, reg.path))
         if reg.spec.mode == 'w' or reg.spec.authority == 'cell':
             for parent, dirs, files in os.walk(reg.path, topdown=False):
                 for name in files:
@@ -410,7 +508,8 @@ class FileSystemService:
                 for name in dirs:
                     try: os.rmdir(os.path.join(parent, name))
                     except OSError: pass
-        self._replace_directory_materializers(reg, leaf_sources)
+        self._replace_directory_buffer_sources(reg, leaf_sources)
+        self._clear_staged_directory_buffer_sources(reg)
         return True
 
     def deliver(self, reg, delivery):
@@ -448,8 +547,7 @@ class FileSystemService:
     def unregister(self, reg, *, delete=False, expected=None):
         reg.active = False
         reg.closing = True
-        from seamless.caching.buffer_cache import get_buffer_cache
-        get_buffer_cache().unregister_materializers(reg)
+        self._unregister_directory_buffer_sources(reg)
         def cleanup():
             try:
                 with self.lock:
@@ -463,10 +561,10 @@ class FileSystemService:
             finally:
                 reg.closed = True
                 try:
-                    # An in-flight delivery may have replaced the sources after
+                    # An in-flight delivery may have staged new sources after
                     # unregister() started. The cleanup is serialized behind it,
                     # so remove its final source map here as well.
-                    get_buffer_cache().unregister_materializers(reg)
+                    self._unregister_directory_buffer_sources(reg)
                 finally:
                     with self.lock:
                         self.registrations.discard(reg)

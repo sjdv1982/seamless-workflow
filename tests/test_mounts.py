@@ -346,6 +346,13 @@ def test_directory_write_mount_materializes_evicted_leaf(tmp_path, monkeypatch):
     from seamless_workflow.attachments.fs.service import FileSystemService
 
     monkeypatch.setattr(FileSystemService, 'poll_interval', 100)
+    # The shared service's broker may already be waiting at its normal poll
+    # interval from a previous test. Keep this fallback test deterministic:
+    # a sensing poll would retain the just-written leaf independently of the
+    # source registry whose eviction behavior is under test.
+    monkeypatch.setattr(
+        FileSystemService, '_poll_locked', lambda self, reg, force=False: None
+    )
     content = b'mounted directory backup leaf ' + str(tmp_path).encode()
     leaf = Buffer(content)
     checksum = leaf.get_checksum()
@@ -483,7 +490,7 @@ def test_directory_materializer_replacement_tracks_current_index(tmp_path, monke
 def test_directory_materializer_unregister_waits_for_inflight_replacement(tmp_path):
     from threading import Event
     from seamless import Buffer
-    from seamless.caching.buffer_cache import get_buffer_cache
+    from seamless.caching.buffer_source import get_buffer_source_registry
     from seamless_workflow.attachments.fs.service import get_service
 
     content = b'inflight unregister backup ' + str(tmp_path).encode()
@@ -496,14 +503,14 @@ def test_directory_materializer_unregister_waits_for_inflight_replacement(tmp_pa
         AttachmentSpec(str(path), 'w', 'cell'), 'folder',
         'materializer-unregister-' + str(tmp_path), lambda *args: None,
     )
-    cache = get_buffer_cache()
+    registry = get_buffer_source_registry()
     entered = Event()
     release = Event()
 
     def in_flight_delivery():
         entered.set()
         assert release.wait(5)
-        service._replace_directory_materializers(reg, {checksum.hex(): ['leaf.pdb']})
+        service._replace_directory_buffer_sources(reg, {checksum.hex(): ['leaf.pdb']})
 
     delivery_future = service._submit(reg, in_flight_delivery)
     assert entered.wait(5)
@@ -513,8 +520,7 @@ def test_directory_materializer_unregister_waits_for_inflight_replacement(tmp_pa
     cleanup_future.result(timeout=5)
 
     assert reg.closed
-    assert reg not in cache._materializers_by_owner
-    assert checksum not in cache._materializers_by_checksum
+    assert not registry.has_owner(reg)
 
 
 def test_directory_leaf_claims_survive_unmount(tmp_path):
