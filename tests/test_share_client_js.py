@@ -165,6 +165,44 @@ await new Promise(resolve=>realSetTimeout(resolve,25));
 assert.ok(!requests.some(r=>r.url.includes('image.png')));
 ''')
 
+    @pytest.mark.skipif(
+        not NODE_HAS_WEBSOCKET,
+        reason="real-server case requires Node.js WebSocket support (global WebSocket or the 'ws' module)",
+    )
+    @pytest.mark.parametrize("mimetype,initial,updated", [
+        ("chemical/x-cif", "data_initial\n#\n", "data_updated\n#\n"),
+        ("chemical/x-pdb", "HEADER INITIAL\nEND\n", "HEADER UPDATED\nEND\n"),
+    ])
+    def test_textual_chemical_mime_reads_and_writes_strings(self, mimetype, initial, updated):
+        """Real server MIME metadata makes PDB/CIF readable and writable as text."""
+        from seamless_workflow.attachments.share.server import ShareServer
+        server = ShareServer(host="127.0.0.1", port=0)
+        owner = object()
+        try:
+            reg, sink, url = attach(
+                server, Spec("structure", mimetype=mimetype), "text", owner=owner,
+            )
+            deliver(server, reg, sink, initial)
+            config = json.dumps(dict(server=server.url, mimetype=mimetype,
+                                     initial=initial, updated=updated))
+            run_js("const config=" + config + r''';
+loadClient();
+const ctx=connect_seamless(config.server,null,'ctx');
+await wait(()=>ctx.structure?.value!==undefined);
+assert.equal(ctx.structure.binary,false);
+assert.equal(ctx.structure.content_type.split(';')[0],config.mimetype);
+assert.equal(typeof ctx.structure.value,'string');
+assert.equal(ctx.structure.value,config.initial);
+let changes=0;ctx.structure.onchange=()=>changes++;
+assert.equal(ctx.structure.set(config.updated),true);
+await wait(()=>ctx.structure.marker>=2 && changes>0);
+assert.equal(ctx.structure.value,config.updated);
+ctx.self.close();
+''', fake=False)
+            assert get(url).content == updated.encode("utf-8")
+        finally:
+            server.close()
+
     def test_one_put_at_a_time_latest_pending_and_raw_cas_body(self):
         """seamless-client.js: raw PUT, one flight per key, latest pending and base marker."""
         run_js(r'''
@@ -184,6 +222,29 @@ assert.equal(new URL(puts()[1].url).searchParams.get('marker'),'2');
 pending.shift()(response(JSON.stringify({checksum:'4'.repeat(64),marker:3})));
 await wait(()=>ctx.a.marker===3);
 assert.equal(puts().length,2);
+''')
+
+    def test_put_retries_transient_failures_without_a_new_set(self):
+        """seamless-client.js: a failed transient PUT remains pending and retries."""
+        run_js(r'''
+let attempts=0;
+let current='1\n';
+fetchImpl=async(url,options)=>{
+  if(options.method!=='PUT') return response(current);
+  attempts++;
+  if(attempts===1) throw new Error('temporary network failure');
+  if(attempts===2) return response('temporarily unavailable',503);
+  current=options.body;
+  return response(JSON.stringify({checksum:'2'.repeat(64),marker:2}));
+};
+loadClient();const ctx=connect_seamless();await wait(()=>sockets.length===1);
+snapshot(sockets[0],{a:share('a')});await wait(()=>ctx.a?.value==='1\n');
+ctx.a.set('2');
+await wait(()=>puts().length===3);
+await wait(()=>ctx.a.marker===2);
+assert.equal(attempts,3);
+assert.equal(current,'2');
+assert.equal(ctx.a.value,'2');
 ''')
 
     def test_409_drops_local_change_and_fetches_server_value(self):
