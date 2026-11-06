@@ -30,12 +30,16 @@ class ShareDriver:
         server = self.server or server_module.get_server_if_started()
         return None if server is None else server.url
 
-    def reserve(self, spec, celltype, session_id, sink, *, replaces=(), staged=False,
-                node_path=()):
+    def _ensure_server(self):
         server = self.server
         if server is None:
             server = server_module.get_server(start=False)
             self._server = server
+        return server
+
+    def reserve(self, spec, celltype, session_id, sink, *, replaces=(), staged=False,
+                node_path=()):
+        server = self._ensure_server()
         registration = server.reserve(
             self.namespace, spec, celltype, session_id, sink, owner=self.owner,
             replaces=replaces, staged=staged, node_path=node_path,
@@ -44,10 +48,17 @@ class ShareDriver:
         registration.service = self
         return registration
 
+    def reserve_download(self, spec, provider, *, replaces=(), staged=False):
+        registration = self._ensure_server().reserve(
+            self.namespace, spec, None, None, None, owner=self.owner,
+            replaces=replaces, staged=staged, state_graph=self.state_graph,
+            provider=provider,
+        )
+        registration.service = self
+        return registration
+
     def start(self):
-        if self.server is None:
-            self._server = server_module.get_server(start=False)
-        return self._server.start()
+        return self._ensure_server().start()
 
     def initial_read(self, registration):
         future = Future()

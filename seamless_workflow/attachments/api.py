@@ -137,7 +137,7 @@ def load_graph(ctx, data, *, mounts=True, shares=True):
 
 
 def _load_graph(ctx, data, *, mounts=True, shares=True, context_shares):
-    """Load a graph, optionally restoring its file mounts and HTTP shares."""
+    """Load a graph, optionally restoring its file mounts, HTTP shares and downloads."""
     import copy
     from .spec import validate_celltype
     from ..serialization import prepare_graph
@@ -147,12 +147,16 @@ def _load_graph(ctx, data, *, mounts=True, shares=True, context_shares):
         registration for registration in old
         if getattr(getattr(registration, 'spec', None), 'driver', None) == 'share'
     )
+    old_downloads = tuple(context_shares._downloads.values())
+    download_specs = graph.downloads if shares else {}
+    graph.downloads = dict(download_specs)
     prepared, reservations = [], []
     service = get_service() if mounts and any(n.mount for n in graph.nodes.values()) else None
     share_prepared = []
+    download_registrations = []
     share_driver = (
         context_shares._driver
-        if shares and any('share' in n.attachments for n in graph.nodes.values())
+        if shares and (download_specs or any('share' in n.attachments for n in graph.nodes.values()))
         else None
     )
     try:
@@ -170,10 +174,17 @@ def _load_graph(ctx, data, *, mounts=True, shares=True, context_shares):
                 celltype = node.cell_config.celltype
                 reg = share_driver.reserve(
                     share_spec, celltype, uuid4().hex, make_sink(ctx._controller),
-                    replaces=old_shares, staged=True, node_path=path,
+                    replaces=old_shares + old_downloads, staged=True, node_path=path,
                 )
                 reservations.append(reg)
                 reads.append(('share', path, share_spec, reg, share_driver.initial_read(reg)))
+        for download_spec in download_specs.values():
+            reg = share_driver.reserve_download(
+                download_spec, context_shares._download_provider(download_spec),
+                replaces=old_shares + old_downloads, staged=True,
+            )
+            reservations.append(reg)
+            download_registrations.append(reg)
         if share_driver is not None:
             share_driver.start()
         for kind, path, spec, reg, future in reads:
@@ -181,9 +192,12 @@ def _load_graph(ctx, data, *, mounts=True, shares=True, context_shares):
             (prepared if kind == 'mount' else share_prepared).append(prepared_item)
         initial = ctx._controller.call(
             'set_graph', graph, mount_prepared=tuple(prepared),
-            share_prepared=tuple(share_prepared), klass=2,
+            share_prepared=tuple(share_prepared),
+            download_registrations=tuple(download_registrations), klass=2,
         )
         for future in initial: future.result()
+        for reg in download_registrations:
+            share_driver.activate(reg).result(share_driver.delivery_timeout)
     except BaseException:
         for reg in reversed(reservations):
             try:
@@ -195,3 +209,9 @@ def _load_graph(ctx, data, *, mounts=True, shares=True, context_shares):
         raise
     finally:
         for _, _, _, observation in (*prepared, *share_prepared): observation.release()
+    # The old graph's downloads go with it, except those whose key a new
+    # share or download took over (already removed by the commit).
+    for reg in old_downloads:
+        if not reg.closed:
+            context_shares._driver.unregister(reg).result(context_shares._driver.delivery_timeout)
+    context_shares._downloads = {reg.spec.path: reg for reg in download_registrations}

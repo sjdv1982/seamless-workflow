@@ -384,6 +384,8 @@ class ContextGraph:
         self.outgoing: dict[NodePath, set[int]] = {}
         self.namespaces: set[NodePath] = set()
         self.anonymous_symbol_by_recipe: dict[tuple, str] = {}
+        # Share downloads by URL key (DownloadSpec); durable, not node state.
+        self.downloads: dict[str, object] = {}
 
     def rebuild_indexes(self) -> None:
         self.incoming = {path: set() for path in self.nodes}

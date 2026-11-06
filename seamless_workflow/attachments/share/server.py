@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from importlib.resources import files
 import inspect
+import json
 import os
 import threading
 import time
@@ -22,8 +23,10 @@ from seamless.checksum.canonical import canon_T
 from seamless.checksum.null import NULL_CHECKSUM
 
 from ..session import DeliveryAck, MountLease, Observation
+from .archive import is_safe_member_path, pack as pack_archive
 from .mime import content_type as infer_content_type, is_binary
 from .spec import (
+    DownloadSpec,
     RESERVED_NAMESPACE_KEYS,
     RESERVED_TOPLEVEL_KEYS,
     STATE_GRAPH_KEY,
@@ -154,6 +157,16 @@ class ShareRegistration:
     reattached_from: object = None
     reattach_flags_changed: bool = False
     state_graph: object = None
+    # Downloads only: callable(timeout) -> (members, failures, leases), the
+    # owning Context's cut. Dropped when the record is held.
+    provider: object = None
+
+    @property
+    def is_download(self):
+        return isinstance(self.spec, DownloadSpec)
+
+
+_REATTACH_TIMEOUT = object()
 
 
 class ShareServer:
@@ -174,6 +187,7 @@ class ShareServer:
         get_timeout=60,
         delivery_timeout=60,
         hold_timeout=10,
+        download_timeout=300,
         resolver=None,
     ):
         self.host = host
@@ -183,6 +197,7 @@ class ShareServer:
         self.get_timeout = float(get_timeout)
         self.delivery_timeout = float(delivery_timeout)
         self.hold_timeout = float(hold_timeout)
+        self.download_timeout = float(download_timeout)
         self.resolver = resolver if resolver is not None else self._default_resolver
         self.url = None
         self._lock = threading.RLock()
@@ -194,6 +209,11 @@ class ShareServer:
         self._runner = None
         self._site = None
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="shareserver-worker")
+        # Downloads build on their own pool so that a slow archive never
+        # delays a share GET or a state-graph read.
+        self._download_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="shareserver-download"
+        )
         self._namespaces = {}
         self._top_records = {}
         self._records = {}
@@ -311,12 +331,20 @@ class ShareServer:
         return None
 
     def _adopt_held_registration_locked(self, registration, held):
-        registration.checksum = held.checksum
-        registration.marker = max(registration.marker, held.marker)
-        registration.lease, held.lease = held.lease, None
         registration.held = True
         registration.reattaching = True
         registration.reattached_from = held
+        if registration.is_download or held.is_download:
+            # A download has no record to continue, and a share that takes
+            # over a download starts as a new share. Only a change of kind
+            # changes the websocket share list.
+            registration.reattach_flags_changed = (
+                registration.is_download != held.is_download
+            )
+            return
+        registration.checksum = held.checksum
+        registration.marker = max(registration.marker, held.marker)
+        registration.lease, held.lease = held.lease, None
         registration.reattach_flags_changed = (
             bool(getattr(registration.spec, "readonly", False))
             != bool(getattr(held.spec, "readonly", False))
@@ -325,8 +353,13 @@ class ShareServer:
         )
 
     def reserve(self, namespace, spec, celltype, session_id, sink, owner=None, *,
-                replaces=(), staged=False, node_path=(), state_graph=None):
-        """Atomically reserve a URL, without starting the server or claiming data."""
+                replaces=(), staged=False, node_path=(), state_graph=None,
+                provider=None):
+        """Atomically reserve a URL, without starting the server or claiming data.
+
+        A ``DownloadSpec`` reserves a download: it has no celltype, session or
+        sink, and ``provider`` takes the owning Context's cut.
+        """
         if not _safe_segment(namespace):
             raise ValueError("namespace must be one safe URL segment")
         if namespace in _RESERVED_TOPLEVEL:
@@ -336,7 +369,10 @@ class ShareServer:
         route = self._route_for(namespace, spec)
         is_top = bool(getattr(spec, "toplevel", False))
         path = spec.path
-        content_type = infer_content_type(celltype, path, getattr(spec, "mimetype", None))
+        if isinstance(spec, DownloadSpec):
+            content_type = spec.mimetype
+        else:
+            content_type = infer_content_type(celltype, path, getattr(spec, "mimetype", None))
         binary = is_binary(content_type)
         _load_aiohttp()
         replaces = tuple(replaces)
@@ -366,6 +402,7 @@ class ShareServer:
                 replaces=replaces,
                 marker=self._marker_floors.get(route, 0),
                 state_graph=state_graph,
+                provider=provider,
             )
             if staged:
                 self._staged_reservations[id(reg)] = reg
@@ -551,7 +588,7 @@ class ShareServer:
             ns = self._namespaces.get(registration.namespace)
             held_predecessor = registration.reattached_from
         if held_predecessor is None:
-            if ns is not None:
+            if ns is not None and not registration.is_download:
                 await self._broadcast_shares(ns)
             return registration
         if ready is None or ready.done():
@@ -685,6 +722,7 @@ class ShareServer:
             reg.held = True
             reg.reattaching = False
             reg.sink = None
+            reg.provider = None
             if reg.reattach_future is None or reg.reattach_future.done():
                 reg.reattach_future = asyncio.get_running_loop().create_future()
         return None
@@ -738,6 +776,7 @@ class ShareServer:
                 reg.reattaching = False
                 reg.hold_until = deadline
                 reg.sink = None
+                reg.provider = None
                 if reg.reattach_future is None or reg.reattach_future.done():
                     reg.reattach_future = asyncio.get_running_loop().create_future()
             if ns.hold_task is None or ns.hold_task.done():
@@ -784,7 +823,7 @@ class ShareServer:
                     if not deadlines:
                         ns.hold_task = None
 
-            if expired:
+            if any(not reg.is_download for reg in expired):
                 await self._broadcast_shares(ns)
             if release:
                 for client in clients:
@@ -860,7 +899,7 @@ class ShareServer:
             was_active = item.active
             self._remove_registration(item)
             if (not close_namespace and was_active and ns is not None
-                    and ns.owner is item.owner):
+                    and ns.owner is item.owner and not item.is_download):
                 await self._broadcast_shares(ns)
         if close_namespace and owns_namespace:
             for client in tuple(ns.clients):
@@ -983,6 +1022,8 @@ class ShareServer:
         return self._json_error(404, "no such share")
 
     async def _serve(self, request, reg):
+        if reg.is_download:
+            return await self._serve_download(request, reg)
         if request.method == "PUT":
             return await self._put(request, reg)
         mode = request.query.get("mode")
@@ -1029,6 +1070,86 @@ class ShareServer:
         except Exception as exc:
             return self._json_error(503, str(exc) or "value resolution failed", headers=headers)
         return self._response(status=200, body=body, headers=headers)
+
+    async def _serve_download(self, request, reg):
+        if request.method != "GET":
+            return self._response(status=405, headers={"Allow": "GET, OPTIONS"})
+        waited, replacement = await self._await_reattach(reg, self.get_timeout)
+        if waited:
+            return await self._serve_reattached(request, replacement)
+        with self._lock:
+            provider = reg.provider if reg.active and not reg.closed else None
+        if provider is None:
+            return self._json_error(404, "no such share")
+        loop = asyncio.get_running_loop()
+        try:
+            future = loop.run_in_executor(
+                self._download_executor, self._build_download, reg.spec, provider
+            )
+            result = await asyncio.wait_for(
+                asyncio.shield(future), timeout=self.download_timeout
+            )
+        except asyncio.TimeoutError:
+            return self._json_error(503, "download timed out")
+        except Exception as exc:
+            return self._json_error(503, str(exc) or "download failed")
+        if isinstance(result, dict):
+            return self._response(
+                status=409,
+                json_data={"error": "download cells are not available", "cells": result},
+            )
+        filename = reg.spec.filename
+        if filename.isascii():
+            escaped = filename.replace("\\", "\\\\").replace('"', '\\"')
+            disposition = f'attachment; filename="{escaped}"'
+        else:
+            disposition = "attachment; filename*=UTF-8''" + quote(filename, safe="")
+        return self._response(
+            status=200,
+            body=result,
+            headers={
+                "Content-Type": reg.spec.mimetype,
+                "Content-Disposition": disposition,
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    def _build_download(self, spec, provider):
+        """Take the cut, resolve its buffers and pack them (download worker thread).
+
+        Returns the archive bytes, or ``{cell path: reason}`` for a failed cut.
+        """
+        members, failures, leases = provider(self.get_timeout)
+        try:
+            if failures:
+                return failures
+            null = _null_hex()
+            files = []
+            for member, cell, checksum, celltype in members:
+                if checksum == null:
+                    continue
+                content = self._resolve_value(checksum)
+                if celltype != "folder":
+                    files.append((member, content))
+                    continue
+                index = json.loads(content)
+                if index is None:
+                    continue
+                if not isinstance(index, dict) or not all(
+                    is_safe_member_path(key) for key in index
+                ):
+                    failures[cell] = "unsafe-folder-key"
+                    continue
+                for key, leaf in sorted(index.items()):
+                    if leaf == null:
+                        continue
+                    files.append((member + "/" + key, self._resolve_value(leaf)))
+            if failures:
+                return failures
+            return pack_archive(spec.format, files)
+        finally:
+            for lease in leases:
+                lease._release_refholds()
 
     def _normalize_state_graph_publication(self, ns, publication):
         marker, digest, body = publication
@@ -1107,7 +1228,12 @@ class ShareServer:
             "Content-Type": reg.content_type,
         }
 
-    async def _put(self, request, reg):
+    async def _await_reattach(self, reg, timeout):
+        """Wait while ``reg`` is held or closing; return ``(waited, replacement)``.
+
+        ``replacement`` is the re-attached registration, ``None`` when the hold
+        ended without one, or ``_REATTACH_TIMEOUT``.
+        """
         with self._lock:
             ns = self._namespaces.get(reg.namespace)
             must_wait = reg.held or reg.reattaching or (ns is not None and ns.closing)
@@ -1115,16 +1241,27 @@ class ShareServer:
             if must_wait and reattach_future is None:
                 reattach_future = asyncio.get_running_loop().create_future()
                 reg.reattach_future = reattach_future
-        if must_wait:
-            try:
-                replacement = await asyncio.wait_for(
-                    asyncio.shield(reattach_future), timeout=self.put_timeout
-                )
-            except asyncio.TimeoutError:
-                return self._json_error(503, "share re-attach timed out")
-            if replacement is None:
-                return self._json_error(404, "no such share")
-            return await self._put(request, replacement)
+        if not must_wait:
+            return False, None
+        try:
+            replacement = await asyncio.wait_for(
+                asyncio.shield(reattach_future), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            return True, _REATTACH_TIMEOUT
+        return True, replacement
+
+    async def _serve_reattached(self, request, replacement):
+        if replacement is _REATTACH_TIMEOUT:
+            return self._json_error(503, "share re-attach timed out")
+        if replacement is None:
+            return self._json_error(404, "no such share")
+        return await self._serve(request, replacement)
+
+    async def _put(self, request, reg):
+        waited, replacement = await self._await_reattach(reg, self.put_timeout)
+        if waited:
+            return await self._serve_reattached(request, replacement)
         if getattr(reg.spec, "readonly", False):
             return self._response(status=405, headers={"Allow": "GET, HEAD"})
         mode = request.query.get("mode")
@@ -1279,6 +1416,8 @@ class ShareServer:
         for key, reg in items:
             if reg.closed or not (reg.active or reg.held or reg.reattaching):
                 continue
+            if reg.is_download:
+                continue
             result[key] = {
                 "url": reg.route,
                 "readonly": bool(getattr(reg.spec, "readonly", False)),
@@ -1379,7 +1518,7 @@ class ShareServer:
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, PUT, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, If-None-Match, If-Match, X-Seamless-Marker"
-        response.headers["Access-Control-Expose-Headers"] = "ETag, X-Seamless-Marker"
+        response.headers["Access-Control-Expose-Headers"] = "ETag, X-Seamless-Marker, Content-Disposition"
         return response
 
     def _json_error(self, status, message, headers=None):
@@ -1406,6 +1545,7 @@ class ShareServer:
             for reg in self._all_registrations():
                 self._remove_registration(reg)
             self._executor.shutdown(wait=False, cancel_futures=True)
+            self._download_executor.shutdown(wait=False, cancel_futures=True)
         self._thread = None
         self._loop = None
 
@@ -1433,6 +1573,7 @@ class ShareServer:
             self._remove_registration(reg)
         await self._async_cleanup()
         self._executor.shutdown(wait=False, cancel_futures=True)
+        self._download_executor.shutdown(wait=False, cancel_futures=True)
 
     def _all_registrations(self):
         with self._lock:

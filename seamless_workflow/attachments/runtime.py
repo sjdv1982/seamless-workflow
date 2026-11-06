@@ -111,6 +111,48 @@ class AttachmentRuntime:
     def _share_has_sessions(self):
         return any(driver == 'share' for _, driver in self._mount_sessions)
 
+    def _download_set(self, spec):
+        self._graph.downloads[spec.path] = spec
+
+    def _download_remove(self, path):
+        self._graph.downloads.pop(path, None)
+
+    def _download_cut(self, cells):
+        """One read turn: the checksums of a download's cells, or why they fail.
+
+        Returns ``(members, failures, leases)``: ``members`` holds
+        ``(member, cell path, checksum hex, celltype)``, ``failures`` maps a
+        cell path to its reason, and ``leases`` claim the checksums until the
+        caller releases them. Never computes.
+        """
+        members, failures = [], {}
+        for member, cell in cells:
+            path = tuple(cell.split("/"))
+            node = self._graph.nodes.get(path)
+            if node is None:
+                is_subcontext = path in self._graph.namespaces or self._graph.has_prefix(path)
+                failures[cell] = "not-a-cell" if is_subcontext else "missing"
+            elif node.kind != "cell":
+                failures[cell] = "not-a-cell"
+            elif node.cell_config.celltype in ("deepcell", "deepfolder"):
+                failures[cell] = "deep-celltype"
+            elif node.state != "complete" or node.current_checksum is None:
+                failures[cell] = node.state
+            else:
+                members.append(
+                    (member, cell, node.current_checksum.hex(), node.cell_config.celltype)
+                )
+        if failures:
+            return (), failures, ()
+        from seamless.checksum.null import NULL_CHECKSUM
+        null = Checksum(NULL_CHECKSUM).hex()
+        leases = tuple(
+            MountLease(Checksum(checksum), f"share-download:{cell}", celltype)
+            for _, cell, checksum, celltype in members
+            if checksum != null
+        )
+        return tuple(members), {}, leases
+
     def _mount_event(self, session, kind, **detail):
         detail.setdefault('driver', session.spec.driver)
         event = (session.session_id, session.node_path, kind, tuple(sorted(detail.items())))

@@ -6,8 +6,10 @@ import weakref
 from threading import Lock, RLock
 from uuid import uuid4
 
+from functools import partial
+
 from .driver import ShareDriver
-from .spec import ShareSpec
+from .spec import DownloadSpec, ShareSpec
 from .server import STATE_GRAPH_INTERVAL
 from ..api import make_sink
 from ...errors import ClosedContextError, NodeError, StaleWorkflowHandleError
@@ -19,6 +21,7 @@ class ContextShares:
         self._lock = RLock()
         self._state_graph_lock = Lock()
         self._state_graph_inflight = None
+        self._downloads = {}  # path -> ShareRegistration of a DownloadSpec
         self._namespace = "ctx"
         self._owner = object()
         self._driver = ShareDriver(
@@ -94,7 +97,7 @@ class ContextShares:
                 raise ValueError("namespace must be one safe URL segment")
             if value == self._namespace:
                 return
-            if context._controller.call("_share_has_sessions", klass=4):
+            if self._downloads or context._controller.call("_share_has_sessions", klass=4):
                 raise ValueError("cannot change share namespace while shares are active")
             future = self._driver.release_namespace()
             future.result(self._driver.delivery_timeout)
@@ -117,6 +120,60 @@ class ContextShares:
         if server is None or server._closed:
             return build_openapi(())
         return server.openapi(namespace=self._namespace, owner=self._owner)
+
+    @property
+    def downloads(self):
+        """This Context's downloads, ``{path: DownloadSpec}``."""
+        self._context()
+        return {path: registration.spec for path, registration in self._downloads.items()}
+
+    def add_download(self, cells, path="download", *, format="tar.gz"):
+        """Serve an archive of cell buffers at ``path``; return its URL.
+
+        Only the syntax of ``cells`` is checked here; each GET decides whether
+        the paths name complete cells (contracts/shares.md, *Downloads*).
+        """
+        spec = DownloadSpec(path, cells, format)
+        with self._lock:
+            context = self._context()
+            driver = self._driver
+            registration = driver.reserve_download(spec, self._download_provider(spec))
+            try:
+                driver.start()
+                driver.activate(registration).result(driver.delivery_timeout)
+                context._controller.call("_download_set", spec, klass=2)
+            except BaseException:
+                try:
+                    driver.unregister(registration).result(driver.delivery_timeout)
+                except Exception:
+                    pass
+                try:
+                    driver.release_namespace().result(driver.delivery_timeout)
+                except Exception:
+                    pass
+                raise
+            self._downloads[spec.path] = registration
+            return driver.url.rstrip("/") + registration.route
+
+    def remove_download(self, path="download"):
+        """Remove a download's URL at once; a path without a download is a no-op."""
+        with self._lock:
+            context = self._context()
+            registration = self._downloads.pop(path, None)
+            if registration is None:
+                return
+            context._controller.call("_download_remove", path, klass=2)
+            self._driver.unregister(registration).result(self._driver.delivery_timeout)
+
+    def _download_provider(self, spec):
+        return partial(self._take_download_cut, spec.cells)
+
+    def _take_download_cut(self, cells, timeout):
+        """Take a download's cut as one read turn (called on a download worker)."""
+        context = self._context_ref()
+        if context is None or context._closing or context._closed_event.is_set():
+            raise ClosedContextError("Context is closed")
+        return context._controller.submit("_download_cut", (cells,), klass=4).result(timeout)
 
     def _begin_close_namespace(self, timeout=60):
         future = self._driver.begin_close_namespace()

@@ -3103,15 +3103,20 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 entry["runtime"] = {"state": node.state, "block_reason": node.block_reason, "checksum": node.current_checksum.hex() if node.current_checksum else None, "exception": type(node.exception).__name__ if node.exception else None, "run": self._runtime_graph_entry(path)}
             nodes.append(entry)
         connections, anonymous_nodes = self._graph_connections()
-        return {
-            "__seamless_workflow__": "0.6",
+        graph = {
+            "__seamless_workflow__": "0.7",
             "nodes": nodes,
             "anonymous_nodes": {key: anonymous_nodes[key] for key in sorted(anonymous_nodes)},
             "connections": connections,
             "params": {},
         }
+        if self._graph.downloads:
+            graph["downloads"] = [
+                spec.to_graph() for _, spec in sorted(self._graph.downloads.items())
+            ]
+        return graph
 
-    def set_graph(self, graph, *, mount_prepared=(), share_prepared=()):
+    def set_graph(self, graph, *, mount_prepared=(), share_prepared=(), download_registrations=()):
         # Acquire the staged durable graph before releasing any live roles.
         claims = []
         for path, node in graph.nodes.items():
@@ -3138,7 +3143,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         except Exception:
             for cs in acquired: cs.decref_refholder()
             raise
-        share_registrations = tuple(prepared[2] for prepared in share_prepared)
+        share_registrations = (
+            tuple(prepared[2] for prepared in share_prepared) + tuple(download_registrations)
+        )
         if share_registrations:
             try:
                 share_registrations[0].server.commit_reservations(share_registrations)

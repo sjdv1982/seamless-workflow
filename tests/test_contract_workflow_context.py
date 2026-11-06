@@ -868,7 +868,7 @@ def test_get_graph_writes_format_0_6_with_an_anonymous_nodes_table(make_context)
     ctx.a = 1
     ctx.b = ctx.a
     graph = ctx.get_graph()
-    assert graph["__seamless_workflow__"] == "0.6"
+    assert graph["__seamless_workflow__"] == "0.7"
     assert graph["anonymous_nodes"] == {}
 
 

@@ -619,10 +619,10 @@ class TestSharePersistence:
                 ctx.set_graph(graph, shares=enabled)
 
     def test_roundtrip_and_opt_out(self, ctx, server):
-        """Graph serialization: normalized share spec, format 0.6, runtime namespace."""
+        """Graph serialization: normalized share spec, format 0.7, runtime namespace."""
         cell(ctx, 4).share(readonly=False)
         graph = ctx.get_graph()
-        assert graph["__seamless_workflow__"] == "0.6"
+        assert graph["__seamless_workflow__"] == "0.7"
         spec = graph["nodes"][0]["share"]
         assert spec == {"path": "a", "readonly": False, "mimetype": None, "toplevel": False}
         assert "namespace" not in json.dumps(graph)
@@ -1070,10 +1070,10 @@ with Context() as ctx:
 
 class TestSharePersistenceAudit:
     def test_current_writer_format_even_without_shares(self, ctx):
-        """Graph serialization: format 0.6 is emitted for every saved graph."""
-        assert ctx.get_graph()["__seamless_workflow__"] == "0.6"
+        """Graph serialization: format 0.7 is emitted for every saved graph."""
+        assert ctx.get_graph()["__seamless_workflow__"] == "0.7"
         cell(ctx)
-        assert ctx.get_graph()["__seamless_workflow__"] == "0.6"
+        assert ctx.get_graph()["__seamless_workflow__"] == "0.7"
 
     def test_same_context_same_url_reload_and_changed_key(self, ctx):
         """Graph serialization; Lifecycle: replacement can reserve its own live URLs."""

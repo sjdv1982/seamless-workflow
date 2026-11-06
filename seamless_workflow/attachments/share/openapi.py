@@ -187,7 +187,44 @@ def _operation_extensions(registration):
     }
 
 
+def _download_path_item(registration):
+    spec = registration.spec
+    failures = {
+        "type": "object",
+        "properties": {
+            "error": {"type": "string"},
+            "cells": {"type": "object", "additionalProperties": {"type": "string"}},
+        },
+        "required": ["error", "cells"],
+    }
+    return {
+        "get": {
+            "operationId": f"download{registration.route}",
+            "description": "Build and download an archive of the listed cells' buffers.",
+            "x-seamless-download": {"format": spec.format, "cells": spec.to_graph()["cells"]},
+            "responses": {
+                "200": {
+                    "description": "The archive, built from one consistent cut of the cells.",
+                    "headers": {
+                        "Content-Disposition": {"schema": {"type": "string"}},
+                        "Cache-Control": {"schema": {"type": "string", "enum": ["no-cache"]}},
+                    },
+                    "content": {spec.mimetype: {}},
+                },
+                "404": _json_error_response("The download does not exist."),
+                "409": {
+                    "description": "Some listed paths are not complete cells; every one is listed with its reason.",
+                    "content": {"application/json": {"schema": failures}},
+                },
+                "503": _json_error_response("A buffer cannot be resolved, or the build timed out."),
+            },
+        },
+    }
+
+
 def _path_item(registration):
+    if registration.is_download:
+        return _download_path_item(registration)
     extensions = _operation_extensions(registration)
     item = {
         "get": {

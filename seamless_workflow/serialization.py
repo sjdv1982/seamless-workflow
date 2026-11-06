@@ -37,9 +37,36 @@ def _parse_path_string(path):
     return tuple(reversed(components))
 
 
+def _prepare_downloads(entries, graph):
+    """Parse download entries by syntax only: cell paths are not checked against the graph."""
+    from .attachments.share.spec import DownloadSpec
+    share_keys = {
+        node.attachments['share'].path for node in graph.nodes.values()
+        if 'share' in node.attachments and not node.attachments['share'].toplevel
+    }
+    downloads = {}
+    try:
+        if not isinstance(entries, list):
+            raise TypeError('downloads must be a list')
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise TypeError('download spec must be a mapping')
+            if set(entry) - {'path', 'cells', 'format'} or not {'path', 'cells'} <= set(entry):
+                raise ValueError('download spec fields are path, cells and format')
+            spec = DownloadSpec(**entry)
+            if spec.path in downloads:
+                raise ValueError(f'download path {spec.path!r} is used more than once')
+            if spec.path in share_keys:
+                raise ValueError(f'download path {spec.path!r} is the key of a share')
+            downloads[spec.path] = spec
+    except (TypeError, ValueError) as exc:
+        raise PathError(f'Invalid download spec: {exc}') from exc
+    return downloads
+
+
 def prepare_graph(data):
     version = data.get('__seamless_workflow__', '0.2')
-    if version not in {'0.2', '0.3', '0.4', '0.5', '0.6'}:
+    if version not in {'0.2', '0.3', '0.4', '0.5', '0.6', '0.7'}:
         raise PathError(f'Unsupported workflow graph version: {version!r}')
     graph = ContextGraph()
     share_urls = set()
@@ -112,7 +139,7 @@ def prepare_graph(data):
                 validate_celltype(cfg.celltype, node.mount.mode)
             except (TypeError, ValueError) as exc: raise PathError(f'Invalid mount spec: {exc}') from exc
         if 'share' in entry:
-            if version not in {'0.6'}:
+            if version not in {'0.6', '0.7'}:
                 raise PathError('share entries require workflow graph version 0.6')
             try:
                 if node.kind != 'cell':
@@ -133,10 +160,14 @@ def prepare_graph(data):
             except (TypeError, ValueError) as exc:
                 raise PathError(f'Invalid share spec: {exc}') from exc
         graph.nodes[path] = node
+    if 'downloads' in data:
+        if version != '0.7':
+            raise PathError('downloads require workflow graph version 0.7')
+        graph.downloads = _prepare_downloads(data['downloads'], graph)
     anonymous_nodes = data.get("anonymous_nodes", {})
     if not isinstance(anonymous_nodes, dict):
         raise PathError("anonymous_nodes must be a mapping")
-    if version not in {"0.5", "0.6"} and anonymous_nodes:
+    if version not in {"0.5", "0.6", "0.7"} and anonymous_nodes:
         raise PathError("anonymous_nodes require workflow graph version 0.5")
     import re
     parsed_anonymous_nodes = {}

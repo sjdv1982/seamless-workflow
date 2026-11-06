@@ -1138,7 +1138,7 @@ def test_get_graph_writes_format_0_6_with_anonymous_nodes(tmp_path):
     # *Graph serialization*: the writer emits 0.6 and retains the
     # anonymous_nodes table; the mount entry rides on the cell entry.
     graph = _mounted_graph(tmp_path)
-    assert graph['__seamless_workflow__'] == '0.6'
+    assert graph['__seamless_workflow__'] == '0.7'
     assert graph['anonymous_nodes'] == {}
     assert graph['nodes'][0]['mount']['mode'] == 'rw'
 
