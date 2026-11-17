@@ -327,9 +327,13 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                         try: cleanup.result(max(0, deadline - time.monotonic()))
                         except TimeoutError: pass
                 self._side.close()
-                controller.enqueue("_finish_close", klass=1, internal=True).result()
-                controller.stop()
-                self._closed_event.set()
+                try:
+                    controller.enqueue("_finish_close", klass=1, internal=True).result()
+                finally:
+                    # Never leave the Context half-closed: a second close() (e.g. from
+                    # seamless.close() at exit) would hit the already-closed side loop.
+                    controller.stop()
+                    self._closed_event.set()
                 if shares is not None:
                     try:
                         shares._close_namespace(max(0, deadline - time.monotonic()))
@@ -353,13 +357,21 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if record.et is not None: record.et.cancel()
 
     def _finish_close(self):
+        # Release everything even if some releases raise; report the first error
+        # at the end, so refholds are never left half-released.
+        errors = []
+
+        def attempt(release):
+            try: release()
+            except Exception as exc: errors.append(exc)
+
         self._mount_close_finish()
         for leases in self._mount_node_leaves.values():
-            for lease in leases: lease._release_refholds()
+            for lease in leases: attempt(lease._release_refholds)
         self._mount_node_leaves.clear()
-        self._release_refholds()
+        attempt(self._release_refholds)
         for lease, _ in self._facts.values():
-            if lease is not None: lease._release_refholds()
+            if lease is not None: attempt(lease._release_refholds)
         self._facts.clear()
         self._jobs.clear()
         self._celljoins.clear()
@@ -371,6 +383,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._code_refholds.clear()
         self._module_refholds.clear()
         self._superseded_refholds.clear()
+        if errors: raise errors[0]
 
     def _publish_config(self, path, revision, cfg):
         if self._revisions.get(path, 0) != revision: return False
@@ -1579,12 +1592,15 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def _release_refholds(self):
         if self._refholds_released:
             return
+        errors = []
         for checksum, _role in list(self._refheld_checksums()):
-            checksum.decref_refholder()
+            try: checksum.decref_refholder()
+            except Exception as exc: errors.append(exc)
         self._superseded_refholds.clear()
         self._anonymous_current_refholds.clear()
         self._edge_pin_refholds.clear()
         self._refholds_released = True
+        if errors: raise errors[0]
 
     def _release_all_producers(self):
         self._release_refholds()

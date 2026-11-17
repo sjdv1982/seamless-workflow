@@ -22,8 +22,7 @@ class SyncReport(dict):
 
 class MountLease(Lease):
     def __init__(self, checksum, role, celltype='mixed'):
-        self.role = role
-        super().__init__(checksum, celltype)
+        super().__init__(checksum, celltype, role=role)
 
     def _refheld_checksums(self):
         return () if self.released or self.checksum is None else ((self.checksum, self.role),)

@@ -76,6 +76,9 @@ class SideLoop:
         return asyncio.run_coroutine_threadsafe(coroutine, self.loop)
 
     def close(self):
+        if self.loop.is_closed() or not self.thread.is_alive():
+            return  # already closed (idempotent)
+
         def stop_when_idle():
             pending = [task for task in asyncio.all_tasks(self.loop) if not task.done()]
             if pending:
@@ -83,7 +86,10 @@ class SideLoop:
             else:
                 self.loop.stop()
 
-        self.loop.call_soon_threadsafe(stop_when_idle)
+        try:
+            self.loop.call_soon_threadsafe(stop_when_idle)
+        except RuntimeError:  # loop closed concurrently
+            pass
         self.thread.join()
 
 
