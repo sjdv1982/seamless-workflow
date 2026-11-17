@@ -276,6 +276,12 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         return copy.deepcopy(self._graph.nodes[path])
 
     @property
+    def controller_failure(self):
+        """The ControllerFailedError if this Context's controller was poisoned
+        (a controller-internal failure, section 12.3), else None.  Read-only."""
+        return self._controller.failure
+
+    @property
     def mounts(self):
         from .attachments.api import ContextMounts
         return ContextMounts(self)
@@ -582,6 +588,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if path and path[0] == "shares":
             raise PathError("shares is a reserved Context API name")
         if path == ("mounts",): raise AttributeError("mounts is reserved for the Context mount API")
+        if path == ("controller_failure",): raise AttributeError("controller_failure is reserved for the Context failure status")
         if path in self._graph.nodes:
             node = self._graph.nodes[path]
             if node.kind == "cell":

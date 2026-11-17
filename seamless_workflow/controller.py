@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -138,6 +139,12 @@ class Controller:
         if self.failure is not None:
             return
         self.failure = ControllerFailedError(f'Controller {operation} failed: {type(exc).__name__}: {exc}')
+        # A poisoned controller refuses all further ingress: make that visible.
+        logging.getLogger(__name__).error(
+            "Controller poisoned by %s; the Context now refuses further updates: %s: %s",
+            operation, type(exc).__name__, exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
         with self.lock:
             self.accepting = False
         for future in context._barriers:

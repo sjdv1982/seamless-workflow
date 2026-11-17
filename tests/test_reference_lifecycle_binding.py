@@ -264,7 +264,11 @@ def test_failure_after_transformer_publication_poisons_the_context(monkeypatch, 
     assert ctx._refheld_checksums() == ()
     with caplog.at_level("WARNING", logger="seamless.references"):
         audit_reference_accounting(holders=[ctx, replacement])
-    assert caplog.text == ""
+    # This test poisons the controller on purpose: that is logged at ERROR by
+    # seamless_workflow.controller, and must be the ONLY log output.
+    poison_logs = [r for r in caplog.records if r.name == "seamless_workflow.controller"]
+    assert poison_logs and all(r.levelname == "ERROR" and "poisoned" in r.getMessage() for r in poison_logs)
+    assert [r for r in caplog.records if r.name != "seamless_workflow.controller"] == []
     replacement._release_refholds()
 
 
