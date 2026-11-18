@@ -29,6 +29,7 @@ class Controller:
         self.context_id = context.top_id
         self.lock = Lock()
         self.queue = deque()
+        self.mount_tick_reply = None
         self.sequence = 0
         self.accepting = True
         self.stopped = False
@@ -69,6 +70,13 @@ class Controller:
                 raise self.failure
             if self.stopped or (not self.accepting and not internal):
                 raise ClosedContextError("Context is closed")
+            # Each tick dispatches every mount. The filesystem broker sends
+            # one per registration, so queueing all of them can starve edits
+            # indefinitely in a Context with many mounted outputs.
+            if operation == '_mount_tick':
+                if self.mount_tick_reply is not None and not self.mount_tick_reply.done():
+                    return self.mount_tick_reply
+                self.mount_tick_reply = reply
             self.sequence += 1
             message = ContextMessage(self.context_id, self.sequence, klass, operation, tuple(args), tuple((kwargs or {}).items()), reply)
             self.queue.append(message)

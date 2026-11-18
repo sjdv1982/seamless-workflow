@@ -5,6 +5,32 @@ from seamless_workflow import Context
 from seamless_workflow.errors import ReentrantContextError
 
 
+def test_mount_wakeups_coalesce_so_they_cannot_starve_shared_edits():
+    with Context() as ctx:
+        owner = ctx._controller
+        blocked, release = threading.Event(), threading.Event()
+
+        def pause():
+            blocked.set()
+            release.wait(5)
+
+        owner.loop.call_soon_threadsafe(pause)
+        assert blocked.wait(5)
+        try:
+            ticks = [owner.enqueue('_mount_tick', (str(index),), internal=True)
+                     for index in range(1000)]
+            read = owner.enqueue('_mount_report', klass=4)
+            assert len(owner.queue) == 2
+            assert all(tick is ticks[0] for tick in ticks)
+        finally:
+            release.set()
+        read.result(timeout=5)
+        ticks[0].result(timeout=5)
+        next_tick = owner.enqueue('_mount_tick', internal=True)
+        assert next_tick is not ticks[0]
+        next_tick.result(timeout=5)
+
+
 def test_concurrent_ingress_has_one_total_order_and_owner():
     ctx = Context()
     try:

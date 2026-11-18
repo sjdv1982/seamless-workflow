@@ -517,18 +517,51 @@ def test_echo_of_in_flight_delivery_is_adopted():
                 future.result(timeout=5)
 
 
-def test_identical_rewrite_and_touch_are_unchanged(tmp_path):
+@pytest.mark.parametrize('value', ['one', 'two'])
+def test_explicit_share_put_is_not_ignored_as_unchanged_or_echo(value):
+    from dataclasses import replace
+
+    with Context() as c:
+        c.a = Cell(celltype='text'); c.a.set('one')
+        driver = ManualDriver().attach(c.a, 'one')
+        delivery = None
+        try:
+            c.a.set('two'); c.get_graph()
+            delivery = driver.deliveries.popleft()
+            c.a.set('three'); c.get_graph()
+            # 'one' matches the transport's old value; 'two' matches its
+            # in-flight delivery. Both are nevertheless new explicit edits.
+            observation = replace(driver.observation(value), reason='share PUT')
+            driver.registration.sink('_mount_observed', observation).result(timeout=5)
+            assert c.a.value == value
+        finally:
+            if delivery is not None:
+                driver.ack(delivery); c.get_graph()
+            future = c._controller.call('_mount_detach', ('a',), driver='manual',
+                                        registration=driver.registration, delete=False)
+            if future is not None:
+                future.result(timeout=5)
+
+
+def test_identical_rewrite_and_touch_are_unchanged(tmp_path, monkeypatch):
     # `unchanged`: "Identical-content rewrites and touch end here" -- in `w`
     # mode that means no reassert and no detector count.
     p = tmp_path / 'a.txt'
     with Context() as c, record_attachments(c) as log:
         c.a = Cell(celltype='text'); c.a.set('ours'); c.a.mount(p, mode='w')
         c.mounts.sync(timeout=5)
+        derivations = []
+        derive = Context._derive_all
+        def counted_derive(self):
+            derivations.append(self)
+            return derive(self)
+        monkeypatch.setattr(Context, '_derive_all', counted_derive)
         for _ in range(4):
             p.write_text('ours\n'); os.utime(p); c.mounts.sync(timeout=5)
         assert c.a.mount.status['state'] == 'active' and c.a.mount.error is None
         kinds = [e[2] for e in log.entries()]
         assert 'reassert' not in kinds
+        assert not derivations, 'unchanged output mounts must not re-derive the graph'
 
 
 def test_absent_clears_sense_error_without_changing_node(tmp_path):

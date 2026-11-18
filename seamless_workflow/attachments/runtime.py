@@ -255,15 +255,26 @@ class AttachmentRuntime:
                                         fingerprint=observation.fingerprint, disk_fingerprint=session.fingerprint)
             self._mount_event(session, 'observation', classification=kind, ws=observation.ws)
             if kind == 'stale': return
+            # A PUT is an explicit user edit, even when its value happens to
+            # match an old transport value or an in-flight outbound delivery.
+            # Treating it as an echo can leave the graph on the previous edit
+            # indefinitely when a user restores a recently used value.
+            if observation.reason == 'share PUT' and observation.checksum not in {ABSENT, INVALID}:
+                kind = 'foreign'
             session.processed_ws = observation.ws
             session.disk, session.fingerprint = observation.checksum, observation.fingerprint
+            input_changed = False
             if kind == 'foreign' and 'r' in session.spec.mode:
                 self._mount_sense(session, observation)
+                input_changed = True
             elif kind == 'rejected' and 'r' in session.spec.mode:
                 self._mount_sense_error(session, observation.reason)
+                input_changed = True
             elif kind == 'absent' and session.spec.authority == 'file-strict':
                 self._mount_sense_error(session, 'Required file is missing')
+                input_changed = True
             elif kind == 'absent':
+                input_changed = session.sense_error is not None
                 session.sense_error = None
             elif (
                 kind == 'unchanged'
@@ -272,6 +283,7 @@ class AttachmentRuntime:
                 and observation.checksum not in {ABSENT, INVALID}
             ):
                 self._mount_sense(session, observation)
+                input_changed = True
             node = self._graph.nodes[session.node_path]
             if session.spec.mode == 'rw' and observation.needs_canonical_write and kind in {'foreign', 'unchanged'} and session.sense_error is None:
                 source = observation.checksum if kind == 'foreign' or node.state != 'complete' else node.current_checksum.hex()
@@ -286,7 +298,9 @@ class AttachmentRuntime:
                     session.error = ConflictError(f'{session.spec.path}: three reasserts in 20 seconds ({observation.checksum}, {node.current_checksum.hex()})')
                     if session.pending: session.pending.lease._release_refholds(); session.pending = None
                 else: self._mount_request(session, node.current_checksum.hex())
-            self._derive_all()
+            # Output echoes and unchanged files do not alter graph inputs.
+            if input_changed:
+                self._derive_all()
         except Exception as exc:
             if session is not None: session.error = MountError(str(exc))
         finally: observation.release()
