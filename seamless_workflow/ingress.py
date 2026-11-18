@@ -390,7 +390,7 @@ def controller_method(method):
             from .attachments.api import load_graph
             return load_graph(self, args[0], **kwargs)
         try:
-            reads = {'get_graph', '_node_snapshot', '_read_snapshot', '_lookup', '_child_names', '_incoming_edge',
+            reads = {'get_graph', '_node_snapshot', '_read_snapshot', '_fingertip_producer', '_lookup', '_child_names', '_incoming_edge',
                      '_pin_snapshot', '_public_source', '_public_cell_source', '_effective_input_celltype', '_freeze_transformer', '_build_cell_expression',
                      '_build_source_expression', '_capture_endpoint', '_refheld_checksums'}
             klass = 4 if name in reads else (1 if name in {'prune', '_clear_exception'} else 2)

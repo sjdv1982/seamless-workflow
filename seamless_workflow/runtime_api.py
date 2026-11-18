@@ -4,6 +4,7 @@ import copy
 import json
 import time
 from concurrent.futures import Future
+from dataclasses import replace
 from seamless import Checksum, Expression
 from .builder_state import (
     _cell_block_reason,
@@ -73,6 +74,35 @@ class RuntimeAPI:
         # A pending node has no published result. Attribute reads never wait
         # for its computation; compute/computation supply that explicit wait.
         return Lease(self._get_checksum(path, ()), self._node_celltype(path))
+
+    def _fingertip_producer(self, path, checksum):
+        """Freeze the live producer of this checksum across direct cell links."""
+        while True:
+            node = self._graph.nodes.get(path)
+            if node is None or node.state != 'complete' or node.current_checksum != checksum:
+                return None
+            if node.kind == 'transformer':
+                break
+            incoming = self._incoming_for(path)
+            if set(incoming) != {()}:
+                return None
+            path, local = self._graph.resolve_existing(incoming[()].source)
+            if local:
+                return None
+
+        run = self._runtime.current_runs.get(path)
+        if run is None or run.identity_checksum is None or run.result_checksum != checksum:
+            return None
+        code, pins, config_token = run.demand_key
+        if config_token != node.transformer_config.config_token:
+            return None
+        frozen = self._freeze_transformer(
+            path,
+            concrete_args={pin: Checksum(value) for pin, value in pins},
+            concrete_code=Checksum(code),
+            dispatch_scratch=run.dispatch_scratch,
+        )
+        return run.identity_checksum, replace(frozen, signature=None)
 
     def _install_wait(self, path=None, local=(), *, read=False, barrier=False,
                       return_none_on_incomplete=False):

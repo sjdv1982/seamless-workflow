@@ -6,7 +6,7 @@ import copy
 import operator
 from typing import Any
 
-from seamless import Cell, Checksum, Expression
+from seamless import CacheMissError, Cell, Checksum, Expression
 from seamless.cell_class import _UNSET, append_item_path, append_slice_path
 from seamless_transformer.frozen_transformer import FrozenTransformer
 from seamless_transformer.transformation_utils import resolve_lock_meta
@@ -460,6 +460,46 @@ class BoundCellBackend:
         if self.state == "miswired":
             return self._hold_result(None)
         return self._hold_result(self.context._get_checksum(self.node_path))
+
+    def fingertip(self):
+        checksum = self.checksum
+        if checksum is None:
+            return None
+        try:
+            return checksum.fingertip_sync()
+        except CacheMissError:
+            producer = self.context._fingertip_producer(self.node_path, checksum)
+            if producer is None:
+                raise
+            identity, frozen = producer
+            transformation = None
+            try:
+                # If the definition was available, rebuilding it cannot help.
+                try:
+                    identity.resolve()
+                except CacheMissError:
+                    pass
+                else:
+                    raise
+
+                from seamless_transformer.transformer_class import PythonBashBaseTransformer
+                from .sidework import Lease
+
+                builder = PythonBashBaseTransformer.__new__(PythonBashBaseTransformer)
+                transformation = builder._build_from_frozen(frozen)
+                if transformation._construct(publish_definition=False) != identity:
+                    raise
+
+                definition = Lease(identity)
+                try:
+                    return checksum.fingertip_sync()
+                finally:
+                    definition._release_refholds()
+            finally:
+                if transformation is not None:
+                    transformation._release_refholds()
+                for lease in frozen.leases:
+                    lease._release_refholds()
 
     @property
     def buffer(self):

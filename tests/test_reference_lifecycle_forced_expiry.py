@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from seamless import Buffer, CacheMissError, Cell
+from seamless.caching import buffer_writer
 from seamless.caching.buffer_cache import get_buffer_cache
 from seamless.reference_lifecycle import collect_refholder_claims
 from seamless_workflow import Context
@@ -22,6 +23,10 @@ def _unique(label: str) -> str:
 
 def identity(value):
     return value
+
+
+def make_folder(value):
+    return {"content.txt": value.encode()}
 
 
 def _guard_remote(monkeypatch):
@@ -40,6 +45,47 @@ def _assert_miss(monkeypatch, checksum):
     _guard_remote(monkeypatch)
     with pytest.raises((CacheMissError, RuntimeError, ValueError)):
         checksum.resolve()
+
+
+def test_bound_cell_fingertip_rebuilds_expired_live_transformer_definition(
+    make_context, monkeypatch
+):
+    from seamless_transformer.transformation_cache import get_transformation_cache
+
+    _guard_remote(monkeypatch)
+    writes = []
+    monkeypatch.setattr(buffer_writer, "register", lambda buf: writes.append(buf.get_checksum()))
+    ctx = make_context()
+    original = _unique("folder-input")
+    ctx.x = Cell("plain")
+    ctx.x.set(original)
+    ctx.tf = make_folder
+    ctx.tf.local = True
+    ctx.tf.celltypes.value = "plain"
+    ctx.tf.celltypes.result = "folder"
+    ctx.tf.pins.value = ctx.x
+    ctx.files = ctx.tf.result
+    ctx.compute(timeout=10)
+    result = ctx.files.checksum
+    members = ctx.files.value
+    (definition,) = get_transformation_cache().get_reverse_transformations(result)
+
+    force_expiry(result)
+    force_expiry(definition)
+    ctx.x.set("different input")
+    ctx.compute(timeout=10)
+    ctx.x.set(original)
+    ctx.compute(timeout=10)
+
+    assert ctx.files.checksum == result
+    with pytest.raises(CacheMissError):
+        definition.resolve()
+    with pytest.raises(CacheMissError):
+        result.fingertip_sync()
+    writes.clear()
+    assert ctx.files.fingertip().get_value("plain") == members
+    assert ctx.files.value == members
+    assert definition not in writes
 
 
 def test_cell_literal_and_current_result_are_independent_roles(monkeypatch):
