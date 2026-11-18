@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "seamless-workflow"
-version = "0.2.0"
+version = "0.2.1"
 description = "Reactive workflow Context layer for Seamless"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Sjoerd de Vries"}]
 dependencies = [
-    "seamless-core>=0.2",
-    "seamless-transformer>=0.8.0",
+    "seamless-core>=0.3",
+    "seamless-transformer>=0.8.1",
     "traitlets", 
     "ipywidgets",
     "aiohttp>=3.9"
