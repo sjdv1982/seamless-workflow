@@ -19,7 +19,7 @@ import aiohttp
 import pytest
 import requests
 
-from seamless import Buffer, Cell, Checksum
+from seamless import Buffer, CacheMissError, Cell, Checksum
 from seamless.checksum.null import NULL_CHECKSUM
 from seamless_workflow import Context
 from seamless_workflow.errors import AuthorityError, PathError
@@ -77,6 +77,10 @@ def fail_negative(x):
     if x < 0:
         raise ValueError("negative input")
     return x
+
+
+def browser_result(x):
+    return "result for " + x
 
 
 @contextmanager
@@ -438,6 +442,95 @@ with socket.socket() as occupied:
         after = get(url)
         assert after.status_code == 200 and after.content == before.content
         assert marker(after) == marker(before)
+
+    def test_sharing_already_complete_missing_checksum_does_not_recover(self, ctx, monkeypatch):
+        calls = []
+
+        async def missing(checksum, *args, **kwargs):
+            calls.append(checksum)
+            raise CacheMissError(checksum)
+
+        monkeypatch.setattr(Checksum, "fingertip", missing)
+        ctx.out = Cell("str")
+        ctx.out.set_checksum(Checksum(bytes(range(32))))
+        ctx.out.share()
+        ctx.mounts.sync(timeout=10)
+        assert ctx.out.state == "complete"
+        assert get(ctx.out.share.url).status_code == 503
+        assert calls == []
+
+    @pytest.mark.parametrize("scratch", [False, True])
+    def test_evicted_earlier_result_is_announced_after_recovery(self, ctx, monkeypatch, scratch):
+        from helpers.reference_lifecycle import force_expiry
+        from seamless_remote import buffer_remote
+
+        monkeypatch.setattr(buffer_remote, "has_read_server", lambda: False)
+        monkeypatch.setattr(buffer_remote, "has_write_server", lambda: False)
+        cell(ctx, "first edit", celltype="str")
+        ctx.tf = browser_result
+        ctx.tf.local = True
+        ctx.tf.scratch = scratch
+        ctx.tf.celltypes.x = "str"
+        ctx.tf.celltypes.result = "str"
+        ctx.tf.pins.x = ctx.a
+        ctx.out = Cell("str")
+        ctx.out.scratch = scratch
+        ctx.out = ctx.tf.result
+        ctx.out.share()
+        ctx.mounts.sync(timeout=10)
+        first = ctx.out.checksum
+
+        ctx.a.set("second edit")
+        ctx.mounts.sync(timeout=10)
+        url = ctx.out.share.url
+        second = get(url)
+        assert second.json() == "result for second edit"
+        ctx.prune()
+        force_expiry(first)
+        with pytest.raises(CacheMissError):
+            first.resolve()
+
+        started = threading.Event()
+        resume = threading.Event()
+        original = Checksum.fingertip
+
+        async def paused_recovery(checksum, *args, **kwargs):
+            if checksum == first:
+                started.set()
+                assert await asyncio.to_thread(resume.wait, 10)
+            return await original(checksum, *args, **kwargs)
+
+        monkeypatch.setattr(Checksum, "fingertip", paused_recovery)
+        with updates(ctx.shares.url) as receive:
+            assert receive("shares")[1]["out"]["marker"] == marker(second)
+            ctx.a.set("first edit")
+            try:
+                assert started.wait(5), "Context did not start buffer recovery"
+                assert ctx.out.state == "waiting" and ctx.out.checksum is None
+                graph_url = ctx.shares.url + "/state-graph"
+                deadline = time.monotonic() + 3
+                while True:
+                    graph = get(graph_url).json()
+                    out = next(node for node in graph["nodes"] if node["path"] == ["out"])
+                    if out["state"] == "waiting":
+                        break
+                    assert time.monotonic() < deadline, out
+                    time.sleep(0.05)
+                assert out["checksum"] is None
+                while_waiting = get(url)
+                assert while_waiting.content == second.content
+                assert marker(while_waiting) == marker(second)
+                with pytest.raises(queue.Empty):
+                    receive("update", timeout=0.2)
+            finally:
+                resume.set()
+
+            ctx.mounts.sync(timeout=10)
+            event = receive("update")[1]
+            recovered = get(url)
+            assert recovered.json() == "result for first edit"
+            assert event == ["out", first.hex(), marker(recovered)]
+            assert marker(recovered) == marker(second) + 1
 
     def test_slots_coexist_and_detach_independently(self, ctx, tmp_path):
         """Share slot; Lifecycle; Barrier: file/widget/share independence."""

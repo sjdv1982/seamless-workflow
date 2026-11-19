@@ -57,8 +57,14 @@ from .sidework import (
     evaluate_projection,
 )
 
+
 PIN_CELLTYPES = {"plain", "mixed", "deepcell", "deepfolder", "folder"}
 _DEEP_CELLTYPES = {"deepcell", "deepfolder", "folder"}
+
+
+def _fingertip_checksum_buffer(checksum):
+    checksum.fingertip_sync().tempref()
+    return checksum
 
 
 def _projected_source_type_error(
@@ -205,6 +211,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         object.__setattr__(self, "_side", SideLoop(f"Context-side-{self.top_id[:8]}"))
         object.__setattr__(self, "_jobs", {})
         object.__setattr__(self, "_facts", {})
+        object.__setattr__(self, "_cell_buffer_recoveries", {})
         object.__setattr__(self, "_celljoins", {})
         object.__setattr__(self, "_used_celljoins", set())
         object.__setattr__(self, "_barriers", {})
@@ -380,6 +387,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if lease is not None: attempt(lease._release_refholds)
         self._facts.clear()
         self._jobs.clear()
+        self._cell_buffer_recoveries.clear()
         self._celljoins.clear()
         self._used_celljoins.clear()
         self._runtime.current_runs.clear()
@@ -1653,6 +1661,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         for key in set(self._facts) - self._used_facts:
             lease, _ = self._facts.pop(key)
             if lease is not None: lease._release_refholds()
+        for path, key in tuple(self._cell_buffer_recoveries.items()):
+            if key not in self._jobs:
+                del self._cell_buffer_recoveries[path]
         for path in set(self._celljoins) - self._used_celljoins:
             self._celljoins.pop(path, None)
         for path in sorted(self._graph.nodes):
@@ -1859,8 +1870,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                         cfg.validator, cfg.validator_language, scratch=cfg.scratch,
                         input_materializer=input_materializer,
                     )
-                    self._replace_current_checksum(path, checksum)
-                    node.state, node.block_reason, node.exception = state, None, error
+                    self._apply_cell_result(path, node, checksum, state, error)
                     return
                 state, checksum = self._source_state(edge)
                 if state != "complete":
@@ -1882,11 +1892,9 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                         cfg.validator, cfg.validator_language, scratch=cfg.scratch,
                         input_materializer=self._scratch_source_materializer(source_path),
                     )
-                    self._replace_current_checksum(path, checksum)
-                    node.state, node.block_reason, node.exception = state, None, error
+                    self._apply_cell_result(path, node, checksum, state, error)
                     return
-                self._replace_current_checksum(path, checksum)
-                node.state, node.block_reason, node.exception = "complete", None, None
+                self._apply_cell_result(path, node, checksum, "complete")
                 return
             elif node.cell_root_expression is not None:
                 expression = node.cell_root_expression
@@ -1897,8 +1905,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     node.state, node.block_reason = "failed", None
                     node.exception = exc
                     return
-                self._replace_current_checksum(path, checksum)
-                node.state, node.block_reason, node.exception = "complete", None, None
+                self._apply_cell_result(path, node, checksum, "complete")
                 return
             else:
                 checksum = producer.checksum if producer else None
@@ -1908,8 +1915,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             if checksum is not None and (input_type != cfg.celltype or cfg.validator is not None):
                 state, checksum, error = self._projection(checksum, (), input_type, cfg.celltype, cfg.validator, cfg.validator_language,
                                                           scratch=cfg.scratch)
-            self._replace_current_checksum(path, checksum)
-            node.state, node.block_reason, node.exception = state, None, error
+            self._apply_cell_result(path, node, checksum, state, error)
             return
         self._used_celljoins.add(path)
         members = {}
@@ -1986,8 +1992,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             (celljoin, bool(cfg.scratch)),
             leases,
         )
-        self._replace_current_checksum(path, checksum)
-        node.state, node.block_reason, node.exception = state, None, error
+        self._apply_cell_result(path, node, checksum, state, error)
 
     def _source_celltype(self, value):
         endpoint = self._endpoint(value)
@@ -2071,11 +2076,81 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             return bool(node.transformer_config.scratch)
         return False
 
+    def _hashserver_configured(self):
+        try:
+            from seamless_remote import buffer_remote
+        except ImportError:
+            return False
+        has_read_server = getattr(buffer_remote, "has_read_server", lambda: False)
+        has_write_server = getattr(buffer_remote, "has_write_server", lambda: False)
+        return bool(has_read_server() or has_write_server())
+
+    def _has_actuating_attachment(self, path):
+        return any(
+            session.spec.driver in {"share", "widget"}
+            or (session.spec.driver == "file" and session.spec.mode == "w")
+            for session in self._mount_sessions_for(path)
+        )
+
+    def _apply_cell_result(self, path, node, checksum, state, error=None):
+        if (
+            state == "complete"
+            and checksum is not None
+            and self._has_actuating_attachment(path)
+            and not self._hashserver_configured()
+        ):
+            from seamless.checksum.null import canonicalize_checksum
+
+            checksum = canonicalize_checksum(
+                normalize_checksum(checksum), node.cell_config.celltype
+            )
+            previous = node.current_checksum
+            if (previous is None or previous != checksum) and self._wait_for_cell_buffer(
+                path, checksum
+            ):
+                state, checksum, error = "waiting", None, None
+
+        self._replace_current_checksum(path, checksum)
+        node.state, node.block_reason, node.exception = state, None, error
+
+    def _wait_for_cell_buffer(self, path, checksum):
+        """Demand recovery and return whether the checksum must stay pending."""
+        key = self._cell_buffer_recoveries.get(path)
+        checksum_hex = checksum.hex()
+        if key is None or key[2] != checksum_hex:
+            from seamless.caching.buffer_cache import get_buffer_cache
+            from seamless.checksum.calculate_checksum import TRIVIAL_CHECKSUMS
+
+            if (
+                checksum_hex in TRIVIAL_CHECKSUMS
+                or get_buffer_cache().get(checksum) is not None
+            ):
+                return False
+            # A superseded recovery cannot supply a fact for a later request.
+            key = (
+                "cell-buffer-fingertip", path, checksum_hex,
+                self._runtime.next_generation(),
+            )
+            self._cell_buffer_recoveries[path] = key
+
+        state, _, _ = self._demand(
+            key, _fingertip_checksum_buffer, (checksum,), (checksum,)
+        )
+        if state == "waiting":
+            return True
+        # Apply the checksum even after a miss. Derivation releases the fact
+        # lease after the cell has taken its own claim.
+        self._used_facts.discard(key)
+        return False
+
     def _edge_target_scratch(self, target_node, target_local):
         if target_node.kind == "cell":
             return bool(target_node.cell_config.scratch)
         if target_node.kind == "transformer":
-            return bool(target_node.transformer_config.meta.get("allow_input_fingertip"))
+            return (
+                bool(target_node.transformer_config.meta.get("allow_input_fingertip"))
+                or not self._hashserver_configured()
+            )
         return False
 
     def _feeds_non_scratch_holder(self, path):

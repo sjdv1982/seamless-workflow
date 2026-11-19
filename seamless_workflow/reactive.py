@@ -3,7 +3,7 @@ import asyncio
 import copy
 from dataclasses import replace
 import weakref
-from seamless import Checksum
+from seamless import CacheMissError, Checksum
 from . import scheduler as _scheduler
 from .scheduler import RunRecord, ExceptionInfo
 from .sidework import Lease
@@ -13,6 +13,11 @@ from .errors import WorkflowExecutionError
 class Reactive:
     def _derive_transformer(self, path, node):
         cfg = node.transformer_config
+        hashserver_configured = self._hashserver_configured()
+        fingertip_inputs = (
+            bool(cfg.meta.get("allow_input_fingertip"))
+            or not hashserver_configured
+        )
         compiled = cfg.compilation is not None
         if compiled:
             from seamless_transformer.compiled_validation import validate_stage1
@@ -96,7 +101,7 @@ class Reactive:
                 unavailable(pin, 'failed')
                 continue
             if input_type != output_type:
-                scratch = bool(cfg.meta.get('allow_input_fingertip')) and edge is not None
+                scratch = fingertip_inputs and edge is not None
                 state, checksum, error = self._projection(
                     checksum, (), input_type, output_type,
                     scratch=scratch, materialize=not scratch,
@@ -171,8 +176,6 @@ class Reactive:
                 and self._feeds_non_scratch_holder(path)
             )
             if needs_value:
-                from seamless import CacheMissError
-
                 try:
                     current.result_checksum.resolve()
                 except CacheMissError:
@@ -214,10 +217,14 @@ class Reactive:
         frozen = self._freeze_transformer(
             path, concrete_args=pins, concrete_code=code,
             dispatch_scratch=record.dispatch_scratch)
-        frozen = replace(frozen, signature=None)
+        frozen_meta = frozen.meta
+        if not hashserver_configured:
+            frozen_meta = {**frozen_meta, "allow_input_fingertip": True}
+        frozen = replace(frozen, meta=frozen_meta, signature=None)
         leases = frozen.leases
         owner = weakref.ref(self)
         side = self._side
+        require_value = hashserver_configured or force_value_run
         async def execute(frozen=frozen, leases=leases):
             from seamless_transformer.transformer_class import PythonBashBaseTransformer
             tf = None
@@ -237,33 +244,31 @@ class Reactive:
                 tf = builder._build_from_frozen(frozen)
                 tf_checksum = await tf.construction()
                 if tf_checksum is None:
-                    if isinstance(tf.exception, Exception):
-                        raise tf.exception
+                    structured_exception = getattr(tf, "_exception", None)
+                    if isinstance(structured_exception, CacheMissError):
+                        raise structured_exception
                     if isinstance(tf.exception, str) and len(tf.exception) == 64:
                         try:
                             int(tf.exception, 16)
                         except ValueError:
                             pass
                         else:
-                            from seamless import CacheMissError
-
                             raise CacheMissError(tf.exception)
                     raise RuntimeError(tf.exception or 'Transformation construction failed')
                 send('_transformation_started', path, generation, tf_checksum)
                 from seamless_transformer.observation import observed_as
                 with observed_as(".".join(path)):
-                    result = await tf.computation(require_value=True)
+                    result = await tf.computation(require_value=require_value)
                 if result is None:
-                    if isinstance(tf.exception, Exception):
-                        raise tf.exception
+                    structured_exception = getattr(tf, "_exception", None)
+                    if isinstance(structured_exception, CacheMissError):
+                        raise structured_exception
                     if isinstance(tf.exception, str) and len(tf.exception) == 64:
                         try:
                             int(tf.exception, 16)
                         except ValueError:
                             pass
                         else:
-                            from seamless import CacheMissError
-
                             raise CacheMissError(tf.exception)
                     raise RuntimeError(tf.exception or 'Transformation failed')
                 completion = (path, generation, tf_checksum, Lease(result), None)

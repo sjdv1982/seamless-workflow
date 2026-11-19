@@ -16,6 +16,17 @@ def add_suffix(value):
 
 
 @pytest.fixture
+def configured_hashserver(monkeypatch):
+    from seamless_remote import buffer_remote
+
+    # These ownership assertions describe the configured-hashserver path.
+    # The no-hashserver Context override is covered separately by
+    # test_contract_xyx.py.
+    monkeypatch.setattr(buffer_remote, "has_read_server", lambda: True)
+    monkeypatch.setattr(buffer_remote, "has_write_server", lambda: True)
+
+
+@pytest.fixture
 def writes(monkeypatch):
     result = []
     monkeypatch.setattr(buffer_writer, "register", lambda buf: result.append(buf.get_checksum()))
@@ -23,7 +34,9 @@ def writes(monkeypatch):
 
 
 @pytest.mark.parametrize("allow_fingertip", [False, True])
-def test_edge_fed_conversion_claim_follows_pin(writes, monkeypatch, allow_fingertip):
+def test_edge_fed_conversion_claim_follows_pin(
+    writes, monkeypatch, configured_hashserver, allow_fingertip
+):
     """pins.md, *Scratch at the pin*: an edge-fed pin claims its converted input."""
     builder = delayed(add_suffix)
     builder.local = True
@@ -222,7 +235,9 @@ def test_intermediate_link_into_cell_is_scratch(scratch):
 
 
 @pytest.mark.parametrize("drop_buffer", [False, True])
-def test_completed_scratch_producer_is_recomputed_for_new_value_request(writes, drop_buffer):
+def test_completed_scratch_producer_is_recomputed_for_new_value_request(
+    writes, configured_hashserver, drop_buffer
+):
     """pins.md, *Scratch at the pin*: a missing result's bytes require a new run."""
     producer = delayed(add_suffix)
     producer.local = True
