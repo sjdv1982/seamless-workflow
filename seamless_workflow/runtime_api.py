@@ -243,10 +243,11 @@ class RuntimeAPI:
             set(node.transformer_pin_producers) | set(cfg.modules) |
             ({'code'} if code_edge is None else set())
         )
+        from .configuration import copy_modules
         return FrozenTransformer(
             codebuf=code, language=cfg.language, celltypes=copy.deepcopy(cfg.celltypes),
             optional_pins=frozenset(cfg.optional_pins), args=args,
-            modules=copy.deepcopy(cfg.modules), globals=copy.deepcopy(cfg.globals),
+            modules=copy_modules(cfg.modules), globals=copy.deepcopy(cfg.globals),
             meta=copy.deepcopy(cfg.meta), environment=copy.deepcopy(cfg.environment),
             scratch=(cfg.scratch if dispatch_scratch is None else dispatch_scratch),
             local=cfg.local, streaming=cfg.streaming,

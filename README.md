@@ -69,8 +69,11 @@ evicted when its temporary reference expires. A cell can then receive a
 checksum whose buffer is gone, typically by a cache hit after an input went
 X → Y → X. A cell with a `w` mount does not take such a checksum at once: it
 stays `waiting` while the Context fingertips the buffer, reading it back from a
-local buffer source or recomputing it. The file is written after that. Every
-transformation that such a Context runs also fingertips missing inputs.
+local buffer source or recomputing it. The file is written after that. For a
+`folder` cell, a missing leaf counts too: if any leaf is gone, the Context runs
+the folder's producer again to regenerate it, even when the folder's index is
+still in memory. Every transformation that such a Context runs also fingertips
+missing inputs.
 
 `ctx.compute()` waits only for graph work. Call `ctx.mounts.sync()` before
 reading mounted outputs externally, or `await ctx.mounts.synchronization()` in

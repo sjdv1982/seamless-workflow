@@ -50,6 +50,8 @@ def test_collects_code_and_all_pins(source_state, reason):
         _incoming_for=lambda path: incoming,
         _source_state=lambda edge: (edge, None),
         _suspend=lambda path: None,
+        _hashserver_configured=lambda: True,
+        _drop_stale_module_refholds=lambda path, config_token: None,
         _replace_current_checksum=lambda path, checksum: None,
     )
     Reactive._derive_transformer(context, ("tf",), node)
@@ -68,6 +70,8 @@ def test_optional_missing_pins_are_omitted():
     context = SimpleNamespace(
         _incoming_for=lambda path: {},
         _suspend=lambda path: None,
+        _hashserver_configured=lambda: True,
+        _drop_stale_module_refholds=lambda path, config_token: None,
         _replace_current_checksum=lambda path, checksum: None,
     )
     Reactive._derive_transformer(context, ("tf",), node)
@@ -83,6 +87,8 @@ def test_blocked_pins_include_both_errors_and_missing_upstream_inputs():
         _incoming_for=lambda path: incoming,
         _source_state=lambda edge: (edge, None),
         _suspend=lambda path: None,
+        _hashserver_configured=lambda: True,
+        _drop_stale_module_refholds=lambda path, config_token: None,
         _replace_current_checksum=lambda path, checksum: None,
     )
     Reactive._derive_transformer(context, ("tf",), node)
@@ -105,6 +111,8 @@ def test_mixed_inputs_follow_state_precedence_regardless_of_pin_order(input_stat
         _incoming_for=lambda path: incoming,
         _source_state=lambda edge: (edge, None),
         _suspend=lambda path: None,
+        _hashserver_configured=lambda: True,
+        _drop_stale_module_refholds=lambda path, config_token: None,
         _replace_current_checksum=lambda path, checksum: None,
     )
     backend = SimpleNamespace(_node=lambda: node)
@@ -141,6 +149,8 @@ def test_waiting_inputs_have_no_entry():
         _incoming_for=lambda path: incoming,
         _source_state=lambda edge: (edge, None),
         _suspend=lambda path: None,
+        _hashserver_configured=lambda: True,
+        _drop_stale_module_refholds=lambda path, config_token: None,
         _replace_current_checksum=lambda path, checksum: None,
     )
     backend = SimpleNamespace(_node=lambda: node)

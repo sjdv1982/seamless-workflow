@@ -118,12 +118,12 @@ class AttachmentRuntime:
         self._graph.downloads.pop(path, None)
 
     def _download_cut(self, cells):
-        """One read turn: the checksums of a download's cells, or why they fail.
+        """One read turn: checksums of download cells or why they fail.
 
-        Returns ``(members, failures, leases)``: ``members`` holds
-        ``(member, cell path, checksum hex, celltype)``, ``failures`` maps a
-        cell path to its reason, and ``leases`` claim the checksums until the
-        caller releases them. Never computes.
+        Returns members, failures, leases. Members hold (member, cell path,
+        checksum hex, celltype); failures map a cell path to its reason.
+        Leases claim roots and folder leaves until the archive is packed.
+        Never computes.
         """
         members, failures = [], {}
         for member, cell in cells:
@@ -146,12 +146,33 @@ class AttachmentRuntime:
             return (), failures, ()
         from seamless.checksum.null import NULL_CHECKSUM
         null = Checksum(NULL_CHECKSUM).hex()
-        leases = tuple(
-            MountLease(Checksum(checksum), f"share-download:{cell}", celltype)
-            for _, cell, checksum, celltype in members
-            if checksum != null
-        )
-        return tuple(members), {}, leases
+        leases = []
+        try:
+            for _member, cell, checksum, celltype in members:
+                if checksum == null:
+                    continue
+                root = Checksum(checksum)
+                leases.append(
+                    MountLease(root, f"share-download:{cell}", celltype)
+                )
+                if celltype != "folder":
+                    continue
+                child_checksums = self._folder_member_checksums(root)
+                if child_checksums is None:
+                    continue
+                for child in child_checksums:
+                    leases.append(
+                        MountLease(
+                            child,
+                            f"share-download:{cell}:member",
+                            "bytes",
+                        )
+                    )
+        except Exception:
+            for lease in reversed(leases):
+                lease._release_refholds()
+            raise
+        return tuple(members), {}, tuple(leases)
 
     def _mount_event(self, session, kind, **detail):
         detail.setdefault('driver', session.spec.driver)

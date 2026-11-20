@@ -5,8 +5,35 @@ from .graph import TransformerConfig
 from seamless_transformer.transformation_utils import apply_lock_meta_update
 
 
+def _module_copy_memo(modules):
+    from types import ModuleType
+
+    return {
+        id(module): module
+        for module in modules.values()
+        if isinstance(module, ModuleType)
+    }
+
+
+def copy_modules(modules):
+    """Copy module mappings while preserving live ModuleType inputs."""
+    return copy.deepcopy(modules, _module_copy_memo(modules))
+
+
+def copy_config(original):
+    """Copy a config without snapshotting ModuleType module inputs."""
+    return copy.deepcopy(
+        original, _module_copy_memo(getattr(original, "modules", {}))
+    )
+
+
+def copy_with_modules(value, modules):
+    """Deep-copy a value while preserving ModuleType objects in its config."""
+    return copy.deepcopy(value, _module_copy_memo(modules))
+
+
 def update_config(original, field, value, key=None, delete=False):
-    cfg = copy.deepcopy(original)
+    cfg = copy_config(original)
     compiled = isinstance(cfg, TransformerConfig) and cfg.compilation is not None
     if compiled and field in ('optional_pin', 'optional_pins') and value:
         raise TypeError('compiled inputs cannot be optional')
@@ -53,7 +80,11 @@ def update_config(original, field, value, key=None, delete=False):
                         raise CompiledPinCelltypeError(f"Compiled pin {key!r}: unsupported celltype {value!r}")
                 cfg.check_pin_name(key, allow_result=True)
                 if key != 'result': cfg.pins.add(key)
-            mapping[key] = copy.deepcopy(value)
+            from types import ModuleType
+            if field == "modules" and isinstance(value, ModuleType):
+                mapping[key] = value
+            else:
+                mapping[key] = copy.deepcopy(value)
     elif field in {'driver', 'process_lock'}:
         apply_lock_meta_update(cfg.meta, {field: value})
     elif field == 'allow_input_fingertip':
@@ -100,4 +131,13 @@ def fingerprint(cfg):
               'scratch','local','schema','compilation','objects','header')
     # Code and input checksums are separate components of runtime demand.
     # `streaming` is deliberately absent: toggling it must never re-run a node.
-    cfg.config_token = Buffer(_plain({k:getattr(cfg,k) for k in fields}), 'mixed').get_checksum().hex()
+    payload = {k:getattr(cfg,k) for k in fields}
+    from types import ModuleType
+    payload["modules"] = {
+        name: (
+            {"__seamless_module_type__": value.__name__, "identity": id(value)}
+            if isinstance(value, ModuleType) else value
+        )
+        for name, value in cfg.modules.items()
+    }
+    cfg.config_token = Buffer(_plain(payload), 'mixed').get_checksum().hex()

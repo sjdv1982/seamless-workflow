@@ -460,6 +460,8 @@ def _derive(incoming, pins=("x", "y")):
         _incoming_for=lambda path: incoming,
         _source_state=lambda edge: (edge, None),
         _suspend=lambda path: None,
+        _hashserver_configured=lambda: True,
+        _drop_stale_module_refholds=lambda path, config_token: None,
         _replace_current_checksum=lambda path, checksum: None,
     )
     Reactive._derive_transformer(context, ("tf",), node)

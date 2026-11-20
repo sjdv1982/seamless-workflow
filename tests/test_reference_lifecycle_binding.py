@@ -132,26 +132,35 @@ def test_context_code_claim_is_derived_from_graph_state(caplog):
 
 
 def test_checksum_module_replacement_releases_old_role():
+    from seamless.transformer import delayed
+
     ctx = Context()
-    ctx.transformer = identity
-    first = Buffer(b"module-replacement-first").get_checksum()
-    second = Buffer(b"module-replacement-second").get_checksum()
-
-    ctx.transformer.modules.example = first
+    ctx.transformer = delayed(identity)
+    ctx.transformer.args.value = 1
+    ctx.transformer.modules.example = {"__code__": "def helper(): return 1"}
+    ctx.compute(timeout=10)
+    path = ("transformer",)
+    role = (path, "example")
+    first = ctx._module_refholds[role][0]
     assert _count(first) == 1
-    ctx.transformer.modules.example = second
 
+    # The old claim remains until the replacement Transformation has supplied
+    # its canonical module pin checksum.
+    ctx.transformer.modules.example = {"__code__": "def helper(): return 2"}
+    ctx.compute(timeout=10)
+    second = ctx._module_refholds[role][0]
+    assert second != first
     assert _count(first) == 0
     assert _count(second) == 1
     assert (second, "transformer:transformer:module:example") in tuple(
         ctx._refheld_checksums()
     )
 
-    ctx._release_refholds()
+    ctx.close(timeout=10)
     assert _count(second) == 0
 
 
-@pytest.mark.parametrize("failing_step", ["pin", "code", "module"])
+@pytest.mark.parametrize("failing_step", ["pin", "code"])
 def test_failed_transformer_staging_preserves_graph_and_roles(monkeypatch, caplog, failing_step):
     """A replacement that fails before publication is a rejected request (§12.3).
 
@@ -278,23 +287,22 @@ def test_transformer_replacement_transfers_pin_and_module_roles():
     ctx = Context()
     ctx.transformer = identity
     old_pin = Buffer(41, "int").get_checksum()
-    old_module = Buffer(b"replacement-old-module").get_checksum()
     ctx.transformer.pins.value = old_pin
+    ctx.transformer.modules.example = {"__code__": "def helper(): return 1"}
     ctx.compute(timeout=10)
-    ctx.transformer.modules.example = old_module
+    old_module = ctx._module_refholds[(("transformer",), "example")][0]
 
     new_pin = Buffer(42, "int").get_checksum()
-    new_module = Buffer(b"replacement-new-module").get_checksum()
     replacement = delayed(identity)
     replacement.args.value = new_pin
-    replacement.modules.example = new_module
+    replacement.modules.example = {"__code__": "def helper(): return 2"}
 
     ctx.transformer = replacement
-
     ctx.compute(timeout=10)
     assert _count(old_pin) == 0
     assert _count(old_module) == 0
     assert _count(new_pin) == 1
+    new_module = ctx._module_refholds[(("transformer",), "example")][0]
     assert _count(new_module) == 1
     assert replacement._refholds_released is True
     assert replacement._workflow_backend is not None
@@ -302,3 +310,221 @@ def test_transformer_replacement_transfers_pin_and_module_roles():
     ctx._release_refholds()
     assert _count(new_pin) == 0
     assert _count(new_module) == 0
+
+def test_inline_module_refhold_adopts_merged_builder_pin_and_reuses_token():
+    import copy
+
+    from seamless import Checksum
+    from seamless.transformer import delayed
+    from seamless_transformer.transformer_class import PythonTransformer
+
+    module = {"__code__": "def helper(): return 1"}
+    builder = PythonTransformer("def identity(value): return value")
+    builder.args.value = 1
+    builder.modules.main = module
+    builder.globals.answer = 42
+    transformation = builder.build()
+    transformation.construct()
+    expected = Checksum(transformation._definition_payload_template["main"][2])
+    transformation._pretransformation.release()
+    transformation._release_refholds()
+
+    ctx = Context()
+    ctx.transformer = delayed("def identity(value): return value")
+    ctx.transformer.args.value = 1
+    ctx.transformer.modules.main = module
+    ctx.transformer.globals.answer = 42
+    ctx.compute(timeout=10)
+    role = (("transformer",), "main")
+    token = ctx._module_refhold_tokens[("transformer",)]
+    assert ctx._module_refholds[role] == (expected, False)
+    assert _count(expected) >= 1
+    assert (expected, "transformer:transformer:module:main") in tuple(
+        ctx._refheld_checksums()
+    )
+
+    # A changed input does not drop an unchanged module-config claim.
+    ctx.transformer.args.value = 2
+    ctx.compute(timeout=10)
+    ctx.transformer.modules.main = copy.deepcopy(module)
+    assert ctx._module_refhold_tokens[("transformer",)] == token
+    assert ctx._module_refholds[role] == (expected, False)
+    assert len([
+        item for item in ctx._refheld_checksums()
+        if item == (expected, "transformer:transformer:module:main")
+    ]) == 1
+    ctx.close(timeout=10)
+    assert _count(expected) == 0
+
+
+
+def test_module_type_pin_is_adopted_from_built_transformation():
+    import types
+
+    from seamless.transformer import delayed
+
+    module = types.ModuleType("inline_helper")
+    module.answer = 42
+    ctx = Context()
+    ctx.transformer = delayed("def identity(value): return value")
+    ctx.transformer.args.value = 1
+    ctx.transformer.modules.helper = module
+    ctx.compute(timeout=10)
+
+    checksum = ctx._module_refholds[(("transformer",), "helper")][0]
+    assert checksum in [value for value, _role in ctx._refheld_checksums()]
+    assert checksum.resolve("plain")
+    ctx.close(timeout=10)
+    assert _count(checksum) == 0
+
+
+def test_set_graph_transfers_overlapping_inline_module_roles_and_close_releases_once():
+    import copy
+
+    from seamless.transformer import delayed
+
+    ctx = Context()
+    ctx.first = delayed("def identity(value): return value")
+    ctx.second = delayed("def identity(value): return value")
+    module = {"__code__": "def helper(): return 1"}
+    ctx.first.args.value = 1
+    ctx.second.args.value = 1
+    ctx.first.modules.helper = module
+    ctx.second.modules.helper = module
+    ctx.compute(timeout=10)
+    checksum = ctx._module_refholds[(("first",), "helper")][0]
+
+    def module_roles():
+        return [
+            role for candidate, role in ctx._refheld_checksums()
+            if candidate == checksum and ":module:helper" in role
+        ]
+
+    assert len(module_roles()) == 2
+    assert len(ctx._module_refholds) == 2
+    assert _count(checksum) >= 2
+
+    existing_module_refholds = dict(ctx._module_refholds)
+    ctx.set_graph(copy.deepcopy(ctx.get_graph()))
+    assert ctx._module_refholds == existing_module_refholds
+    ctx.compute(timeout=10)
+    assert len(module_roles()) == 2
+    assert len(ctx._module_refholds) == 2
+    assert _count(checksum) >= 2
+
+    del ctx.first
+    ctx.compute(timeout=10)
+    assert len(module_roles()) == 1
+    assert set(ctx._module_refholds) == {(("second",), "helper")}
+    assert _count(checksum) >= 1
+
+    ctx.close(timeout=10)
+    assert _count(checksum) == 0
+    assert ctx._module_refholds == {}
+    assert ctx._module_refhold_tokens == {}
+
+
+def test_checksum_main_with_globals_keeps_builder_error_timing():
+    from seamless import Buffer
+    from seamless.transformer import delayed
+    from seamless_transformer.transformer_class import PythonTransformer
+
+    ctx = Context()
+    ctx.transformer = delayed("def identity(value): return value")
+    ctx.transformer.args.value = 1
+    module_checksum = Buffer(b"checksum-main-with-globals").get_checksum()
+    ctx.transformer.modules.main = module_checksum
+    ctx.transformer.globals.answer = 42
+
+    # Assignment itself stays valid; the builder diagnoses the combination.
+    assert not ctx._module_refholds
+    builder = PythonTransformer("def identity(value): return value")
+    builder.args.value = 1
+    builder.modules.main = module_checksum
+    builder.globals.answer = 42
+    with pytest.raises(AttributeError):
+        builder.build()
+    builder._release_refholds()
+
+    ctx.compute(timeout=10)
+    assert ctx._graph.nodes[("transformer",)].state == "failed"
+    assert not ctx._module_refholds
+    ctx.close(timeout=10)
+    assert _count(module_checksum) == 0
+
+
+def test_module_type_config_is_not_snapshotted_during_config_sync():
+    import types
+
+    from seamless.transformer import delayed
+
+    ctx = Context()
+    ctx.transformer = delayed("def identity(value): return value")
+    module = types.ModuleType("mutable_module")
+    module.answer = 41
+    ctx.transformer.modules.example = module
+    stored = ctx._graph.nodes[("transformer",)].transformer_config.modules["example"]
+    module.answer = 42
+    assert stored is module
+
+    ctx.transformer.args.value = 1
+    ctx.compute(timeout=10)
+    checksum = ctx._module_refholds[(("transformer",), "example")][0]
+    assert checksum.resolve("plain")
+    ctx.close(timeout=10)
+
+def test_inline_module_bytes_survive_natural_expiry_until_context_close():
+    import os
+    import time
+
+    from seamless import CacheMissError
+    from seamless.transformer import delayed
+
+    scale = os.environ.get("SEAMLESS_DEBUG_TEMPREF_SCALE")
+    if not scale or float(scale) > 0.01:
+        pytest.skip("run with SEAMLESS_DEBUG_TEMPREF_SCALE=0.01 for accelerated eviction")
+
+    ctx = Context()
+    ctx.transformer = delayed("def identity(value): return value")
+    ctx.transformer.args.value = 1
+    ctx.transformer.modules.example = {"__code__": "def hold_me(): return 9"}
+    ctx.compute(timeout=10)
+    checksum = ctx._module_refholds[(("transformer",), "example")][0]
+
+    time.sleep(3.2)
+    assert checksum.resolve("plain")["__code__"].startswith("def hold_me")
+
+    ctx.close(timeout=10)
+    with pytest.raises(CacheMissError):
+        checksum.resolve()
+
+def test_stale_built_module_adoption_is_ignored_after_config_replacement():
+    from seamless.transformer import delayed
+    from seamless_workflow.sidework import Lease
+
+    ctx = Context()
+    ctx.transformer = delayed("def identity(value): return value")
+    ctx.transformer.args.value = 1
+    ctx.transformer.modules.example = {"__code__": "def old_helper(): return 1"}
+    ctx.compute(timeout=10)
+    path = ("transformer",)
+    role = (path, "example")
+    old_checksum = ctx._module_refholds[role][0]
+    old_record = ctx._runtime.current_runs[path]
+    old_generation = old_record.generation
+    old_token = ctx._module_refhold_tokens[path]
+
+    ctx.transformer.modules.example = {"__code__": "def new_helper(): return 2"}
+    ctx.compute(timeout=10)
+    new_checksum = ctx._module_refholds[role][0]
+    assert new_checksum != old_checksum
+
+    stale_lease = Lease(old_checksum, role="example")
+    ctx._adopt_built_module_refholds(
+        path, old_generation, old_token, stale_lease
+    )
+    assert stale_lease.released
+    assert ctx._module_refholds[role][0] == new_checksum
+    assert ctx._module_refhold_tokens[path] == ctx._graph.nodes[path].transformer_config.config_token
+
+    ctx.close(timeout=10)

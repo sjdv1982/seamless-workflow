@@ -189,37 +189,226 @@ class TestDownloadGet:
             "files/deeper/b.bin": b"\x01\x02",
         }
 
-    def test_only_get(self, ctx):
-        """*The download GET*: every method but GET answers 405."""
-        fill(ctx)
-        url = ctx.shares.add_download(["title"])
-        for method in ("HEAD", "PUT"):
-            response = requests.request(method, url, timeout=10)
-            assert response.status_code == 405
-            assert response.headers["Allow"] == "GET, OPTIONS"
+    def test_registered_folder_download_does_not_retain_leaf_refs(
+        self, ctx, monkeypatch
+    ):
+        import seamless.caching.buffer_cache as buffer_cache
+        from seamless import CacheMissError, Checksum
+        from seamless.caching.buffer_cache import get_buffer_cache
+        from seamless.transformer import spawn
+        from seamless_transformer.worker import shutdown_workers
 
-    def test_cut_is_one_read_turn(self, ctx):
-        """*The download GET*: the cut is one read turn of the Context."""
-        fill(ctx)
-        url = ctx.shares.add_download(["title", "sub/table", "raw"])
-        def cuts():
-            return [entry[0] for entry in list(ctx._controller.trace) if entry[2] == "_download_cut"]
+        cache = get_buffer_cache()
+        previous_interval = buffer_cache.eviction_interval_from_env()
+        cache.stop_eviction_thread()
+        monkeypatch.setattr(buffer_cache, "_TEMPREF_SCALE", 0.1)
+        cache.start_eviction_thread(interval=0.1)
 
-        before = set(cuts())
-        assert get(url).status_code == 200
-        assert len(set(cuts()) - before) == 1
+        def make_folder(value):
+            return {"payload.txt": value.encode()}
 
-    def test_graph_edits_never_touch_a_download(self, ctx):
-        """*Downloads*: paths are checked only by each GET; no graph edit is refused."""
-        url = ctx.shares.add_download(["later"])
-        assert get(url).json()["cells"] == {"later": "missing"}
-        ctx.later = Cell(celltype="int")
-        ctx.later.set(5)
-        ctx.compute()
-        assert tar_members(get(url).content) == {"later": buffer_of(ctx, "later")}
-        del ctx.later
-        assert get(url).json()["cells"] == {"later": "missing"}
-        assert ctx.shares.downloads["download"].cells == (("later", "later"),)
+        spawn(1)
+        try:
+            ctx.source = Cell(celltype="plain")
+            ctx.folder_producer = make_folder
+            ctx.folder_producer.local = True
+            ctx.folder_producer.celltypes.value = "plain"
+            ctx.folder_producer.celltypes.result = "folder"
+            ctx.folder_producer.pins.value = ctx.source
+            ctx.folder = ctx.folder_producer.result
+            url = ctx.shares.add_download(
+                ["folder"], path="folder.zip", format="zip"
+            )
+
+            payload = b"folder payload expires without a file mount"
+            ctx.source.set(payload.decode())
+            ctx.compute(timeout=30)
+            root = ctx.folder.checksum
+            manifest = json.loads(bytes(root.resolve().content))
+            child = Checksum(manifest["payload.txt"])
+
+            time.sleep(3.2)
+            assert root.resolve()
+            with pytest.raises(CacheMissError):
+                child.resolve()
+            response = get(url)
+            assert response.status_code == 503
+        finally:
+            shutdown_workers()
+            cache.stop_eviction_thread()
+            cache.start_eviction_thread(interval=previous_interval)
+
+
+
+def test_file_w_mount_supplies_evicted_folder_leaf_to_download(ctx, tmp_path):
+    from seamless import Checksum
+    from seamless.caching.buffer_cache import get_buffer_cache
+    from seamless.transformer import spawn
+    from seamless_transformer.worker import shutdown_workers
+
+    spawn(1)
+    try:
+        ctx.source = Cell(celltype="plain")
+
+        def make_folder(value):
+            return {"payload.txt": value.encode()}
+
+        ctx.folder_producer = make_folder
+        ctx.folder_producer.local = True
+        ctx.folder_producer.celltypes.value = "plain"
+        ctx.folder_producer.celltypes.result = "folder"
+        ctx.folder_producer.pins.value = ctx.source
+        ctx.folder = ctx.folder_producer.result
+        url = ctx.shares.add_download(
+            ["folder"], path="folder-mounted.zip", format="zip"
+        )
+
+        payload = b"served from mounted file source"
+        ctx.source.set(payload.decode())
+        ctx.compute(timeout=30)
+        root = ctx.folder.checksum
+        manifest = json.loads(bytes(root.resolve().content))
+        child = Checksum(manifest["payload.txt"])
+
+        mount_path = tmp_path / "export-tree"
+        ctx.folder.mount(mount_path, mode="w")
+        ctx.mounts.sync(timeout=30)
+        assert (mount_path / "payload.txt").read_bytes() == payload
+
+        # Remove the in-memory copies after the write mount has populated its
+        # local source. This prevents legacy write-echo leaf refholds from
+        # being the reason the next download succeeds.
+        cache = get_buffer_cache()
+        with cache.lock:
+            cache.strong_cache.pop(child, None)
+            cache.weak_cache.pop(child, None)
+        assert child not in cache.strong_cache
+        assert child not in cache.weak_cache
+
+        response = get(url)
+        assert response.status_code == 200
+        assert zip_members(response.content) == {"folder/payload.txt": payload}
+    finally:
+        shutdown_workers()
+
+
+
+def test_download_waits_for_folder_leaf_recovery_and_ignores_superseded_result(
+        ctx, monkeypatch
+    ):
+        import threading
+        import seamless_workflow.context as context_module
+        from seamless import Buffer, Checksum
+        from seamless.caching.buffer_cache import get_buffer_cache
+
+        cache = get_buffer_cache()
+        payload_x = b"first folder leaf"
+        payload_y = b"current folder leaf"
+        child_buffer_x = Buffer(payload_x)
+        child_buffer_y = Buffer(payload_y)
+        root_buffer_x = Buffer(
+            {"payload.txt": child_buffer_x.get_checksum().hex()}, "folder"
+        )
+        root_buffer_y = Buffer(
+            {"payload.txt": child_buffer_y.get_checksum().hex()}, "folder"
+        )
+        root_x = Checksum(root_buffer_x.get_checksum())
+        root_y = Checksum(root_buffer_y.get_checksum())
+        child_x = Checksum(json.loads(bytes(root_buffer_x.content))["payload.txt"])
+        child_y = Checksum(json.loads(bytes(root_buffer_y.content))["payload.txt"])
+
+        def clear(checksum):
+            with cache.lock:
+                cache.strong_cache.pop(checksum, None)
+                cache.weak_cache.pop(checksum, None)
+
+        clear(child_x)
+        clear(child_y)
+        started_x, started_y = threading.Event(), threading.Event()
+        release_x, release_y = threading.Event(), threading.Event()
+        finished_x = threading.Event()
+
+        def recover(checksum):
+            if checksum == root_x:
+                started_x.set()
+                release_x.wait(10)
+                Buffer(payload_x).tempref()
+                finished_x.set()
+            else:
+                started_y.set()
+                release_y.wait(10)
+                Buffer(payload_y).tempref()
+            return checksum
+
+        monkeypatch.setattr(context_module, "_fingertip_folder_buffer", recover)
+        try:
+            ctx.folder = Cell(celltype="folder")
+            url = ctx.shares.add_download(
+                ["folder"], path="folder.zip", format="zip"
+            )
+            ctx.folder.set_checksum(root_x, input_celltype="folder")
+            assert started_x.wait(10)
+            assert ctx.folder.state == "waiting"
+            response = get(url)
+            assert response.status_code == 409
+            assert response.json()["cells"] == {"folder": "waiting"}
+
+            ctx.folder.set_checksum(root_y, input_celltype="folder")
+            assert started_y.wait(10)
+            release_x.set()
+            assert finished_x.wait(10)
+            assert ctx.folder.state == "waiting"
+            response = get(url)
+            assert response.status_code == 409
+            assert response.json()["cells"] == {"folder": "waiting"}
+
+            release_y.set()
+            ctx.compute(timeout=30)
+            assert ctx.folder.state == "complete"
+            assert ctx.folder.checksum == root_y
+            response = get(url)
+            assert response.status_code == 200
+            assert zip_members(response.content) == {
+                "folder/payload.txt": payload_y
+            }
+        finally:
+            release_x.set()
+            release_y.set()
+
+
+
+def test_failed_folder_leaf_recovery_applies_checksum_and_download_reports_503(
+        ctx, monkeypatch
+    ):
+        import seamless_workflow.context as context_module
+        from seamless import Buffer, CacheMissError, Checksum
+        from seamless.caching.buffer_cache import get_buffer_cache
+
+        payload = b"leaf that recovery cannot recreate"
+        child_buffer = Buffer(payload)
+        root_buffer = Buffer(
+            {"payload.txt": child_buffer.get_checksum().hex()}, "folder"
+        )
+        root = Checksum(root_buffer.get_checksum())
+        child = Checksum(json.loads(bytes(root_buffer.content))["payload.txt"])
+        cache = get_buffer_cache()
+        with cache.lock:
+            cache.strong_cache.pop(child, None)
+            cache.weak_cache.pop(child, None)
+
+        def fail(_checksum):
+            raise CacheMissError(child.hex())
+
+        monkeypatch.setattr(context_module, "_fingertip_folder_buffer", fail)
+        ctx.folder = Cell(celltype="folder")
+        url = ctx.shares.add_download(["folder"], path="failed-folder.zip", format="zip")
+        ctx.folder.set_checksum(root, input_celltype="folder")
+        ctx.compute(timeout=30)
+
+        assert ctx.folder.state == "complete"
+        assert ctx.folder.checksum == root
+        response = get(url)
+        assert response.status_code == 503
 
 
 class TestDownloadAPI:

@@ -25,6 +25,7 @@ class Reactive:
                 sig = validate_stage1(cfg.schema, cfg.celltypes, cfg.optional_pins,
                                       cfg.meta.get('metavars', {}))
             except Exception as exc:
+                self._drop_stale_module_refholds(path, cfg.config_token)
                 self._suspend(path)
                 node.state, node.block_reason = 'failed', None
                 node.exception = exc
@@ -143,6 +144,7 @@ class Reactive:
                     continue
             pins[pin] = checksum
         if pending:
+            self._drop_stale_module_refholds(path, cfg.config_token)
             # Missing inputs take precedence over blocked inputs, then waiting.
             priority = {
                 'miswired': 0,
@@ -166,6 +168,7 @@ class Reactive:
             self._replace_current_checksum(path, None)
             return
         key = (code.hex(), tuple((pin, cs.hex()) for pin, cs in sorted(pins.items())), cfg.config_token)
+        config_token = cfg.config_token
         self._release_upstream_holds(path, lambda record: record.demand_key == key)
         current = self._runtime.current_runs.get(path)
         force_value_run = False
@@ -210,7 +213,8 @@ class Reactive:
                 return
         generation = self._runtime.next_generation()
         record = RunRecord(path, None, None, None, phase='running', generation=generation, demand_key=key)
-        record.dispatch_scratch = cfg.scratch and not self._feeds_non_scratch_holder(path)
+        feeds_non_scratch_holder = self._feeds_non_scratch_holder(path)
+        record.dispatch_scratch = cfg.scratch and not feeds_non_scratch_holder
         self._runtime.current_runs[path] = record
         self._replace_current_checksum(path, None)
         node.state, node.block_reason, node.exception = 'computing', None, None
@@ -225,7 +229,7 @@ class Reactive:
         owner = weakref.ref(self)
         side = self._side
         require_value = hashserver_configured or force_value_run
-        async def execute(frozen=frozen, leases=leases):
+        async def execute(frozen=frozen, leases=leases, config_token=config_token):
             from seamless_transformer.transformer_class import PythonBashBaseTransformer
             tf = None
             completion = None
@@ -255,6 +259,23 @@ class Reactive:
                         else:
                             raise CacheMissError(tf.exception)
                     raise RuntimeError(tf.exception or 'Transformation construction failed')
+                module_pins = set(frozen.modules)
+                if frozen.globals:
+                    module_pins.add("main")
+                module_leases = []
+                for checksum, role in tuple(tf._input_refholds):
+                    if not role.startswith("input:"):
+                        continue
+                    pin = role[len("input:"):]
+                    if pin in module_pins:
+                        module_leases.append(Lease(checksum, role=pin))
+                send(
+                    "_adopt_built_module_refholds",
+                    path,
+                    generation,
+                    config_token,
+                    *module_leases,
+                )
                 send('_transformation_started', path, generation, tf_checksum)
                 from seamless_transformer.observation import observed_as
                 with observed_as(".".join(path)):
@@ -289,6 +310,9 @@ class Reactive:
     def _publish_run(self, path, record):
         node = self._graph.nodes[path]
         if record.exception is not None:
+            self._drop_stale_module_refholds(
+                path, node.transformer_config.config_token
+            )
             node.state, node.block_reason, node.exception = 'failed', None, record.error
             self._replace_current_checksum(path, None)
         elif record.result_checksum is not None:

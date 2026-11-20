@@ -1,6 +1,7 @@
 """Regressions for no-hashserver Context recovery (workflow-context.md)."""
 
 import asyncio
+import json
 import threading
 
 import pytest
@@ -21,6 +22,12 @@ def produce(value):
 
 def use(payload, suffix):
     return payload + suffix
+
+
+def use_inline_module(value):
+    import xyx_module
+
+    return xyx_module.format_value(value)
 
 
 class ValueWidget(traitlets.HasTraits):
@@ -118,6 +125,55 @@ def test_bound_transformers_fingertip_inputs_without_changing_build_options(
     # Context submissions override the setting operationally; direct builds do not.
     assert ctx.use.allow_input_fingertip is False
     assert ctx.use.build().allow_input_fingertip is False
+
+
+def test_evicted_non_scratch_result_recomputes_from_live_inline_module(
+    make_context, monkeypatch, tmp_path
+):
+    _no_hashserver(monkeypatch)
+    from helpers.reference_lifecycle import force_expiry
+
+    ctx = make_context(expression_execution="local")
+    ctx.source = Cell("str")
+    ctx.transform = use_inline_module
+    ctx.transform.local = True
+    ctx.transform.celltypes.value = "str"
+    ctx.transform.celltypes.result = "str"
+    ctx.transform.pins.value = ctx.source
+    ctx.transform.modules.xyx_module = {
+        "type": "interpreted",
+        "language": "python",
+        "code": "def format_value(value):\n    return 'module:' + value\n",
+    }
+    ctx.result_cell = ctx.transform.result
+    output_path = tmp_path / "result.txt"
+    ctx.result_cell.mount(output_path, mode="w")
+
+    ctx.source.set("X")
+    ctx.compute(timeout=20)
+    ctx.mounts.sync(timeout=20)
+    assert ctx.result_cell.value == "module:X"
+    x_checksum = ctx.result_cell.checksum
+    x_transformation = ctx._runtime.current_runs[("transform",)].identity_checksum
+
+    ctx.source.set("Y")
+    ctx.compute(timeout=20)
+    ctx.mounts.sync(timeout=20)
+    assert ctx.result_cell.value == "module:Y"
+    ctx.prune()
+    force_expiry(x_checksum)
+    with pytest.raises(CacheMissError):
+        x_checksum.resolve()
+
+    # The source and inline module are still present in the live Context.
+    # Rule 2 recovers the missing result for the mounted cell.
+    ctx.source.set("X")
+    ctx.compute(timeout=20)
+    ctx.mounts.sync(timeout=20)
+    assert ctx.result_cell.value == "module:X"
+    assert ctx.result_cell.checksum == x_checksum
+    assert ctx._runtime.current_runs[("transform",)].identity_checksum == x_transformation
+    assert json.loads(output_path.read_text()) == "module:X"
 
 
 def test_bound_input_fingertip_failure_keeps_its_category(make_context, monkeypatch):

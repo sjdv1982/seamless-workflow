@@ -67,6 +67,11 @@ def _fingertip_checksum_buffer(checksum):
     return checksum
 
 
+def _fingertip_folder_buffer(checksum):
+    checksum.fingertip_folder_sync()
+    return checksum
+
+
 def _projected_source_type_error(
     source_ep, source_type, target_type, target_path, target_pin=None, target_local=(),
     root_type=None,
@@ -196,6 +201,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         object.__setattr__(self, "_refholds_released", False)
         object.__setattr__(self, "_code_refholds", {})
         object.__setattr__(self, "_module_refholds", {})
+        object.__setattr__(self, "_module_refhold_tokens", {})
         object.__setattr__(self, "_superseded_refholds", {})
         object.__setattr__(self, "_anonymous_current_refholds", {})
         object.__setattr__(self, "_edge_pin_refholds", {})
@@ -280,7 +286,11 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         from .errors import StaleWorkflowHandleError
         if path not in self._graph.nodes:
             raise StaleWorkflowHandleError(f"Endpoint {path!r} is stale")
-        return copy.deepcopy(self._graph.nodes[path])
+        node = self._graph.nodes[path]
+        if node.kind == "transformer":
+            from .configuration import copy_with_modules
+            return copy_with_modules(node, node.transformer_config.modules)
+        return copy.deepcopy(node)
 
     @property
     def controller_failure(self):
@@ -396,6 +406,7 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._graph = ContextGraph()
         self._code_refholds.clear()
         self._module_refholds.clear()
+        self._module_refhold_tokens.clear()
         self._superseded_refholds.clear()
         if errors: raise errors[0]
 
@@ -447,7 +458,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _config_snapshot(self, path):
         node = self._graph.nodes[path]
-        return copy.deepcopy(node.cell_config if node.kind == "cell" else node.transformer_config), self._revisions.get(path, 0)
+        from .configuration import copy_config
+        return copy_config(node.cell_config if node.kind == "cell" else node.transformer_config), self._revisions.get(path, 0)
 
     def _set_node_config(self, path, field, value, key=None, delete=False):
         raise RuntimeError("Configuration must be prepared before ingress")
@@ -946,7 +958,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         removed_pins = node.transformer_config.pins - cfg.pins
         old_producers = node.transformer_pin_producers
         old_code_refholds = self._code_refholds.copy()
-        old_module_refholds = self._module_refholds.copy()
         # Validate every replacement edge before acquiring/publishing configuration.
         for pin, value in frozen.args.items():
             ep = self._endpoint(value)
@@ -980,26 +991,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             new_code_checksum.incref_refholder(scratch=False)
             staged_checksums.append(new_code_checksum)
 
-            new_module_refs = {}
-            for module_name, module in cfg.modules.items():
-                if not isinstance(module, Checksum):
-                    continue
-                checksum = normalize_checksum(module)
-                scratch = False
-                checksum.incref_refholder(scratch=scratch)
-                staged_checksums.append(checksum)
-                new_module_refs[(path, module_name)] = (checksum, scratch)
-
             # Publish the fully acquired replacement as one semantic state.
             node.transformer_config = cfg
             node.transformer_pin_producers = new_producers
             self._code_refholds[path] = new_code_checksum
-            self._module_refholds = {
-                role: claim
-                for role, claim in self._module_refholds.items()
-                if role[0] != path
-            }
-            self._module_refholds.update(new_module_refs)
             published = True
             staged_checksums.clear()
 
@@ -1013,10 +1008,6 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             old_code_checksum = old_code_refholds.get(path)
             if old_code_checksum is not None:
                 old_code_checksum.decref_refholder()
-            for role, (checksum, _scratch) in old_module_refholds.items():
-                if role[0] == path:
-                    checksum.decref_refholder()
-
             for pin, value in frozen.args.items():
                 if self._endpoint(value) is not None:
                     self._set_transformer_pin(path, pin, value)
@@ -1188,25 +1179,53 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         if old is not None:
             old.decref_refholder()
 
+    def _set_time_module_claims(self, path, cfg):
+        """Claims for Checksum-valued modules, held while the config is current.
+
+        Such a module already is a checksum, so it is claimed from the moment
+        the config is set.  Inline dict and ModuleType modules only get a
+        checksum once the builder serializes them; those are adopted after a
+        build (see `_adopt_built_module_refholds`).  A Checksum `main` module
+        combined with globals is rejected by the builder and is not claimed.
+        """
+        claims = {}
+        for module_name, module in cfg.modules.items():
+            if not isinstance(module, Checksum):
+                continue
+            if module_name == "main" and cfg.globals:
+                continue
+            claims[(path, module_name)] = (normalize_checksum(module), False)
+        return claims
+
     def _sync_module_refholds(self):
+        """Reconcile module claims with the current graph.
+
+        Checksum-valued module claims follow the current configs exactly.
+        Adopted claims of built (inline/ModuleType) modules survive only while
+        their path is a transformer whose recorded token is the current config
+        token, and are otherwise dropped.
+        """
         active = {}
+        current_tokens = {}
         for path, node in self._graph.nodes.items():
             if node.kind != "transformer":
                 continue
-            for module_name, module in node.transformer_config.modules.items():
-                if isinstance(module, Checksum):
-                    active[(path, module_name)] = (
-                        normalize_checksum(module),
-                        False,
-                    )
+            current_tokens[path] = node.transformer_config.config_token
+            active.update(self._set_time_module_claims(path, node.transformer_config))
         old_refholds = self._module_refholds
+        new_refholds = dict(active)
+        for role, claim in old_refholds.items():
+            path = role[0]
+            if (
+                role not in active
+                and path in current_tokens
+                and self._module_refhold_tokens.get(path) == current_tokens[path]
+            ):
+                new_refholds[role] = claim
         acquired = []
         try:
             for role, (checksum, scratch) in active.items():
-                old = old_refholds.get(role)
-                old_checksum = old[0] if old is not None else None
-                old_scratch = old[1] if old is not None else None
-                if old_checksum is None or old_checksum != checksum or old_scratch != scratch:
+                if old_refholds.get(role) != (checksum, scratch):
                     checksum.incref_refholder(scratch=scratch)
                     acquired.append(checksum)
         except Exception:
@@ -1215,12 +1234,91 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             raise
 
         # Publish the new operational map only after every new role is held,
-        # then release roles that are absent or replaced.  Overwriting the map
-        # first loses the old checksum and strands its refholder reference.
-        self._module_refholds = active
-        for role, (checksum, scratch) in old_refholds.items():
-            if active.get(role) != (checksum, scratch):
+        # then release roles that are absent or replaced.
+        self._module_refholds = new_refholds
+        for role, claim in old_refholds.items():
+            if new_refholds.get(role) != claim:
+                claim[0].decref_refholder()
+        for path, token in tuple(self._module_refhold_tokens.items()):
+            if current_tokens.get(path) != token:
+                self._module_refhold_tokens.pop(path, None)
+
+    def _drop_stale_module_refholds(self, path, config_token):
+        """Release prior-config built claims when the current config cannot build.
+
+        Set-time claims of Checksum-valued modules belong to the current config
+        and are kept.
+        """
+        if self._module_refhold_tokens.get(path) == config_token:
+            return
+        node = self._graph.nodes.get(path)
+        keep = (
+            self._set_time_module_claims(path, node.transformer_config)
+            if node is not None and node.kind == "transformer"
+            else {}
+        )
+        for role, (checksum, _scratch) in tuple(self._module_refholds.items()):
+            if role[0] == path and role not in keep:
+                self._module_refholds.pop(role, None)
                 checksum.decref_refholder()
+        self._module_refhold_tokens.pop(path, None)
+
+    def _adopt_built_module_refholds(self, path, generation, config_token, *leases):
+        """Adopt the actual module pins from a current built Transformation."""
+        try:
+            node = self._graph.nodes.get(path)
+            record = self._runtime.current_runs.get(path)
+            current = (
+                not self._closing
+                and not self._refholds_released
+                and node is not None
+                and node.kind == "transformer"
+                and node.transformer_config.config_token == config_token
+                and record is not None
+                and record.generation == generation
+                and record.demand_key is not None
+                and record.demand_key[-1] == config_token
+            )
+            if not current:
+                return
+
+            # Set-time claims of Checksum-valued modules are owned by the
+            # config, not by the build: keep them and do not claim them twice.
+            set_time = self._set_time_module_claims(
+                path, node.transformer_config
+            )
+            incoming = {
+                (path, lease.role): (lease.checksum, False)
+                for lease in leases
+                if lease.checksum is not None
+                and (path, lease.role) not in set_time
+            }
+            old = self._module_refholds
+            acquired = []
+            try:
+                for role, (checksum, scratch) in incoming.items():
+                    previous = old.get(role)
+                    if previous is None or previous != (checksum, scratch):
+                        checksum.incref_refholder(scratch=scratch)
+                        acquired.append(checksum)
+            except Exception:
+                for checksum in reversed(acquired):
+                    checksum.decref_refholder()
+                raise
+
+            updated = {
+                role: claim for role, claim in old.items()
+                if role[0] != path or role in set_time
+            }
+            updated.update(incoming)
+            self._module_refholds = updated
+            self._module_refhold_tokens[path] = config_token
+            for role, (checksum, scratch) in old.items():
+                if role[0] == path and updated.get(role) != (checksum, scratch):
+                    checksum.decref_refholder()
+        finally:
+            for lease in leases:
+                lease._release_refholds()
 
     def _delete_transformer_pin(self, node_path, pin):
         cfg = self._graph.nodes[node_path].transformer_config
@@ -1549,11 +1647,11 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
 
     def _replace_current_checksum(self, node_path, checksum):
         """Acquire a node current result before replacing its semantic field."""
-
         node = self._graph.nodes[node_path]
         new_checksum = None if checksum is None else normalize_checksum(checksum)
         if new_checksum is not None:
             from seamless.checksum.null import canonicalize_checksum
+
             new_checksum = canonicalize_checksum(
                 new_checksum, self._node_celltype(node_path)
             )
@@ -1564,6 +1662,34 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         node.current_checksum = new_checksum
         if old_checksum is not None:
             old_checksum.decref_refholder()
+
+    def _folder_member_checksums(self, checksum):
+        """Return a folder's non-null member checksums if its manifest is local.
+
+        This is a cache-only inspection: retaining a download must not trigger a
+        remote fetch from a Context controller turn.
+        """
+        from seamless.caching.buffer_cache import get_buffer_cache
+        from seamless.checksum.null import is_null
+
+        buffer = get_buffer_cache().get(checksum)
+        if buffer is None:
+            return None
+        try:
+            members = buffer.get_value("folder")
+        except Exception:
+            return None
+        if not isinstance(members, dict):
+            return None
+        checksums = set()
+        try:
+            for value in members.values():
+                member = normalize_checksum(value)
+                if member is not None and not is_null(member):
+                    checksums.add(member)
+        except Exception:
+            return None
+        return tuple(sorted(checksums, key=lambda member: member.hex()))
 
     def _refheld_checksums(self):
         if self._refholds_released:
@@ -1588,11 +1714,10 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 code_checksum = cfg.code_checksum
                 if code_checksum is not None and self._incoming_edge(path, ("code",)) is None:
                     claims.append((code_checksum, f"transformer:{':'.join(path)}:code"))
-                for module_name, module in cfg.modules.items():
-                    if isinstance(module, Checksum):
-                        claims.append((module, f"transformer:{':'.join(path)}:module:{module_name}"))
             if node.current_checksum is not None:
                 claims.append((node.current_checksum, f"node:{':'.join(path)}:current"))
+        for (path, module_name), (checksum, _scratch) in self._module_refholds.items():
+            claims.append((checksum, f"transformer:{':'.join(path)}:module:{module_name}"))
         for path, records in self._runtime.superseded_runs.items():
             for record in records:
                 if record.result_checksum is not None and record.phase != "cancelled":
@@ -1609,13 +1734,18 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
             return
         errors = []
         for checksum, _role in list(self._refheld_checksums()):
-            try: checksum.decref_refholder()
-            except Exception as exc: errors.append(exc)
+            try:
+                checksum.decref_refholder()
+            except Exception as exc:
+                errors.append(exc)
         self._superseded_refholds.clear()
         self._anonymous_current_refholds.clear()
         self._edge_pin_refholds.clear()
+        self._module_refholds.clear()
+        self._module_refhold_tokens.clear()
         self._refholds_released = True
-        if errors: raise errors[0]
+        if errors:
+            raise errors[0]
 
     def _release_all_producers(self):
         self._release_refholds()
@@ -2086,11 +2216,20 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         return bool(has_read_server() or has_write_server())
 
     def _has_actuating_attachment(self, path):
+        cell_path = "/".join(path)
+        is_downloaded = any(
+            cell == cell_path
+            for spec in self._graph.downloads.values()
+            for _member, cell in spec.cells
+        )
+        if is_downloaded:
+            return True
         return any(
             session.spec.driver in {"share", "widget"}
             or (session.spec.driver == "file" and session.spec.mode == "w")
             for session in self._mount_sessions_for(path)
         )
+
 
     def _apply_cell_result(self, path, node, checksum, state, error=None):
         if (
@@ -2114,32 +2253,41 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         node.state, node.block_reason, node.exception = state, None, error
 
     def _wait_for_cell_buffer(self, path, checksum):
-        """Demand recovery and return whether the checksum must stay pending."""
-        key = self._cell_buffer_recoveries.get(path)
+        """Wait for local bytes needed by a newly applied attached-cell result."""
+        node = self._graph.nodes[path]
+        celltype = node.cell_config.celltype
         checksum_hex = checksum.hex()
-        if key is None or key[2] != checksum_hex:
-            from seamless.caching.buffer_cache import get_buffer_cache
-            from seamless.checksum.calculate_checksum import TRIVIAL_CHECKSUMS
+        if celltype == "folder":
+            ready = checksum.has_local_folder_buffers()
+        else:
+            ready = checksum.has_local_buffer()
+        if ready:
+            return False
 
-            if (
-                checksum_hex in TRIVIAL_CHECKSUMS
-                or get_buffer_cache().get(checksum) is not None
-            ):
-                return False
-            # A superseded recovery cannot supply a fact for a later request.
+        key = self._cell_buffer_recoveries.get(path)
+        if (
+            key is None
+            or key[2] != checksum_hex
+            or key[3] != celltype
+        ):
             key = (
-                "cell-buffer-fingertip", path, checksum_hex,
+                "cell-buffer-fingertip", path, checksum_hex, celltype,
                 self._runtime.next_generation(),
             )
             self._cell_buffer_recoveries[path] = key
 
+        fingertip = (
+            _fingertip_folder_buffer
+            if celltype == "folder"
+            else _fingertip_checksum_buffer
+        )
         state, _, _ = self._demand(
-            key, _fingertip_checksum_buffer, (checksum,), (checksum,)
+            key, fingertip, (checksum,), (checksum,)
         )
         if state == "waiting":
             return True
-        # Apply the checksum even after a miss. Derivation releases the fact
-        # lease after the cell has taken its own claim.
+        # Apply the checksum even after a failed recovery. The current node
+        # then owns its index, while unavailable folder leaves still fail reads.
         self._used_facts.discard(key)
         return False
 
@@ -3195,7 +3343,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                     entry["share"] = share.to_graph()
             else:
                 cfg = node.transformer_config
-                entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy.deepcopy(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
+                from .configuration import copy_modules
+                entry = {"type": "transformer", "path": list(path), "language": cfg.language, "result_celltype": cfg.celltypes.get("result", "mixed"), "schema": cfg.schema, "compilation": copy.deepcopy(cfg.compilation), "objects": copy.deepcopy(cfg.objects), "header": cfg.header, "call_mode": cfg.call_mode, "pins": {p: {"celltype": cfg.celltypes.get(p, "mixed")} for p in sorted(cfg.pins)}, "optional_pins": sorted(cfg.optional_pins), "checksum": {"code": cfg.code_checksum.hex() if cfg.code_checksum else None}, "code": cfg.code if hasattr(cfg.code, "decode") else None, "meta": copy.deepcopy(cfg.meta), "modules": copy_modules(cfg.modules), "globals": copy.deepcopy(cfg.globals), "environment": copy.deepcopy(cfg.environment), "scratch": cfg.scratch, "local": cfg.local, "producers": {p: {"checksum": q.checksum.hex(), "celltype": q.celltype} for p, q in sorted(node.transformer_pin_producers.items())}}
             if node.mount is not None and node.mount.driver == "file": entry["mount"] = node.mount.to_graph()
             if runtime:
                 entry["runtime"] = {"state": node.state, "block_reason": node.block_reason, "checksum": node.current_checksum.hex() if node.current_checksum else None, "exception": type(node.exception).__name__ if node.exception else None, "run": self._runtime_graph_entry(path)}
@@ -3217,6 +3366,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
     def set_graph(self, graph, *, mount_prepared=(), share_prepared=(), download_registrations=()):
         # Acquire the staged durable graph before releasing any live roles.
         claims = []
+        new_module_refholds = {}
+        new_module_refhold_tokens = {}
         for path, node in graph.nodes.items():
             if node.cell_root_producer is not None:
                 claims.append((node.cell_root_producer.checksum, self._node_scratch(node)))
@@ -3228,11 +3379,17 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
                 cfg = node.transformer_config
                 if cfg.code_checksum is not None:
                     claims.append((cfg.code_checksum, False))
-                claims.extend(
-                    (value, False)
-                    for value in cfg.modules.values()
-                    if isinstance(value, Checksum)
-                )
+                set_time = self._set_time_module_claims(path, cfg)
+                new_module_refholds.update(set_time)
+                claims.extend(set_time.values())
+                old_token = self._module_refhold_tokens.get(path)
+                if old_token == cfg.config_token:
+                    for role, claim in self._module_refholds.items():
+                        if role[0] == path and role not in set_time:
+                            new_module_refholds[role] = claim
+                            claims.append(claim)
+                    if path in self._module_refhold_tokens:
+                        new_module_refhold_tokens[path] = old_token
         acquired = []
         try:
             for checksum, scratch in claims:
@@ -3268,13 +3425,8 @@ class Context(RuntimeAPI, Reactive, AttachmentRuntime):
         self._refholds_released = False
         self._code_refholds = {p:n.transformer_config.code_checksum for p,n in graph.nodes.items()
                               if n.kind == "transformer" and n.transformer_config.code_checksum is not None}
-        self._module_refholds = {
-            (path, name): (normalize_checksum(module), False)
-            for path, node in graph.nodes.items()
-            if node.kind == "transformer"
-            for name, module in node.transformer_config.modules.items()
-            if isinstance(module, Checksum)
-        }
+        self._module_refholds = new_module_refholds
+        self._module_refhold_tokens = new_module_refhold_tokens
         self._superseded_refholds = {}
         self._revisions = {p:self._revisions.get(p,0)+1 for p in graph.nodes}
         self._derive_all()
